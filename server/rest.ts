@@ -40,6 +40,7 @@ import {
 	exportCardFile,
 	loadCardFile,
 	moveCardGreeting,
+	readCardRawJson,
 	remapGreetingIndexAfterMove,
 	setCardGreetings,
 	updateCardFields,
@@ -47,6 +48,13 @@ import {
 	type CardExportLoreMode,
 	type CardFieldPatch,
 } from "../src/card.ts";
+import {
+	displayRules,
+	extractRegexScripts,
+	isSkinEnabled,
+	setSkinEnabled,
+	type DisplayRule,
+} from "../src/cardfront.ts";
 import {
 	appendCodexEntry,
 	createCodex,
@@ -1458,6 +1466,42 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					"content-disposition": `attachment; filename="session.jsonl"; filename*=UTF-8''${encodeURIComponent(basename(path))}`,
 				});
 				res.end(content);
+				return true;
+			}
+
+			// ---- 卡前端(一档皮肤,spec 2026-07-22 §7 P1) ----
+			case "GET /api/cardfront": {
+				// 与 GET /api/card 同：当前卡用 resolvePath（支持按路径换卡的非库内路径）
+				const config = loadConfig(host.cwd);
+				const abs = resolvePath(host.cwd, config.card);
+				let rules: DisplayRule[] = [];
+				let charName = "";
+				try {
+					rules = displayRules(extractRegexScripts(readCardRawJson(abs).raw));
+					charName = loadCardFile(abs).name;
+				} catch {
+					// 坏卡/无 extensions:无皮肤即可,不是错误
+					try {
+						charName = loadCardFile(abs).name;
+					} catch {
+						/* ignore */
+					}
+				}
+				sendJson(res, 200, {
+					enabled: isSkinEnabled(config, config.card),
+					hasSkin: rules.length > 0,
+					rules,
+					charName,
+					userName: config.userName,
+				});
+				return true;
+			}
+			case "PUT /api/cardfront": {
+				const body = JSON.parse(await readBody(req)) as { enabled?: boolean };
+				if (typeof body.enabled !== "boolean") throw new Error("enabled 必须是布尔值");
+				const config = loadConfig(host.cwd);
+				writeJsonWithBackup(configPath(host.cwd), setSkinEnabled(config, config.card, body.enabled));
+				sendJson(res, 200, { ok: true, enabled: body.enabled });
 				return true;
 			}
 

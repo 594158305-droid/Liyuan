@@ -263,21 +263,54 @@ function GreetingCard({
 	);
 }
 
+type CardFrontInfo = {
+	enabled: boolean;
+	hasSkin: boolean;
+	rules: unknown[];
+	charName: string;
+	userName: string;
+};
+
 function CardDetail({
 	toast,
 	onBack,
 	libItem,
 	onDelete,
+	onFrontChange,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
 	onBack: () => void;
 	libItem: CardLibItem | undefined;
 	onDelete: () => void;
+	onFrontChange?: () => void;
 }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<CardResponse>("/api/card"), { cacheKey: "/api/card" });
 	const { busy, run } = useAction(toast);
 	// 简介等字段：JSON 与 PNG（tEXt 回写）均可改
 	const fieldEditable = true;
+	const [front, setFront] = useState<CardFrontInfo | null>(null);
+
+	useEffect(() => {
+		let cancelled = false;
+		void (async () => {
+			try {
+				const r = await apiGet<CardFrontInfo>("/api/cardfront");
+				if (!cancelled) setFront(r);
+			} catch {
+				if (!cancelled) setFront(null);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [data?.path, data?.name]);
+
+	const toggleFront = (enabled: boolean) =>
+		run(async () => {
+			await apiPut<{ ok: boolean; enabled: boolean }>("/api/cardfront", { enabled });
+			setFront((f) => (f ? { ...f, enabled } : f));
+			onFrontChange?.();
+		}, enabled ? "已开启原卡界面美化" : "已关闭原卡界面美化");
 
 	const saveField = (patch: Record<string, string>) =>
 		run(async () => {
@@ -367,6 +400,17 @@ function CardDetail({
 								删除角色卡
 							</button>
 						</div>
+						{front?.hasSkin && (
+							<label className="cardfront-toggle field-hint" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+								<input
+									type="checkbox"
+									checked={front.enabled}
+									disabled={busy}
+									onChange={(e) => void toggleFront(e.target.checked)}
+								/>
+								原卡界面美化（卡作者的状态栏/界面样式）
+							</label>
+						)}
 						<div className="field-hint">
 							导出含当前卡字段 + 活跃世界书（挂载书、本卡补充设定、原内嵌书合并去重）。PNG 保留立绘；纯 JSON 卡导出 PNG 时用占位图。
 						</div>
@@ -493,11 +537,14 @@ export function CardPanel({
 	onGoHome,
 	/** 侧栏是否正在显示本面板；每次重新打开时若有当前卡则进详情 */
 	active = true,
+	/** 卡皮肤开关变更后通知 App 重拉显示规则 */
+	onFrontChange,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
 	onEnterChat?: () => void;
 	onGoHome?: () => void;
 	active?: boolean;
+	onFrontChange?: () => void;
 }) {
 	const lib = usePanelData(() => apiGet<CardsResponse>("/api/cards"), { cacheKey: "/api/cards" });
 	const { busy, run } = useAction(toast);
@@ -910,6 +957,7 @@ export function CardPanel({
 						onDelete={() => {
 							if (currentLibItem) del(currentLibItem);
 						}}
+						onFrontChange={onFrontChange}
 					/>
 				</div>
 			)}

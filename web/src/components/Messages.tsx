@@ -7,8 +7,10 @@
  */
 
 import { useEffect, useState } from "react";
+import type { DisplayRule } from "../../../src/cardfront.ts";
 import { attachmentUrl, splitAttachments } from "../attachments.ts";
-import { splitHtmlParts } from "../htmlEmbed.ts";
+import { applyCardSkin } from "../cardSkin.ts";
+import { isFullInterface, splitHtmlParts } from "../htmlEmbed.ts";
 import {
 	looksLikeYamlBlock,
 	splitStatusParts,
@@ -19,6 +21,13 @@ import {
 } from "../statusBlocks.ts";
 import type { WireActivity, WireChoice, WireMsg } from "../wire.ts";
 import { HtmlFrame } from "./HtmlFrame.tsx";
+
+/** 一档卡皮肤：显示向规则 + 宏名（Task 7 由 App 注入） */
+export interface SkinProp {
+	rules: DisplayRule[];
+	charName: string;
+	userName: string;
+}
 import {
 	IconChevronLeft,
 	IconChevronRight,
@@ -153,7 +162,7 @@ function StatusPanel({ tag, body }: { tag: string; body: string }) {
 	);
 }
 
-/** 一段纯文本：再拆 HTML 围栏 / 整页 HTML */
+/** 一段纯文本：再拆 HTML 围栏 / 整页 HTML / 皮肤产物容器块 */
 function TextWithHtml({ text }: { text: string }) {
 	const parts = splitHtmlParts(text);
 	if (parts.length === 1 && parts[0].kind === "text") {
@@ -162,7 +171,8 @@ function TextWithHtml({ text }: { text: string }) {
 	return (
 		<>
 			{parts.map((p, i) => {
-				if (p.kind === "html") return <HtmlFrame key={i} html={p.html} scripts={p.scripts} />;
+				// 皮肤/正文内嵌 HTML：无痕 seamless；agent show_html 通道不经此路径
+				if (p.kind === "html") return <HtmlFrame key={i} html={p.html} scripts={p.scripts} seamless />;
 				if (p.kind === "text" && p.text.trim()) return <Paragraphs key={i} text={p.text} />;
 				return null;
 			})}
@@ -172,18 +182,21 @@ function TextWithHtml({ text }: { text: string }) {
 
 /**
  * 正文渲染：
+ * 0) 卡皮肤正则（显示层，优先于统一状态卡）
  * 1) 角色卡状态标签 → 面板
- * 2) ```html / 整段 HTML 文档 → 沙箱预览
+ * 2) ```html / 整段 HTML / 顶层容器块 → 无痕沙箱
  * 3) 其余 RP 排版
  */
-export function RichContent({ text }: { text: string }) {
-	const statusParts = splitStatusParts(text);
+export function RichContent({ text, skin }: { text: string; skin?: SkinProp | null }) {
+	// 皮肤先行:卡作者的正则先认领它的标签,剩余状态标签才落梨园统一状态卡(spec §7 P1 优先级)
+	const skinned = skin && skin.rules.length > 0 ? applyCardSkin(text, skin.rules, skin) : text;
+	const statusParts = splitStatusParts(skinned);
 	const onlyPlain =
 		statusParts.length === 1 &&
 		statusParts[0].kind === "text" &&
 		!splitHtmlParts(statusParts[0].text).some((p) => p.kind === "html");
 	if (onlyPlain) {
-		const plain = statusParts[0].kind === "text" ? statusParts[0].text : text;
+		const plain = statusParts[0].kind === "text" ? statusParts[0].text : skinned;
 		return <Paragraphs text={stripOrphanStatusTags(plain)} />;
 	}
 	return (
@@ -470,6 +483,8 @@ export interface BubbleProps {
 	swipe?: BubbleSwipe;
 	/** 本条正处于编辑：正文区变输入框，下方「放弃 / 重新生成」 */
 	edit?: BubbleEditState;
+	/** 一档卡皮肤（显示层；缺省 null=与旧行为一致） */
+	skin?: SkinProp | null;
 }
 
 export function Bubble({
@@ -488,6 +503,7 @@ export function Bubble({
 	greetingSwitch,
 	swipe,
 	edit,
+	skin,
 }: BubbleProps) {
 	if (msg.channel === "info") {
 		return <div className="info-line">{msg.text}</div>;
@@ -528,7 +544,7 @@ export function Bubble({
 		);
 	}
 	if (msg.channel === "html") {
-		// 对话流 HTML 底座（show_html）：与正文区隔的可渲染界面
+		// 对话流 HTML 底座（show_html）：agent 调试通道，保持非 seamless
 		if (!msg.html?.trim()) return null;
 		return <HtmlFrame html={msg.html} title={msg.text} scripts={msg.scripts === true} />;
 	}
@@ -543,7 +559,7 @@ export function Bubble({
 					<span className="chip chip-backstage">助手</span>
 				</div>
 				{msg.thinking && <ThinkingBlock text={msg.thinking} />}
-				<RichContent text={msg.text} />
+				<RichContent text={msg.text} skin={skin} />
 				{msg.activities && msg.activities.length > 0 && <ActivityBar activities={msg.activities} />}
 			</div>
 		);
@@ -552,7 +568,7 @@ export function Bubble({
 		return (
 			<details className="import-block">
 				<summary>导入的聊天记录（点开查看）</summary>
-				<RichContent text={msg.text} />
+				<RichContent text={msg.text} skin={skin} />
 			</details>
 		);
 	}
@@ -561,22 +577,27 @@ export function Bubble({
 	const { body, attachments } = isUser ? splitAttachments(msg.text) : { body: msg.text, attachments: [] };
 	const name = msg.name || fallbackName;
 	const editing = !!edit;
+	// 整楼界面：皮肤应用后整条消息即界面（spec §4 落位 1）
+	const skinnedBody = !isUser && skin && skin.rules.length > 0 ? applyCardSkin(body, skin.rules, skin) : body;
+	const stage = !isUser && !editing && isFullInterface(skinnedBody);
 	return (
 		<div
-			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${editing ? "msg-editing" : ""}`}
+			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""}`}
 		>
-			<div className="msg-head">
-				<MsgAvatar src={avatarUrl} name={name} kind={isUser ? "user" : "char"} />
-				<span className={`msg-name ${isUser ? "" : "msg-name-char"}`}>{name}</span>
-				{msg.channel === "greeting" && <span className="chip">开场白</span>}
-				{!isUser && msg.unfinished && (
-					<span className="chip chip-unfinished" title="生成被中断；发送「继续」可接着写">
-						未完成
-					</span>
-				)}
-				{editing && <span className="chip chip-edit">编辑中</span>}
-				{floor !== undefined && <span className="floor">#{floor}</span>}
-			</div>
+			{!stage && (
+				<div className="msg-head">
+					<MsgAvatar src={avatarUrl} name={name} kind={isUser ? "user" : "char"} />
+					<span className={`msg-name ${isUser ? "" : "msg-name-char"}`}>{name}</span>
+					{msg.channel === "greeting" && <span className="chip">开场白</span>}
+					{!isUser && msg.unfinished && (
+						<span className="chip chip-unfinished" title="生成被中断；发送「继续」可接着写">
+							未完成
+						</span>
+					)}
+					{editing && <span className="chip chip-edit">编辑中</span>}
+					{floor !== undefined && <span className="floor">#{floor}</span>}
+				</div>
+			)}
 			{msg.thinking && !editing && <ThinkingBlock text={msg.thinking} defaultOpen={msg.unfinished === true} />}
 			{editing ? (
 				<div className="msg-edit-box">
@@ -610,7 +631,7 @@ export function Bubble({
 				</div>
 			) : (
 				<>
-					{body && (isUser ? <Paragraphs text={body} /> : <RichContent text={body} />)}
+					{body && (isUser ? <Paragraphs text={body} /> : <RichContent text={body} skin={skin} />)}
 					{attachments.length > 0 && (
 						<div className="msg-attach">
 							{attachments.map((a) =>

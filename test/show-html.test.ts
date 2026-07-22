@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { toWireMsg } from "../server/wire.ts";
+import { buildSrcDoc, HEIGHT_REPORTER_SNIPPET } from "../web/src/frameDoc.ts";
 import { looksLikeHtmlDocument, splitHtmlParts } from "../web/src/htmlEmbed.ts";
 
 const names = { charName: "角色", userName: "用户" };
@@ -60,4 +61,36 @@ test("full document", () => {
 	const parts = splitHtmlParts("<!DOCTYPE html><html><body>开场</body></html>");
 	assert.equal(parts.length, 1);
 	assert.equal(parts[0].kind, "html");
+});
+
+test("buildSrcDoc seamless 静态:不强制字体,保留透明底", () => {
+	const doc = buildSrcDoc("<div>x</div>", false, true);
+	assert.ok(!doc.includes("PingFang"));
+	assert.ok(doc.includes("background:transparent"));
+	assert.ok(!doc.includes("liyuanFrameHeight"));
+});
+
+test("buildSrcDoc seamless 脚本帧:注入高度上报", () => {
+	const doc = buildSrcDoc("<div>x</div>", true, true);
+	assert.ok(doc.includes("liyuanFrameHeight"));
+	assert.ok(doc.includes("ResizeObserver"));
+});
+
+test("buildSrcDoc 非 seamless:行为与旧版一致(仍带基础字体)", () => {
+	const doc = buildSrcDoc("<div>x</div>", false, false);
+	assert.ok(doc.includes("PingFang"));
+});
+
+test("HEIGHT_REPORTER_SNIPPET 是自包含 script", () => {
+	assert.ok(HEIGHT_REPORTER_SNIPPET.startsWith("<script>"));
+	assert.ok(HEIGHT_REPORTER_SNIPPET.endsWith("</script>"));
+});
+
+test("sandbox 矩阵:脚本帧无 same-origin 语义由 HtmlFrame 保证;srcdoc CSP 脚本帧含 script-src", () => {
+	const scriptDoc = buildSrcDoc("<div>x</div>", true, true);
+	const staticSeamless = buildSrcDoc("<div>x</div>", false, true);
+	assert.ok(scriptDoc.includes("script-src"));
+	assert.ok(!staticSeamless.includes("script-src"));
+	// 静态 seamless 不注入高度 reporter 脚本
+	assert.ok(!staticSeamless.includes("<script>"));
 });

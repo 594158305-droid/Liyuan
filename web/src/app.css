@@ -5493,6 +5493,48 @@ label.drawer-btn {
 	text-align: center;
 }
 
+/* 卡前端无痕模式(spec §4):宿主零痕迹,幽灵操作悬停浮现 */
+.msg-html-seamless {
+	margin: 0;
+	border: 0;
+	background: transparent;
+	position: relative;
+	max-width: none;
+	box-shadow: none;
+	overflow: visible;
+}
+.msg-html-seamless .msg-html-frame {
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	display: block;
+	width: 100%;
+}
+.msg-html-ghost {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	opacity: 0;
+	transition: opacity 0.15s;
+	z-index: 2;
+}
+.msg-html-seamless:hover .msg-html-ghost,
+.msg-html-seamless:focus-within .msg-html-ghost {
+	opacity: 0.75;
+}
+
+/* 整楼界面(spec §4 落位 1):界面即楼层,无气泡壳 */
+.msg.msg-stage {
+	background: none;
+	border: 0;
+	padding: 0;
+	max-width: none;
+	box-shadow: none;
+}
+.msg.msg-stage .msg-html-seamless {
+	margin: 0;
+}
+
 /* 视频（show_video）：与插图同属舞台美术 */
 .msg-video {
 	margin: 0 0 24px;

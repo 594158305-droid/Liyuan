@@ -242,7 +242,7 @@ git commit -m "feat(cardfront): 提取与筛选卡显示向美化正则(一档�
   - `applyCardSkin(text: string, rules: DisplayRule[], macros: { charName: string; userName: string }): string`
   - 宏语义:find 源里的 `{{user}}/{{char}}`(大小写不敏感)先做**正则转义后**替换;replace 里的宏做字面替换;replace 里的 `{{match}}` 映射为 `$&`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 // test/cardSkin.test.ts
@@ -287,12 +287,12 @@ test("空规则原文返回", () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `node --test test/cardSkin.test.ts`
 Expected: FAIL,模块不存在
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```ts
 // web/src/cardSkin.ts

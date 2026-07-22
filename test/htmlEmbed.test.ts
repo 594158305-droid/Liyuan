@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { looksLikeHtmlDocument, splitHtmlParts } from "../web/src/htmlEmbed.ts";
+import { isFullInterface, looksLikeHtmlDocument, splitHtmlParts } from "../web/src/htmlEmbed.ts";
 
 test("splitHtmlParts: plain text", () => {
 	const p = splitHtmlParts("hello\n\nworld");
@@ -30,4 +30,51 @@ test("splitHtmlParts: scripts fence", () => {
 test("looksLikeHtmlDocument", () => {
 	assert.equal(looksLikeHtmlDocument("<!DOCTYPE html><html></html>"), true);
 	assert.equal(looksLikeHtmlDocument("not html"), false);
+});
+
+test("splitHtmlParts: 正文中的顶层 <div> 块切为 html 段(皮肤产物形态)", () => {
+	const text = '雨停了。\n<div style="x">\n<status>\nHP: 80\n</status>\n</div>\n她抬头。';
+	const p = splitHtmlParts(text);
+	assert.equal(p.length, 3);
+	assert.equal(p[0].kind, "text");
+	assert.equal(p[1].kind, "html");
+	if (p[1].kind === "html") {
+		assert.ok(p[1].html.startsWith("<div"));
+		assert.ok(p[1].html.endsWith("</div>"));
+		assert.equal(p[1].scripts, false);
+	}
+	assert.equal(p[2].kind, "text");
+});
+
+test("splitHtmlParts: 嵌套同名 div 深度配平", () => {
+	const text = "<div><div>内</div></div>后文";
+	const p = splitHtmlParts(text);
+	assert.equal(p[0].kind, "html");
+	if (p[0].kind === "html") assert.equal(p[0].html, "<div><div>内</div></div>");
+	assert.equal(p[1].kind, "text");
+});
+
+test("splitHtmlParts: 自定义标签不触发块切分(留给 statusBlocks)", () => {
+	const p = splitHtmlParts("<StatusBlock>\nHP: 80\n</StatusBlock>");
+	assert.equal(p.length, 1);
+	assert.equal(p[0].kind, "text");
+});
+
+test("splitHtmlParts: 行中 <div>(非行首)不切,避免误伤叙事里的尖括号", () => {
+	const p = splitHtmlParts("他说 <div> 不是标签");
+	assert.equal(p.length, 1);
+	assert.equal(p[0].kind, "text");
+});
+
+test("splitHtmlParts: 未闭合 div 当普通文本", () => {
+	const p = splitHtmlParts("<div>没有闭合");
+	assert.equal(p.length, 1);
+	assert.equal(p[0].kind, "text");
+});
+
+test("isFullInterface: 整条消息即界面", () => {
+	assert.equal(isFullInterface('<div style="x">全屏界面</div>'), true);
+	assert.equal(isFullInterface("<!DOCTYPE html><html><body>x</body></html>"), true);
+	assert.equal(isFullInterface("正文\n<div>局部</div>"), false);
+	assert.equal(isFullInterface("纯正文"), false);
 });

@@ -67,7 +67,9 @@ import {
 	ThinkingBlock,
 	toolLabel,
 	type ChatMsg,
+	type SkinProp,
 } from "./components/Messages.tsx";
+import type { DisplayRule } from "../../src/cardfront.ts";
 import { PanelDock } from "./components/PanelDock.tsx";
 import { PersonaPanel } from "./components/PersonaPanel.tsx";
 import { PowersPanel } from "./components/PowersPanel.tsx";
@@ -500,6 +502,23 @@ export default function App() {
 		return [...ms, incoming];
 	};
 
+	/** 一档卡皮肤：显示向规则（启用且有规则时注入对话流） */
+	const [cardSkin, setCardSkin] = useState<SkinProp | null>(null);
+	const refreshCardFront = useCallback(async () => {
+		try {
+			const r = await apiGet<{
+				enabled: boolean;
+				hasSkin: boolean;
+				rules: DisplayRule[];
+				charName: string;
+				userName: string;
+			}>("/api/cardfront");
+			setCardSkin(r.enabled && r.hasSkin ? { rules: r.rules, charName: r.charName, userName: r.userName } : null);
+		} catch {
+			setCardSkin(null);
+		}
+	}, []);
+
 	/** 拉角色卡立绘 + 当前身份头像（hello / 切卡后） */
 	const refreshAvatars = useCallback(() => {
 		void (async () => {
@@ -537,6 +556,7 @@ export default function App() {
 					setMsgEdit(null); // 会话对齐后关闭内联编辑
 					setWorldState(frame.state);
 					setStats(frame.stats);
+					void refreshCardFront(); // 切卡/重连后重拉显示向皮肤
 					agentPanelsRef.current = frame.panels ?? [];
 					setAgentPanels(agentPanelsRef.current);
 					// 恢复/切换后左栏若停在已不存在的 agent 面板上：收起
@@ -826,7 +846,7 @@ export default function App() {
 					break;
 			}
 		},
-		[pushToast, refreshAvatars],
+		[pushToast, refreshAvatars, refreshCardFront],
 	);
 
 	const ws = useWire(onFrame, setConn);
@@ -1257,7 +1277,15 @@ export default function App() {
 			case "settings":
 				return <SettingsPanel toast={pushToast} />;
 			case "card":
-				return <CardPanel toast={pushToast} onEnterChat={dismissWelcome} onGoHome={showWelcome} active={rightPanel === "card"} />;
+				return (
+					<CardPanel
+						toast={pushToast}
+						onEnterChat={dismissWelcome}
+						onGoHome={showWelcome}
+						active={rightPanel === "card"}
+						onFrontChange={() => void refreshCardFront()}
+					/>
+				);
 			case "lorebook":
 				return <LorebookPanel toast={pushToast} />;
 			case "persona":
@@ -1696,6 +1724,7 @@ export default function App() {
 												floor={b.floor}
 												fallbackName={b.msg.channel === "user" ? userName || "你" : charName}
 												avatarUrl={b.msg.channel === "user" ? userAvatarUrl : charAvatarUrl}
+												skin={cardSkin}
 												onReroll={
 													!busy &&
 													!msgEdit &&
@@ -1818,7 +1847,7 @@ export default function App() {
 									</div>
 									{liveActs.length > 0 && <LiveSteps activities={liveActs} />}
 									{streamThinking && <ThinkingBlock text={streamThinking} live={thinkingLive} />}
-									{streamText && <RichContent text={streamText} />}
+									{streamText && <RichContent text={streamText} skin={cardSkin} />}
 									{toolNote && (
 										<div className="info-line pulse" style={{ margin: "0.4rem 0 0" }}>
 											{toolNote}
