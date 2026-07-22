@@ -10,10 +10,10 @@ import { useEffect, useState } from "react";
 import type { DisplayRule } from "../../../src/cardfront.ts";
 import { attachmentUrl, splitAttachments } from "../attachments.ts";
 import { applyCardSkin } from "../cardSkin.ts";
-import { isFullInterface, splitHtmlParts } from "../htmlEmbed.ts";
+import { isFullInterface } from "../htmlEmbed.ts";
+import { splitRichContentParts, type SkinMacros } from "../richContentParts.ts";
 import {
 	looksLikeYamlBlock,
-	splitStatusParts,
 	statusClassSuffix,
 	statusLabel,
 	stripOrphanStatusTags,
@@ -23,11 +23,7 @@ import type { WireActivity, WireChoice, WireMsg } from "../wire.ts";
 import { HtmlFrame } from "./HtmlFrame.tsx";
 
 /** 一档卡皮肤：显示向规则 + 宏名（Task 7 由 App 注入） */
-export interface SkinProp {
-	rules: DisplayRule[];
-	charName: string;
-	userName: string;
-}
+export type SkinProp = SkinMacros;
 import {
 	IconChevronLeft,
 	IconChevronRight,
@@ -162,50 +158,23 @@ function StatusPanel({ tag, body }: { tag: string; body: string }) {
 	);
 }
 
-/** 一段纯文本：再拆 HTML 围栏 / 整页 HTML / 皮肤产物容器块 */
-function TextWithHtml({ text }: { text: string }) {
-	const parts = splitHtmlParts(text);
-	if (parts.length === 1 && parts[0].kind === "text") {
+/**
+ * 正文渲染（真路径 = splitRichContentParts）：
+ * skin → HTML 块（保护皮肤内 <status>）→ 剩余文本上的状态面板 → RP 排版
+ */
+export function RichContent({ text, skin }: { text: string; skin?: SkinProp | null }) {
+	const parts = splitRichContentParts(text, skin);
+	const onlyPlain = parts.length === 1 && parts[0].kind === "text";
+	if (onlyPlain) {
 		return <Paragraphs text={parts[0].text} />;
 	}
 	return (
 		<>
 			{parts.map((p, i) => {
+				if (p.kind === "status") return <StatusPanel key={i} tag={p.tag} body={p.body} />;
 				// 皮肤/正文内嵌 HTML：无痕 seamless；agent show_html 通道不经此路径
 				if (p.kind === "html") return <HtmlFrame key={i} html={p.html} scripts={p.scripts} seamless />;
 				if (p.kind === "text" && p.text.trim()) return <Paragraphs key={i} text={p.text} />;
-				return null;
-			})}
-		</>
-	);
-}
-
-/**
- * 正文渲染：
- * 0) 卡皮肤正则（显示层，优先于统一状态卡）
- * 1) 角色卡状态标签 → 面板
- * 2) ```html / 整段 HTML / 顶层容器块 → 无痕沙箱
- * 3) 其余 RP 排版
- */
-export function RichContent({ text, skin }: { text: string; skin?: SkinProp | null }) {
-	// 皮肤先行:卡作者的正则先认领它的标签,剩余状态标签才落梨园统一状态卡(spec §7 P1 优先级)
-	const skinned = skin && skin.rules.length > 0 ? applyCardSkin(text, skin.rules, skin) : text;
-	const statusParts = splitStatusParts(skinned);
-	const onlyPlain =
-		statusParts.length === 1 &&
-		statusParts[0].kind === "text" &&
-		!splitHtmlParts(statusParts[0].text).some((p) => p.kind === "html");
-	if (onlyPlain) {
-		const plain = statusParts[0].kind === "text" ? statusParts[0].text : skinned;
-		return <Paragraphs text={stripOrphanStatusTags(plain)} />;
-	}
-	return (
-		<>
-			{statusParts.map((p, i) => {
-				if (p.kind === "status") return <StatusPanel key={i} tag={p.tag} body={p.body} />;
-				if (p.kind === "text" && p.text.trim()) {
-					return <TextWithHtml key={i} text={stripOrphanStatusTags(p.text)} />;
-				}
 				return null;
 			})}
 		</>
