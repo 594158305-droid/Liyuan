@@ -105,6 +105,8 @@ export interface RpConfig {
 	 * 剧情尺度大时可在助手面板单独指定宽容系模型（拒答风险与剧情模型解耦）。
 	 */
 	assistantModel?: { provider: string; id: string };
+	/** 一档卡皮肤:显示向美化正则被用户关闭的卡路径列表(默认开;spec 2026-07-22 §7 P1) */
+	cardSkinOff?: string[];
 }
 
 export const DEFAULT_CONFIG: RpConfig = {
