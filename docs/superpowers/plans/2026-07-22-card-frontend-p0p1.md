@@ -331,12 +331,12 @@ export function applyCardSkin(
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `node --test test/cardSkin.test.ts`
 Expected: PASS(6 tests)
 
-- [ ] **Step 5: 全量回归 + commit**
+- [x] **Step 5: 全量回归 + commit**
 
 ```bash
 node --test test/*.test.ts
