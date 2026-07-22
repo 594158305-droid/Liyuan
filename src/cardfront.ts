@@ -49,6 +49,14 @@ export function displayRules(scripts: unknown[]): DisplayRule[] {
 			console.warn(`[cardfront] 规则「${String(r.scriptName ?? "?")}」用了 trimStrings,v1 不支持,跳过`);
 			continue;
 		}
+		if (typeof r.substituteRegex === "number" && r.substituteRegex !== 0) {
+			console.warn(`[cardfront] 规则「${String(r.scriptName ?? "?")}」用了 substituteRegex,v1 不支持,跳过`);
+			continue;
+		}
+		// v1 明确不支持深度限定,忽略但提示(规则仍应用)
+		if (r.minDepth != null || r.maxDepth != null) {
+			console.warn(`[cardfront] 规则「${String(r.scriptName ?? "?")}」的深度限定被忽略`);
+		}
 		const find = typeof r.findRegex === "string" ? r.findRegex : "";
 		if (!find.trim()) continue;
 		const parsed = parseFindRegex(find);

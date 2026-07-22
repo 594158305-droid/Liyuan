@@ -54,13 +54,29 @@ test("displayRules: 裸模式串(无 /…/ 包裹)按字面正则源处理", () 
 });
 
 test("displayRules: 非法正则跳过不抛", () => {
-	const rules = displayRules([{ ...skinScript, findRegex: "/([unclosed/g" }, skinScript]);
-	assert.equal(rules.length, 1);
+	const warnings: string[] = [];
+	const oldWarn = console.warn;
+	try {
+		console.warn = (...args) => warnings.push(args.join(" "));
+		const rules = displayRules([{ ...skinScript, findRegex: "/([unclosed/g" }, skinScript]);
+		assert.equal(rules.length, 1);
+		assert.ok(warnings.some((w) => w.includes("正则无法解析")));
+	} finally {
+		console.warn = oldWarn;
+	}
 });
 
 test("displayRules: trimStrings 非空的规则整条跳过(v1 不支持,宁缺毋错)", () => {
-	const rules = displayRules([{ ...skinScript, trimStrings: ["x"] }]);
-	assert.equal(rules.length, 0);
+	const warnings: string[] = [];
+	const oldWarn = console.warn;
+	try {
+		console.warn = (...args) => warnings.push(args.join(" "));
+		const rules = displayRules([{ ...skinScript, trimStrings: ["x"] }]);
+		assert.equal(rules.length, 0);
+		assert.ok(warnings.some((w) => w.includes("trimStrings")));
+	} finally {
+		console.warn = oldWarn;
+	}
 });
 
 test("skin 开关:默认开,cardSkinOff 关,setSkinEnabled 幂等往返", () => {
@@ -71,4 +87,30 @@ test("skin 开关:默认开,cardSkinOff 关,setSkinEnabled 幂等往返", () => 
 	const on = setSkinEnabled(off, "assets/cards/a.png", true);
 	assert.equal(isSkinEnabled(on, "assets/cards/a.png"), true);
 	assert.deepEqual(on.cardSkinOff, []);
+});
+
+test("displayRules: substituteRegex 非零的规则整条跳过,warn", () => {
+	const warnings: string[] = [];
+	const oldWarn = console.warn;
+	try {
+		console.warn = (...args) => warnings.push(args.join(" "));
+		const rules = displayRules([{ ...skinScript, substituteRegex: 1 }]);
+		assert.equal(rules.length, 0);
+		assert.ok(warnings.some((w) => w.includes("substituteRegex")));
+	} finally {
+		console.warn = oldWarn;
+	}
+});
+
+test("displayRules: minDepth/maxDepth 字段忽略但 warn,规则仍应用", () => {
+	const warnings: string[] = [];
+	const oldWarn = console.warn;
+	try {
+		console.warn = (...args) => warnings.push(args.join(" "));
+		const rules = displayRules([{ ...skinScript, minDepth: 2 }]);
+		assert.equal(rules.length, 1);
+		assert.ok(warnings.some((w) => w.includes("深度限定")));
+	} finally {
+		console.warn = oldWarn;
+	}
 });
