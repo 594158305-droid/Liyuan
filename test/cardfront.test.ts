@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { displayRules, extractRegexScripts, isSkinEnabled, setSkinEnabled } from "../src/cardfront.ts";
+import {
+	buildCardFrontSnapshot,
+	displayRules,
+	extractRegexScripts,
+	isSkinEnabled,
+	setSkinEnabled,
+} from "../src/cardfront.ts";
 
 /** 淫宫美人录实卡形态(内联夹具,不读盘,测试自包含) */
 const skinScript = {
@@ -113,4 +119,31 @@ test("displayRules: minDepth/maxDepth 字段忽略但 warn,规则仍应用", () 
 	} finally {
 		console.warn = oldWarn;
 	}
+});
+
+test("buildCardFrontSnapshot: hello/REST 同源载荷", () => {
+	const raw = { data: { name: "美人录", extensions: { regex_scripts: [skinScript] } } };
+	const snap = buildCardFrontSnapshot(
+		{ card: "assets/cards/a.png", userName: "旅人" },
+		raw,
+		"美人录",
+	);
+	assert.equal(snap.enabled, true);
+	assert.equal(snap.hasSkin, true);
+	assert.equal(snap.rules.length, 1);
+	assert.equal(snap.charName, "美人录");
+	assert.equal(snap.userName, "旅人");
+
+	const off = buildCardFrontSnapshot(
+		{ card: "assets/cards/a.png", cardSkinOff: ["assets/cards/a.png"], userName: "旅人" },
+		raw,
+		"美人录",
+	);
+	assert.equal(off.enabled, false);
+	assert.equal(off.hasSkin, true); // 卡上有皮;前端用 enabled 决定是否应用
+	assert.equal(off.rules.length, 1);
+
+	const empty = buildCardFrontSnapshot({ card: "x", userName: "u" }, null, "");
+	assert.equal(empty.hasSkin, false);
+	assert.deepEqual(empty.rules, []);
 });

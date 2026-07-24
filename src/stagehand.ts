@@ -257,7 +257,10 @@ export function buildStoryFloors(messages: unknown[], view: "display" | "raw" = 
 		}
 		if (msg.role === "custom" && msg.customType === "rp-greeting" && msg.display !== false) {
 			if (!text) continue;
-			out.push({ floor: ++floor, kind: "开场白", text });
+			// 与 wire 开场白同源：display 视图走标签策略，raw 保留原文
+			const shown = view === "raw" ? text : displayAssistantText(text);
+			if (!shown) continue;
+			out.push({ floor: ++floor, kind: "开场白", text: shown });
 		}
 	}
 	return out;

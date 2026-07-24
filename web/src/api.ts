@@ -37,20 +37,23 @@ function invalidateAfterWrite(writePath: string): void {
 		// 卡内嵌世界书另存并挂载：同时改 lorebooks 文件列表 + config 挂载
 		{
 			test: /^\/api\/card\/import-embedded-lore$/,
-			prefixes: ["/api/lorebook", "/api/lorebooks", "/api/config", "/api/card", "/api/cards"],
+			prefixes: ["/api/lorebook", "/api/lorebooks", "/api/config", "/api/card", "/api/cards", "/api/cardfront"],
 		},
-		{ test: /^\/api\/cards?/, prefixes: ["/api/card", "/api/cards"] },
+		// 换卡 / 卡详情写：必须连带清 cardfront，否则 180s 内仍吃上一张卡的皮肤缓存
+		{ test: /^\/api\/cardfront/, prefixes: ["/api/cardfront"] },
+		{ test: /^\/api\/cards?/, prefixes: ["/api/card", "/api/cards", "/api/cardfront"] },
 		{ test: /^\/api\/persona/, prefixes: ["/api/personas", "/api/config"] },
 		{ test: /^\/api\/lorebook/, prefixes: ["/api/lorebook", "/api/lorebooks", "/api/config"] },
 		{ test: /^\/api\/codex/, prefixes: ["/api/codex"] },
 		{ test: /^\/api\/preset/, prefixes: ["/api/preset", "/api/presets"] },
 		{ test: /^\/api\/mcp/, prefixes: ["/api/mcp"] },
 		{ test: /^\/api\/skills/, prefixes: ["/api/skills"] },
+		{ test: /^\/api\/memory/, prefixes: ["/api/memory"] },
 		{ test: /^\/api\/agent-/, prefixes: ["/api/agent-config", "/api/agent-profiles", "/api/models"] },
 		{ test: /^\/api\/models/, prefixes: ["/api/models", "/api/agent-config"] },
 		{ test: /^\/api\/channels/, prefixes: ["/api/models", "/api/agent-config", "/api/agent-profiles"] },
 		{ test: /^\/api\/config/, prefixes: ["/api/config"] },
-		{ test: /^\/api\/upload/, prefixes: ["/api/uploads", "/api/media"] },
+		{ test: /^\/api\/upload/, prefixes: ["/api/uploads"] },
 	];
 	let hit = false;
 	for (const r of rules) {
@@ -122,7 +125,7 @@ export async function apiGet<T>(path: string, opts?: { bypassCache?: boolean }):
 /** 按面板 id 清相关 GET 缓存（手动刷新按钮用，避免 remount 后 peek 仍是旧数据） */
 export function apiGetCacheClearForPanel(panelId: string): void {
 	const map: Record<string, string[]> = {
-		card: ["/api/card", "/api/cards"],
+		card: ["/api/card", "/api/cards", "/api/cardfront"],
 		lorebook: ["/api/lorebook", "/api/lorebooks", "/api/config"],
 		codex: ["/api/codex"],
 		persona: ["/api/personas", "/api/config"],
@@ -130,7 +133,8 @@ export function apiGetCacheClearForPanel(panelId: string): void {
 		connect: ["/api/models", "/api/agent-config", "/api/agent-profiles"],
 		powers: ["/api/mcp", "/api/skills"],
 		settings: ["/api/config"],
-		uploads: ["/api/uploads", "/api/media"],
+		// 媒体列表挂在 GET /api/uploads 的 media 字段，无独立 /api/media
+		uploads: ["/api/uploads"],
 		worldline: ["/api/worldline"],
 	};
 	const prefixes = map[panelId];
@@ -164,7 +168,6 @@ export function prefetchPanelApis(): void {
 		"/api/agent-config",
 		"/api/agent-profiles",
 		"/api/uploads",
-		"/api/media",
 	];
 	for (const p of paths) void apiGet(p).catch(() => {});
 }

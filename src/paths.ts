@@ -60,6 +60,8 @@ export const DIRS = {
 	skills: ".liyuan-skills",
 	uploads: ".liyuan-uploads",
 	worldline: ".liyuan-worldline",
+	/** 内置向量记忆（正文库 / 外部资料库） */
+	memory: ".liyuan-memory",
 } as const;
 
 const LEGACY_DIRS: Record<keyof typeof DIRS, string> = {
@@ -74,6 +76,7 @@ const LEGACY_DIRS: Record<keyof typeof DIRS, string> = {
 	skills: ".rp-skills",
 	uploads: ".rp-uploads",
 	worldline: ".rp-worldline",
+	memory: ".rp-memory", // 未使用过；占位
 };
 
 export const PERSONAS_FILE = ".liyuan-personas.json";

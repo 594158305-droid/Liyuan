@@ -8,6 +8,8 @@ import {
 	discoverFoldTagsFromTexts,
 	displayAssistantText,
 	extractScaffoldThinking,
+	isHtmlDisplayPayload,
+	prepareDisplayText,
 	resetDisplayTagExtras,
 } from "../src/postprocess.ts";
 
@@ -134,4 +136,66 @@ test("strip 策略：仪式回显整块消失", () => {
 	assert.ok(out.includes("*叙事。*"));
 	assert.ok(!out.includes("最高授权"));
 	assert.ok(!out.includes("haurki"));
+});
+
+test("Options unwrap 后保留围栏供前端 markdown 渲染（剥尖括号、留 ```）", () => {
+	const raw = `洛清霜说完。\n\n<Options>\n\`\`\`\n选择1: 【留下】\n选择2: 【下山】\n\`\`\`\n</Options>`;
+	const out = displayAssistantText(raw);
+	assert.ok(!out.includes("<Options>"));
+	assert.ok(!out.includes("</Options>"));
+	assert.ok(out.includes("```"), "围栏留给前端代码块");
+	assert.ok(out.includes("选择1: 【留下】"));
+	assert.ok(out.includes("洛清霜说完"));
+});
+
+test("状态栏 body 内 summary 等标签 unwrap，围栏保留", () => {
+	const body = `<summary>基本信息 - 旅人</summary>\n\n\`\`\`\n姓名: 旅人\n\`\`\`\n\n<summary>互动角色</summary>\n\n\`\`\`\n姓名: 苏杏儿\n\`\`\``;
+	const out = displayAssistantText(body);
+	assert.ok(!out.includes("<summary>"));
+	assert.ok(!out.includes("</summary>"));
+	assert.ok(out.includes("基本信息 - 旅人"));
+	assert.ok(out.includes("```"));
+	assert.ok(out.includes("姓名: 旅人"));
+	assert.ok(out.includes("互动角色"));
+});
+
+test("prepareDisplayText: 先皮肤再策略——state 标记不被 unwrap 拆掉", () => {
+	const raw = `叙事一句。\n\n<state1>\n时间: 清晨\n地点: 街道\n</state1>`;
+	// 无皮肤：unwrap 掉 state1
+	const plain = prepareDisplayText(raw, null);
+	assert.ok(!plain.includes("<state1>"));
+	assert.ok(plain.includes("时间: 清晨"));
+
+	// 有皮肤：先换成围栏 HTML，再跳过 unwrap
+	const skin = {
+		rules: [
+			{
+				name: "折叠状态",
+				source: "<(state\\d+)>([\\s\\S]+?)<\\/\\1>",
+				flags: "g",
+				replace: "```html\n<!DOCTYPE html><html><body><div class=\"ui\">$2</div></body></html>\n```",
+			},
+		],
+		charName: "卡",
+		userName: "旅人",
+	};
+	const skinned = prepareDisplayText(raw, skin);
+	assert.ok(isHtmlDisplayPayload(skinned), "应识别为 HTML 载荷");
+	assert.ok(skinned.includes("<!DOCTYPE html>") || skinned.includes("<!doctype html>") || skinned.includes("```html"));
+	assert.ok(skinned.includes("时间: 清晨"));
+	assert.ok(!skinned.includes("<state1>"), "标记应已被正则吃掉");
+});
+
+test("prepareDisplayText: 开场前缀+占位符经皮肤成围栏文档", () => {
+	const raw = `【开场 · LWS】\n【本世界身份认证】`;
+	const html = `<!doctype html>\n<html><head></head><body><h1>性别</h1><script>1</script></body></html>`;
+	const skin = {
+		rules: [{ name: "开局", source: "【本世界身份认证】", flags: "g", replace: "```\n" + html + "\n```" }],
+		charName: "LWS",
+		userName: "旅人",
+	};
+	const out = prepareDisplayText(raw, skin);
+	assert.ok(isHtmlDisplayPayload(out));
+	assert.ok(out.includes("性别"));
+	assert.ok(out.includes("【开场"));
 });

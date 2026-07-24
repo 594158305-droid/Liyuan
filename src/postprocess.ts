@@ -1,17 +1,28 @@
 /**
  * 输出后处理——**策略引擎**，不靠无穷标签白名单。
  *
- * 预设会发明任意标签（thinking / 正文 / scene / 自定义中文…）。枚举不过来，因此：
+ * 对照酒馆源码(SillyTavern public/script.js + chats.js)：
+ * - 酒馆**没有**社区卡标签清单。默认 `encode_tags: false` 时，消息走 markdown→HTML→DOMPurify；
+ *   未知标签变成 `HTMLUnknownElement`（尖括号不显示成字，内容仍可见），不是逐标签登记。
+ * - 梨园不渲染任意 HTML 标签树，用策略代替：未知标签 **unwrap**（剥壳留内容），效果对齐
+ *   「标签不刺眼、内容还在」；状态类 **panel** 保留给前端画状态栏；思考类 **fold**。
+ *
+ * 预设会发明任意标签（thinking / 正文 / scene / Options / 自定义中文…）。枚举不过来，因此：
  *
  * | 策略 | 显示 | 送模历史 | 判定 |
  * |------|------|----------|------|
  * | **fold** | 进思维链折叠，正文去掉 | 整块删除 | 名称像思考/草稿/分析，或预设自动发现 |
  * | **panel** | 保留标签给前端画状态卡 | 整块删除 | 名称像状态栏 |
  * | **strip** | 标签+内容都隐去 | 整块删除 | 名称像 jailbreak/仪式回显 |
- * | **unwrap** | 去掉标签、**内容当正文渲染** | 去掉标签留内容 | **默认**——所有未识别标签 |
+ * | **unwrap** | 去掉标签、**内容当正文渲染** | 去掉标签留内容 | **默认**——所有未识别标签（含 Options 等） |
  *
  * 新标签默认 unwrap：正文不丢、标签不刺眼；真要折叠的靠名称模式或从预设发现。
+ * **所有上屏通道**必须走 prepareDisplayText（先皮肤正则，再策略）：
+ * 禁止 unwrap 先于卡正则，否则 <stateN> 等标记被拆掉，HTML 界面规则永远打空。
  */
+
+import type { DisplayRule } from "./cardfront.ts";
+import { applyCardSkin } from "./cardSkin.ts";
 
 export type TagPolicy = "fold" | "panel" | "strip" | "unwrap";
 
@@ -243,6 +254,12 @@ export function cleanAssistantText(text: string): string {
 /**
  * 显示层：fold→思维链另抽；strip 扔；panel 保留；其余 unwrap。
  * 另：HTML 注释、单独成行的「### 正文」类分隔。
+ *
+ * 标签 unwrap 后留下的 ```…``` 围栏**故意保留**：前端 markdown 渲染成代码块，
+ * 与正文区分（Options 卡等）；不在服务端剥掉。
+ *
+ * **注意**：卡显示正则（stateN→HTML 等）必须在本函数**之前**应用
+ * （见 prepareDisplayText），否则 unwrap 会先拆掉正则要匹配的标记。
  */
 export function displayAssistantText(text: string): string {
 	let t = applyPolicies(text, { keepPanel: true, collectFold: false }).text;
@@ -254,6 +271,49 @@ export function displayAssistantText(text: string): string {
 		return classifyTag(tag) === "panel" ? line : "";
 	});
 	return tidyWhitespace(t);
+}
+
+/** wire / 显示管线注入的一档皮肤 */
+export type DisplaySkin = {
+	rules: DisplayRule[];
+	charName: string;
+	userName: string;
+};
+
+/**
+ * 皮肤产物是否已是 HTML 界面载荷——此后禁止再跑标签 unwrap（会撕碎 div/script）。
+ */
+export function isHtmlDisplayPayload(text: string): boolean {
+	if (!text) return false;
+	const t = text.trim();
+	// 围栏整页（可带开场前缀）
+	if (/(?:^|\n)```[^\n`]*\r?\n\s*<!doctype\s+html/i.test(text) && /<\/html\s*>/i.test(text)) return true;
+	if (/(?:^|\n)```[^\n`]*\r?\n\s*<html[\s>]/i.test(text) && /<\/html\s*>/i.test(text)) return true;
+	if (/(?:^|\n)```html\b/i.test(text) && text.length > 80) return true;
+	// 裸整页
+	const head = t.slice(0, 80).toLowerCase();
+	if (head.startsWith("<!doctype html") || head.startsWith("<html")) return true;
+	// 皮肤包的大块 styled div（淫宫状态栏等）
+	if (/<div\b[^>]*\bstyle\s*=/i.test(text) && /<\/div>/i.test(text) && text.length > 60) return true;
+	return false;
+}
+
+/**
+ * 上屏正文唯一入口（wire narrative/greeting/import）：
+ * 1) **先** apply 卡显示正则（标记仍在）
+ * 2) 若已是 HTML 界面载荷 → 原样交出（前端 HtmlFrame）
+ * 3) 否则再 displayAssistantText（fold/panel/unwrap）
+ */
+export function prepareDisplayText(text: string, skin?: DisplaySkin | null): string {
+	if (!text) return "";
+	let t = text;
+	if (skin?.rules?.length) {
+		t = applyCardSkin(t, skin.rules, { charName: skin.charName, userName: skin.userName });
+	}
+	if (isHtmlDisplayPayload(t)) {
+		return t;
+	}
+	return displayAssistantText(t);
 }
 
 /**

@@ -2,14 +2,20 @@
  * 对话流正文切分（RichContent 真路径，纯函数可测）。
  *
  * 顺序纪律（spec §7 P1 + skeptic fix）：
- * 1) 卡皮肤正则先认领 StatusBlock 等 → 卡作者 HTML
- * 2) 顶层标准容器 / 围栏 HTML 先切出（保护皮肤产物内的 <status> 不被状态面板撕碎）
- * 3) 仅在剩余纯文本上再跑 splitStatusParts → 梨园统一状态卡
+ * 1) 卡皮肤正则先认领 StatusBlock / 开局标记等 → 卡作者 HTML
+ * 2) 整页围栏 HTML 文档整段认领（Living With Slaves 等），禁止撕碎
+ * 3) 顶层标准容器 / 短 ```html 围栏切出
+ * 4) 仅在剩余纯文本上再跑 splitStatusParts → 梨园统一状态卡
+ *
+ * **禁止二次皮肤**：wire 侧 prepareDisplayText 已应用显示正则。
+ * 凡人修仙等程序卡 HTML 内仍含占位串 `lucklyjkop`，再跑会把 2.6MB 脚本再嵌一遍 →
+ * `Identifier has already been declared` → 按钮全死。
  */
 
 import type { DisplayRule } from "../../src/cardfront.ts";
+import { isHtmlDisplayPayload } from "../../src/postprocess.ts";
 import { applyCardSkin } from "./cardSkin.ts";
-import { splitHtmlParts } from "./htmlEmbed.ts";
+import { findFencedHtmlDocument, looksLikeHtmlDocument, splitHtmlParts } from "./htmlEmbed.ts";
 import { splitStatusParts, stripOrphanStatusTags } from "./statusBlocks.ts";
 
 export type RichPart =
@@ -19,13 +25,41 @@ export type RichPart =
 
 export type SkinMacros = { rules: DisplayRule[]; charName: string; userName: string };
 
+function textToRichParts(text: string): RichPart[] {
+	const out: RichPart[] = [];
+	for (const s of splitStatusParts(text)) {
+		if (s.kind === "status") {
+			out.push({ kind: "status", tag: s.tag, body: s.body });
+		} else if (s.text.trim()) {
+			out.push({ kind: "text", text: stripOrphanStatusTags(s.text) });
+		}
+	}
+	return out;
+}
+
+/** 正文是否已是皮肤/围栏产物（再套规则会二次替换） */
+function alreadyDisplayHtml(text: string): boolean {
+	if (!text) return false;
+	if (isHtmlDisplayPayload(text)) return true;
+	if (looksLikeHtmlDocument(text.trim())) return true;
+	if (findFencedHtmlDocument(text)) return true;
+	return false;
+}
+
 /**
  * 与 Messages.RichContent 同序：skin → HTML 块 → 状态标签 → 纯文本。
  * 返回可直接映射到 Paragraphs / StatusPanel / HtmlFrame 的序列。
+ *
+ * HTML 认领统一走 splitHtmlParts（含多份连续 ```html 文档各自成帧）。
+ *
+ * @param skin 仅在「原文尚未皮肤化」时使用（流式半截、或未走 wire 的本地文本）。
+ *             已由 prepareDisplayText 处理过的消息务必仍可传入 skin，但会被跳过。
  */
 export function splitRichContentParts(text: string, skin?: SkinMacros | null): RichPart[] {
-	const skinned = skin && skin.rules.length > 0 ? applyCardSkin(text, skin.rules, skin) : text;
-	// 先认领 HTML：皮肤产物（div 包 status）与 ```html 围栏整块进 html 段
+	const needSkin = Boolean(skin && skin.rules.length > 0 && !alreadyDisplayHtml(text));
+	const skinned = needSkin ? applyCardSkin(text, skin!.rules, skin!) : text;
+
+	// 围栏整页 / 多状态栏 / 短 ```html / 顶层 div —— 全由 splitHtmlParts 认领（可递归多帧）
 	const htmlClaimed = splitHtmlParts(skinned);
 	const out: RichPart[] = [];
 	for (const p of htmlClaimed) {
@@ -33,14 +67,7 @@ export function splitRichContentParts(text: string, skin?: SkinMacros | null): R
 			out.push({ kind: "html", html: p.html, scripts: p.scripts });
 			continue;
 		}
-		// 仅剩余文本：未皮肤的 StatusBlock 等落梨园状态卡
-		for (const s of splitStatusParts(p.text)) {
-			if (s.kind === "status") {
-				out.push({ kind: "status", tag: s.tag, body: s.body });
-			} else if (s.text.trim()) {
-				out.push({ kind: "text", text: stripOrphanStatusTags(s.text) });
-			}
-		}
+		out.push(...textToRichParts(p.text));
 	}
 	return out;
 }

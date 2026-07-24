@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from "react";
 import {
 	apiGet,
+	apiGetCacheClear,
 	apiGetCacheClearForPanel,
 	apiPost,
 	personaAvatarUrl,
@@ -33,6 +34,7 @@ import { CodexPanel } from "./components/CodexPanel.tsx";
 import { ConnectPanel } from "./components/ConnectPanel.tsx";
 import { WelcomePanel } from "./components/HomePage.tsx";
 import { PanelRefreshContext } from "./components/kit.tsx";
+import { registerTavernChatBridge } from "./tavernShim.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
 import {
 	IconApi,
@@ -506,16 +508,18 @@ export default function App() {
 	const [cardSkin, setCardSkin] = useState<SkinProp | null>(null);
 	const refreshCardFront = useCallback(async () => {
 		try {
+			// 显式清缓存 + bypass:换卡/hello 后绝对不能吃上一张卡的 rules
+			apiGetCacheClear("/api/cardfront");
 			const r = await apiGet<{
 				enabled: boolean;
 				hasSkin: boolean;
 				rules: DisplayRule[];
 				charName: string;
 				userName: string;
-			}>("/api/cardfront");
+			}>("/api/cardfront", { bypassCache: true });
 			setCardSkin(r.enabled && r.hasSkin ? { rules: r.rules, charName: r.charName, userName: r.userName } : null);
 		} catch {
-			setCardSkin(null);
+			// hello 已注入时保留;仅 REST 失败且当前无皮时保持 null
 		}
 	}, []);
 
@@ -556,7 +560,17 @@ export default function App() {
 					setMsgEdit(null); // 会话对齐后关闭内联编辑
 					setWorldState(frame.state);
 					setStats(frame.stats);
-					void refreshCardFront(); // 切卡/重连后重拉显示向皮肤
+					// 一档皮肤:优先用 hello 同帧载荷(与消息同步),杜绝 REST 缓存/时序导致的漏皮
+					if (frame.cardfront) {
+						const cf = frame.cardfront;
+						setCardSkin(
+							cf.enabled && cf.hasSkin
+								? { rules: cf.rules, charName: cf.charName, userName: cf.userName }
+								: null,
+						);
+					}
+					// 旧服务端无 cardfront 字段时回落 REST;有字段时仍 bypass 刷新一次对齐开关态
+					void refreshCardFront();
 					agentPanelsRef.current = frame.panels ?? [];
 					setAgentPanels(agentPanelsRef.current);
 					// 恢复/切换后左栏若停在已不存在的 agent 面板上：收起
@@ -1040,6 +1054,57 @@ export default function App() {
 		setAtBottom(true);
 		if (inputRef.current) inputRef.current.style.height = "auto";
 	}, [input, pending, conn, ws, openStoreModal, openRight]);
+
+	// 卡 HTML（如 Living With Slaves 开场表单）调用 triggerSlash(`/send …|/trigger`)
+	// 须接到输入框 / WS，否则界面显示「档案已发送」但聊天栏空白
+	const inputRefForBridge = useRef(input);
+	inputRefForBridge.current = input;
+	const connRef = useRef(conn);
+	connRef.current = conn;
+	useEffect(() => {
+		registerTavernChatBridge({
+			setInput: (text) => {
+				setWelcome(false);
+				setAtHome(false);
+				setInput(text);
+				// 焦点到输入框，便于用户确认
+				requestAnimationFrame(() => {
+					const el = inputRef.current;
+					if (el) {
+						el.focus();
+						el.style.height = "auto";
+						el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+					}
+				});
+			},
+			sendPrompt: (text) => {
+				if (connRef.current !== "open") {
+					pushToast("warning", "连接未就绪，无法从界面发送");
+					return;
+				}
+				const body = (text || inputRefForBridge.current || "").trim();
+				if (!body) {
+					pushToast("warning", "没有可发送的内容");
+					return;
+				}
+				setWelcome(false);
+				setAtHome(false);
+				touchVisit();
+				ws.send({ type: "prompt", text: body });
+				setInput("");
+				setPending([]);
+				atBottomRef.current = true;
+				setAtBottom(true);
+				if (inputRef.current) inputRef.current.style.height = "auto";
+				pushToast("info", "已从界面注入并发送");
+			},
+			runCommand: (cmd) => {
+				if (connRef.current !== "open") return;
+				ws.send({ type: "prompt", text: cmd });
+			},
+		});
+		return () => registerTavernChatBridge(null);
+	}, [ws, pushToast]);
 
 	// 上传：即时落服务端 .liyuan-uploads/，成功后进 pending（chip 显示，发送时随消息）
 	const doUpload = useCallback(

@@ -35,4 +35,25 @@ test("stripOrphanStatusTags 删残留标签", () => {
 test("looksLikeYamlBlock / stripYamlFence", () => {
 	assert.equal(looksLikeYamlBlock("```yaml\na: 1\nb: 2\n```"), true);
 	assert.equal(stripYamlFence("```yaml\na: 1\n```"), "a: 1");
+	// 纯 kv 行仍可认 yaml
+	assert.equal(looksLikeYamlBlock("地点:御书房\n姓名:文舒婉\n心情:平静"), true);
+});
+
+test("looksLikeYamlBlock: 含 summary/围栏的混合状态体不得当 yaml pre", () => {
+	const mixed = `<summary>基本信息 - 旅人</summary>
+
+\`\`\`
+姓名: 旅人
+身份: 弟子
+\`\`\`
+
+<summary>互动角色</summary>
+
+\`\`\`
+姓名: 苏杏儿
+年龄: 18
+\`\`\`
+`;
+	assert.equal(looksLikeYamlBlock(mixed), false, "有标签或围栏时必须走 Paragraphs");
+	assert.equal(looksLikeYamlBlock("姓名: a\n```\nx\n```"), false);
 });

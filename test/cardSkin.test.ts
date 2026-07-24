@@ -37,3 +37,54 @@ test("单条规则运行期出错不影响其余规则", () => {
 test("空规则原文返回", () => {
 	assert.equal(applyCardSkin("原文", [], M), "原文");
 });
+
+test("字面量 $' 不得被 String.replace 特殊序列吃掉（程序卡 '$' 字符）", () => {
+	// 模拟凡人修仙 TILE 字符表：'|','$','T'
+	const rule = {
+		name: "dollar-char",
+		source: "TOKEN",
+		flags: "g",
+		replace: "['|','$','T']",
+	};
+	assert.equal(applyCardSkin("TOKEN", [rule], M), "['|','$','T']");
+});
+
+test("字面 $$ 与捕获组并存", () => {
+	const rule = {
+		name: "price",
+		source: "price:(\\d+)",
+		flags: "g",
+		replace: "$$ $1",
+	};
+	assert.equal(applyCardSkin("price:42", [rule], M), "$ 42");
+});
+
+test("长替换串（程序卡）不展开 $&；无捕获时 $1 保持字面", () => {
+	const payload = `${"x".repeat(9000)} placement.replace(/\\$&/g, args[0]); $1 end`;
+	const rule = { name: "prog", source: "TOKEN", flags: "g", replace: payload };
+	const out = applyCardSkin("TOKEN", [rule], M);
+	assert.ok(out.includes("/\\$&/g"), "卡内 /\\$&/g 必须原样");
+	// TOKEN 无捕获组 → $1 保持字面
+	assert.ok(out.includes(" $1 end"), "无对应捕获时 $1 保持字面");
+	assert.ok(!out.includes("/\\TOKEN/g"), "不得把 $& 展开成命中文本");
+});
+
+test("长替换串仍展开有效 $2（LWS 状态栏 rawData=`$2`）", () => {
+	const body = "『姓名』: 明月\n『内心想法』: 想逃";
+	const payload =
+		"```html\n<!DOCTYPE html><html><body><script>const rawData = `$2`;</script><div id=x></div></body></html>\n```".replace(
+			"```html\n",
+			"```html\n" + "y".repeat(9000) + "\n",
+		);
+	// 保证超阈值
+	assert.ok(payload.length > 8000);
+	const rule = {
+		name: "state-bar",
+		source: "<(state\\d+)>([\\s\\S]+?)<\\/\\1>",
+		flags: "g",
+		replace: payload,
+	};
+	const out = applyCardSkin(`<state1>\n${body}\n</state1>`, [rule], M);
+	assert.ok(!out.includes("`$2`") && !out.includes("rawData = `$2`"), "不得残留字面 $2");
+	assert.ok(out.includes("明月") && out.includes("想逃"), "捕获正文须注入模板");
+});

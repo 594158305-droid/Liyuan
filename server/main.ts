@@ -82,7 +82,8 @@ import {
 	swipeMetaForUser,
 	type SwipeEntry,
 } from "../src/swipe.ts";
-import { handleApiRequest, type CurrentModelInfo, type RestHost } from "./rest.ts";
+import { onNarrativeTurnEnd } from "../src/memory/index.ts";
+import { handleApiRequest, loadCardFrontSnapshot, type CurrentModelInfo, type RestHost } from "./rest.ts";
 
 // 用户级 agent 目录 → ~/.liyuan/agent（须在 getAgentDir / 建会话之前）
 // 并合并 fork 改名后遗留的 ~/.pi/agent（会话/配置，不覆盖更新的新树）
@@ -337,16 +338,44 @@ const annotateSwipes = (messages: import("./wire.ts").WireMsg[]): import("./wire
 	return messages.map((m, i) => (i === lastNar ? { ...m, swipe: { index, total } } : m));
 };
 
-const helloFrame = (): ServerFrame => ({
-	type: "hello",
-	sessionId: session.sessionId,
-	charName: names.charName,
-	userName: names.userName,
-	messages: annotateSwipes(toWireHistory(session.messages, names)),
-	state: currentState(),
-	stats: safeStats(),
-	panels: currentPanels(),
-});
+/** 当前卡显示向皮肤（wire 上屏：先正则再 unwrap） */
+const currentDisplaySkin = () => {
+	try {
+		const snap = loadCardFrontSnapshot(cwd);
+		if (!snap.enabled || !snap.hasSkin || !snap.rules.length) return null;
+		return {
+			rules: snap.rules,
+			charName: snap.charName || names.charName,
+			userName: snap.userName || names.userName,
+		};
+	} catch {
+		return null;
+	}
+};
+
+const helloFrame = (): ServerFrame => {
+	const cardfront = loadCardFrontSnapshot(cwd);
+	const skin =
+		cardfront.enabled && cardfront.hasSkin && cardfront.rules.length
+			? {
+					rules: cardfront.rules,
+					charName: cardfront.charName || names.charName,
+					userName: cardfront.userName || names.userName,
+				}
+			: null;
+	return {
+		type: "hello",
+		sessionId: session.sessionId,
+		charName: names.charName,
+		userName: names.userName,
+		messages: annotateSwipes(toWireHistory(session.messages, names, { skin })),
+		state: currentState(),
+		stats: safeStats(),
+		panels: currentPanels(),
+		// 一档皮肤与消息同帧:首屏不得依赖二次 REST(缓存/竞态会让 StatusBlock 回落统一面板)
+		cardfront,
+	};
+};
 
 /** 全量重放（斜杠命令 / 树导航 / 压缩后：让所有端与会话文件对齐） */
 const resyncAll = () => broadcast(helloFrame());
@@ -701,6 +730,50 @@ const bindSession = async () => {
 					if (stats) broadcast({ type: "stats", stats });
 					// 挂上 swipe 序号（流式 message 帧无树元数据）
 					resyncAll();
+					// 内置向量记忆：按策略把本轮助手正文入库（异步，失败不影响叙事）
+					void (async () => {
+						try {
+							const msgs = session.messages as Array<{ role?: string; content?: unknown }>;
+							let lastText = "";
+							for (let i = msgs.length - 1; i >= 0; i--) {
+								const m = msgs[i];
+								if (m?.role !== "assistant") continue;
+								const c = m.content;
+								if (typeof c === "string") lastText = c;
+								else if (Array.isArray(c)) {
+									lastText = c
+										.map((p) =>
+											p && typeof p === "object" && (p as { type?: string }).type === "text"
+												? String((p as { text?: string }).text ?? "")
+												: "",
+										)
+										.join("");
+								}
+								if (lastText.trim()) break;
+							}
+							const mem = await onNarrativeTurnEnd(
+								cwd,
+								{ sessionId: session.sessionId, card: cardPath || undefined },
+								lastText,
+							);
+							if (mem.error) {
+								broadcast({
+									type: "notify",
+									level: "warning",
+									text: `向量记忆：入库失败 · ${mem.error}`,
+								});
+							} else if (mem.stored) {
+								const how = mem.merged ? "合并入已有条目" : "新开条目";
+								broadcast({
+									type: "notify",
+									level: "info",
+									text: `向量记忆：剧情库${how}（第 ${mem.counter} 轮 · 当前对话）`,
+								});
+							}
+						} catch (e) {
+							console.warn("[memory] auto ingest failed", e);
+						}
+					})();
 				}
 				break;
 			case "message_update": {
@@ -710,7 +783,7 @@ const bindSession = async () => {
 				break;
 			}
 			case "message_end": {
-				const wire = toWireMsg(event.message, names);
+				const wire = toWireMsg(event.message, names, { skin: currentDisplaySkin() });
 				// user 消息在 prompt 受理时已回显，这里跳过防重
 				if (wire && wire.channel !== "user") {
 					broadcast({ type: "message", message: wire });
@@ -1198,6 +1271,11 @@ const restHost: RestHost = {
 		broadcast({ type: "message", message: wireMsg });
 		return { src: saved.src, bytes: saved.bytes };
 	},
+	/** 向量记忆：绑定当前角色卡 + 当前对话会话 */
+	memoryScope: () => ({
+		sessionId: session.sessionId,
+		card: cardPath || undefined,
+	}),
 };
 
 // 启动时：liyuan.agent.json → models.json，重绑模型 + 应用思考档（配置 → 当前生效）

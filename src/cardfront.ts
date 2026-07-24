@@ -4,6 +4,8 @@
  * 筛选逻辑(spec §7 P1):!disabled && placement 含 2(AI 输出) && !(promptOnly && !markdownOnly)。
  * 清理向(promptOnly)规则不进显示层——harness 策略引擎(postprocess)已原生替代。
  * v1 不支持 trimStrings/substituteRegex:遇到整条跳过,宁缺毋错(显示错样式比没样式糟)。
+ *
+ * 载荷纪律:hello 与 GET /api/cardfront 必须同源(buildCardFrontSnapshot),避免「REST 有规则、对话流无规则」。
  */
 
 import type { RpConfig } from "./types.ts";
@@ -16,11 +18,72 @@ export interface DisplayRule {
 	replace: string;
 }
 
+/** 一档皮肤快照:wire hello / REST 共用,前端据此注入显示管线 */
+export interface CardFrontSnapshot {
+	enabled: boolean;
+	hasSkin: boolean;
+	rules: DisplayRule[];
+	charName: string;
+	userName: string;
+}
+
+/**
+ * 从已读卡 raw 组装快照(纯函数,不读盘)。
+ * raw=null 表示坏卡/读失败 → 无皮肤但仍返回结构,前端可清空。
+ */
+export function buildCardFrontSnapshot(
+	config: { card: string; cardSkinOff?: string[]; userName: string },
+	raw: Record<string, unknown> | null,
+	charName: string,
+): CardFrontSnapshot {
+	const rules = raw ? displayRules(extractRegexScripts(raw)) : [];
+	return {
+		enabled: isSkinEnabled(config, config.card),
+		hasSkin: rules.length > 0,
+		rules,
+		charName,
+		userName: config.userName,
+	};
+}
+
 /** ST 卡的 regex_scripts 数组(data.extensions 优先,顶层 extensions 兜底) */
 export function extractRegexScripts(raw: Record<string, unknown>): unknown[] {
 	const data = raw.data && typeof raw.data === "object" ? (raw.data as Record<string, unknown>) : raw;
 	const ext = data.extensions && typeof data.extensions === "object" ? (data.extensions as Record<string, unknown>) : {};
 	return Array.isArray(ext.regex_scripts) ? ext.regex_scripts : [];
+}
+
+/**
+ * 卡作者是否设计了「状态栏」输出格式（美化正则 / 开场示例里的 StatusBlock、stateN 等）。
+ * 用于 harness：有则剧情回合必须写状态栏——与用户预设是否开启无关。
+ * 检测时**包含 disabled 规则**（作者设计仍在，只是显示开关）。
+ */
+export function cardStatusBarFormats(raw: Record<string, unknown> | null | undefined): string[] {
+	if (!raw || typeof raw !== "object") return [];
+	const found = new Set<string>();
+	const note = (s: string) => {
+		if (/StatusBlock|status_block/i.test(s)) found.add("`<StatusBlock>…</StatusBlock>`");
+		if (/<\s*state\d+|state\\d|<\(state/i.test(s) || /多状态栏|状态展示/i.test(s)) {
+			found.add("`<state1>…</state1>`（或卡约定的 state 序号）");
+		}
+	};
+	for (const s of extractRegexScripts(raw)) {
+		if (!s || typeof s !== "object") continue;
+		const r = s as Record<string, unknown>;
+		const blob = [
+			typeof r.scriptName === "string" ? r.scriptName : "",
+			typeof r.findRegex === "string" ? r.findRegex : "",
+			typeof r.replaceString === "string" ? r.replaceString.slice(0, 400) : "",
+		].join("\n");
+		note(blob);
+	}
+	const data = (raw.data && typeof raw.data === "object" ? raw.data : raw) as Record<string, unknown>;
+	const greet = [
+		typeof data.first_mes === "string" ? data.first_mes : "",
+		...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings.map((g) => String(g ?? "")) : []),
+	].join("\n");
+	note(greet);
+	return [...found];
 }
 
 /** "/pattern/flags" → {source, flags};裸串按字面源、默认 g */

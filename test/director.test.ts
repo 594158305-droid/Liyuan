@@ -38,6 +38,32 @@ test("system prompt 含角色/纪律/主入口分流/工具分工/语言指令�
 	assert.ok(sp.includes("可见短句") || sp.includes("短旁白") || sp.includes("1～3"), "应要求工具前可见旁白");
 	assert.ok(!sp.includes("{{char}}"), "宏应已替换");
 	assert.ok(!sp.includes("{{user}}"), "宏应已替换");
+	// 状态栏：默认无卡格式线索时勿禁止 StatusBlock、也勿硬造
+	assert.ok(!sp.includes("不要**在正文里写 `<StatusBlock>`") && !sp.includes("不要在正文里写 `<StatusBlock>`"), "不得禁止卡状态栏");
+	assert.ok(sp.includes("状态栏是扮演的一部分") || sp.includes("扮演的一部分"), "状态栏应明确为扮演的一部分");
+});
+
+test("卡有状态栏格式时 system 与末端要求必出状态栏（与预设无关）", () => {
+	const formats = ["`<StatusBlock>…</StatusBlock>`", "`<state1>…</state1>`（或卡约定的 state 序号）"];
+	const sp = buildSystemPrompt({
+		card,
+		config: DEFAULT_CONFIG,
+		constantLore: [],
+		statusBarFormats: formats,
+	});
+	assert.ok(sp.includes("本卡定义了状态栏"));
+	assert.ok(sp.includes("必须输出状态栏"));
+	assert.ok(sp.includes("StatusBlock") || sp.includes("state1"));
+	const inj = buildTurnInjection({
+		state: defaultState(),
+		activatedLore: [],
+		card,
+		config: DEFAULT_CONFIG,
+		statusBarFormats: formats,
+		applyStoryPreset: true,
+	});
+	assert.ok(inj.includes("状态栏是本卡扮演的一部分") || inj.includes("漏写状态栏"));
+	assert.ok(!inj.includes("StatusBlock 不计字") || inj.includes("必须输出状态栏") || inj.includes("扮演的一部分"));
 });
 
 test("system prompt：backendControl 关闭时不出现通用工具段与技能库", () => {
@@ -84,10 +110,24 @@ test("末端注入：连续性审查已关闭，auditWarnings 不注入", () => 
 
 test("末端注入：语言与硬边界纪律恒在", () => {
 	const text = buildTurnInjection({ state: defaultState(), activatedLore: [], card, config: DEFAULT_CONFIG });
+	assert.ok(!text.includes("【剧情记忆】"));
 	assert.ok(text.includes("中文"));
 	assert.ok(text.includes("旅人"));
 	assert.ok(text.includes("【世界状态】"));
 	assert.ok(text.includes("不得与之矛盾"), "状态注入应为硬约束措辞");
+});
+
+test("末端注入：memoryHits 出【剧情记忆】", () => {
+	const text = buildTurnInjection({
+		state: defaultState(),
+		activatedLore: [],
+		card,
+		config: DEFAULT_CONFIG,
+		memoryHits: [{ text: "主角曾在圣魂村约定三年后再见", score: 0.8, source: "正文剧情" }],
+	});
+	assert.ok(text.includes("【剧情记忆】"));
+	assert.ok(text.includes("圣魂村"));
+	assert.ok(text.includes("正文剧情"));
 });
 
 test("末端注入：语言失配时出现纠正提醒", () => {

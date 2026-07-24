@@ -5,10 +5,16 @@
  * - scripts=true：allow-scripts，仍无 allow-same-origin → 无法读写父页面
  * - seamless=true：无痕模式（卡皮肤/整楼界面）——幽灵操作、真实高度、样式主权
  * - 与侧栏 ArtifactPanel 锁死策略不同：此处按消息/工具显式开关脚本，服务「中途渲染 UI」
+ *
+ * 三档程序卡（凡人修仙等）UI 几乎全是 position:fixed + 100vh 铺满。
+ * 若初始 iframe 只有 minHeight(120)，量高永远量出 120 → 按钮被裁切在框外 → 用户感觉「点了没反应」。
+ * 大脚本整页：直接按视口给高度，不再指望内容盒自报。
  */
 
-import { useEffect, useId, useRef, useState } from "react";
-import { buildSrcDoc } from "../frameDoc.ts";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { buildSrcDoc, looksLikeProgramApp, programViewportHeight } from "../frameDoc.ts";
+
+export { looksLikeProgramApp, programViewportHeight } from "../frameDoc.ts";
 
 export function HtmlFrame({
 	html,
@@ -28,12 +34,38 @@ export function HtmlFrame({
 }) {
 	const frameId = useId();
 	const ref = useRef<HTMLIFrameElement>(null);
-	const [height, setHeight] = useState(minHeight);
+	const programApp = useMemo(() => seamless && looksLikeProgramApp(html, scripts), [html, scripts, seamless]);
+	const [height, setHeight] = useState(() =>
+		programApp && typeof window !== "undefined" ? programViewportHeight(window) : minHeight,
+	);
 	const [showSource, setShowSource] = useState(false);
 	const srcDoc = buildSrcDoc(html, scripts, seamless);
-	// 沙箱矩阵(Global Constraints):脚本帧永无 same-origin;seamless 静态帧给 same-origin 以便量高
-	const sandbox = scripts ? "allow-scripts" : seamless ? "allow-same-origin" : "";
+	/**
+	 * 沙箱矩阵：
+	 * - 静态 seamless：only same-origin（量高，无脚本）
+	 * - 脚本帧（三档程序卡）：scripts + same-origin + forms
+	 *   必须同源，否则 IndexedDB/Dexie/localStorage 在不透明源上 SecurityError，
+	 *   卡初始化挂掉 → 按钮永远绑不上（凡人修仙等）。
+	 *   风险：同源脚本可读父页 DOM——仅对卡作者 HTML 开启；垫片不提供改正文通道。
+	 * - agent show_html 非 seamless 脚本：仅 scripts（调试用，保持隔离）
+	 */
+	const sandbox = scripts
+		? seamless
+			? "allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
+			: "allow-scripts"
+		: seamless
+			? "allow-same-origin"
+			: "";
 	const cap = seamless ? Number.POSITIVE_INFINITY : maxHeight;
+
+	// 程序卡：跟视口，避免 120px 裁切；resize 时同步
+	useEffect(() => {
+		if (!programApp) return;
+		const apply = () => setHeight(programViewportHeight(window));
+		apply();
+		window.addEventListener("resize", apply);
+		return () => window.removeEventListener("resize", apply);
+	}, [programApp, srcDoc]);
 
 	// 静态帧量高(seamless 下 same-origin 可读;旧模式维持原 try/catch 行为)
 	useEffect(() => {
@@ -46,35 +78,75 @@ export function HtmlFrame({
 		const fit = () => {
 			try {
 				const doc = el.contentDocument;
-				const h = doc?.documentElement?.scrollHeight || doc?.body?.scrollHeight || minHeight;
-				setHeight(Math.min(cap, Math.max(minHeight, h + 4)));
+				const body = doc?.body;
+				// 与脚本帧同一策略：量内容子节点，避免 100vh/scrollHeight 反馈环
+				let h = 0;
+				if (body) {
+					for (const node of Array.from(body.children)) {
+						const tag = node.tagName;
+						if (tag === "SCRIPT" || tag === "STYLE" || tag === "LINK") continue;
+						const eln = node as HTMLElement;
+						h = Math.max(h, eln.offsetTop + eln.offsetHeight, Math.ceil(eln.getBoundingClientRect().bottom));
+					}
+					if (h < 1) h = body.offsetHeight || 0;
+				}
+				if (h < 1) h = doc?.documentElement?.scrollHeight || minHeight;
+				const next = Math.min(cap, Math.max(minHeight, Math.ceil(h)));
+				setHeight((prev) => (Math.abs(prev - next) < 2 ? prev : next));
 			} catch {
 				/* opaque origin(非 seamless 静态帧) */
 			}
 		};
 		el.addEventListener("load", fit);
 		const t = window.setTimeout(fit, 50);
+		const t2 = window.setTimeout(fit, 200);
 		return () => {
 			el.removeEventListener("load", fit);
 			window.clearTimeout(t);
+			window.clearTimeout(t2);
 		};
 	}, [srcDoc, scripts, seamless, minHeight, cap, maxHeight]);
 
-	// 脚本帧高度上报(seamless):按 frameId 对号,来源不可信也只消费数字
+	// 脚本帧高度上报(seamless)：小部件可跟内容；程序卡已用视口高，忽略「≈框高」的假量（fixed 铺满）
 	useEffect(() => {
 		if (!scripts || !seamless) return;
 		const onMsg = (e: MessageEvent) => {
 			const d = e.data as { liyuanFrameHeight?: unknown; frameId?: unknown };
-			if (d && d.frameId === frameId && typeof d.liyuanFrameHeight === "number" && d.liyuanFrameHeight > 0) {
-				setHeight(Math.max(minHeight, Math.min(20000, d.liyuanFrameHeight + 4)));
+			if (!d || d.frameId !== frameId || typeof d.liyuanFrameHeight !== "number" || !(d.liyuanFrameHeight > 0)) {
+				return;
 			}
+			const raw = Math.ceil(d.liyuanFrameHeight);
+			const hardCap = Math.min(2400, typeof window !== "undefined" ? Math.floor(window.innerHeight * 0.92) : 2400);
+			// 程序卡：fixed 铺满时内容盒会跟着框高涨，须锁视口底线。
+			// 但若内容明显远小于视口（状态栏误判/小部件），按内容收拢，避免大块黑空。
+			if (programApp) {
+				const floor = programViewportHeight(typeof window !== "undefined" ? window : null);
+				if (raw + 48 < floor * 0.5) {
+					const next = Math.max(minHeight, Math.min(hardCap, raw + 12));
+					setHeight((prev) => (Math.abs(prev - next) < 2 ? prev : next));
+					return;
+				}
+				if (raw <= height + 24) return;
+				const next = Math.max(floor, Math.min(hardCap, raw));
+				setHeight((prev) => (Math.abs(prev - next) < 2 ? prev : next));
+				return;
+			}
+			const next = Math.max(minHeight, Math.min(hardCap, raw));
+			setHeight((prev) => {
+				if (Math.abs(prev - next) < 2) return prev;
+				// 允许首次拉高；拒绝「每次只多几 px」的 100vh 蠕变
+				if (next > prev && next - prev <= 8 && prev > minHeight + 20) return prev;
+				return next;
+			});
 		};
 		window.addEventListener("message", onMsg);
 		return () => window.removeEventListener("message", onMsg);
-	}, [scripts, seamless, frameId, minHeight]);
+	}, [scripts, seamless, frameId, minHeight, programApp, height]);
 
 	return (
-		<figure className={`msg-html ${scripts ? "msg-html-scripts" : ""} ${seamless ? "msg-html-seamless" : ""}`}>
+		<figure
+			className={`msg-html ${scripts ? "msg-html-scripts" : ""} ${seamless ? "msg-html-seamless" : ""} ${programApp ? "msg-html-program" : ""}`}
+		>
 			{!seamless && (
 				<div className="msg-html-bar">
 					<span className="msg-html-title">{title?.trim() || (scripts ? "交互界面" : "HTML")}</span>

@@ -969,6 +969,32 @@ html[data-theme="dark"] [data-tip]:focus-visible::after {
 	font-weight: 500;
 }
 
+/* markdown 围栏代码块：Options 等与正文区分（对齐酒馆浅底代码块） */
+.msg-md-code {
+	margin: 0.65em 0 0.85em;
+	padding: 10px 14px;
+	border-radius: 12px;
+	background: color-mix(in srgb, var(--accent, #bc4123) 6%, var(--surface-dim, #f0eeeb));
+	border: 1px solid var(--hairline, rgba(0, 0, 0, 0.06));
+	overflow-x: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font: 13px/1.65 ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+	color: color-mix(in srgb, var(--accent, #4a6fa5) 55%, var(--text, #2c2825));
+}
+.msg-md-code code {
+	font: inherit;
+	background: none;
+	padding: 0;
+	border: 0;
+	color: inherit;
+}
+html[data-theme="dark"] .msg-md-code {
+	background: color-mix(in srgb, var(--accent) 12%, var(--surface, #2a2623));
+	border-color: color-mix(in srgb, var(--accent) 20%, transparent);
+	color: color-mix(in srgb, #8eb4e8 70%, var(--text, #e8e4df));
+}
+
 .msg-actions {
 	display: flex;
 	flex-wrap: wrap;
@@ -4952,6 +4978,65 @@ input.panel-search.num {
 	font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* ── 设置·向量记忆 ── */
+.memory-panel {
+	margin-top: 8px;
+	padding: 10px 12px;
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius, 8px);
+	background: color-mix(in srgb, var(--surface) 92%, var(--accent, #c4a) 4%);
+}
+.memory-hits {
+	margin: 8px 0 0;
+	padding-left: 1.1em;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--text-soft);
+	max-height: 160px;
+	overflow: auto;
+}
+.memory-score {
+	display: inline-block;
+	min-width: 2.4em;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.75;
+}
+.memory-cloud {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin: 8px 0 12px;
+}
+.memory-cloud .field-input {
+	width: 100%;
+}
+.memory-chunk-list .memory-hits {
+	max-height: 280px;
+	list-style: none;
+	padding-left: 0;
+}
+.memory-chunk-item {
+	margin-bottom: 8px;
+	padding: 8px;
+	border: 1px solid var(--hairline);
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+.memory-chunk-meta {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 4px;
+}
+.memory-chunk-text {
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--text-soft);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
 /* ── 暴露开关（技能/MCP/知识库挂载共用） ── */
 .expose-toggle {
 	display: flex;
@@ -5533,6 +5618,16 @@ label.drawer-btn {
 }
 .msg.msg-stage .msg-html-seamless {
 	margin: 0;
+}
+
+/* 三档程序卡：视口高度帧，避免 120px 裁切 fixed 全屏 UI */
+.msg-html-program {
+	width: 100%;
+	max-width: none;
+}
+.msg-html-program .msg-html-frame {
+	min-height: 480px;
+	background: #0a0a0a;
 }
 
 /* 视频（show_video）：与插图同属舞台美术 */

@@ -278,6 +278,50 @@ test("custom 通道分发：greeting / import / display:false 跳过 / 其他走
 	assert.equal(toWireMsg({ role: "custom", customType: "whatever", content: "横幅" }, names)?.channel, "info");
 });
 
+test("开场白/导入也走 prepareDisplayText：未知标签 unwrap，围栏留给前端 markdown", () => {
+	const raw = `洛清霜说完。\n\n<Options>\n\`\`\`\n选择1: 【留下】\n选择2: 【下山】\n\`\`\`\n</Options>`;
+	const g = toWireMsg({ role: "custom", customType: "rp-greeting", content: raw }, names);
+	assert.ok(g);
+	assert.equal(g!.channel, "greeting");
+	assert.ok(!g!.text.includes("<Options>"), "开场白不得漏 Options 开标签");
+	assert.ok(!g!.text.includes("</Options>"), "开场白不得漏 Options 闭标签");
+	assert.ok(g!.text.includes("```"), "围栏留给前端代码块");
+	assert.ok(g!.text.includes("选择1"), "选项正文保留");
+	assert.ok(g!.text.includes("洛清霜说完"), "叙事保留");
+
+	const imp = toWireMsg({ role: "custom", customType: "rp-import", content: raw }, names);
+	assert.ok(imp);
+	assert.ok(!imp!.text.includes("<Options>"));
+	assert.ok(imp!.text.includes("```"));
+	assert.ok(imp!.text.includes("选择1"));
+});
+
+test("wire + skin: narrative 先正则后策略，state 变成 HTML 载荷", () => {
+	const skin = {
+		rules: [
+			{
+				name: "state",
+				source: "<(state\\d+)>([\\s\\S]+?)<\\/\\1>",
+				flags: "g",
+				replace: "```html\n<!DOCTYPE html><html><body><article>$2</article></body></html>\n```",
+			},
+		],
+		charName: "LWS",
+		userName: "旅人",
+	};
+	const raw = `她走了过来。\n\n<state1>\n姓名: 白荷\n好感: 60\n</state1>`;
+	const w = toWireMsg(
+		{ role: "assistant", content: [{ type: "text", text: raw }] },
+		names,
+		{ skin },
+	);
+	assert.ok(w);
+	assert.equal(w!.channel, "narrative");
+	assert.ok(!w!.text.includes("<state1>"), "标记须被皮肤吃掉");
+	assert.ok(w!.text.includes("白荷"));
+	assert.ok(w!.text.includes("```html") || w!.text.includes("<!DOCTYPE html>"));
+});
+
 test("toolResult 与未知类型跳过；字符串与内容块数组两种 content 都可读", () => {
 	assert.equal(toWireMsg({ role: "toolResult", content: [{ type: "text", text: "lore" }] }, names), null);
 	assert.equal(toWireMsg({ role: "bashExecution", content: "ls" }, names), null);

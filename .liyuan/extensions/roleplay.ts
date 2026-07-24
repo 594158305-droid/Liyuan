@@ -15,7 +15,8 @@ import type { ExtensionAPI } from "@liyuan/agent-runtime";
 import { completeSimple } from "@liyuan/ai/compat";
 import { Type } from "typebox";
 
-import { loadCardFile } from "../../src/card.ts";
+import { loadCardFile, readCardRawJson } from "../../src/card.ts";
+import { cardStatusBarFormats } from "../../src/cardfront.ts";
 import { buildImportBlock, cleanChat, DEFAULT_STRIP_TAGS, parseStChat, serializeForImportSummary } from "../../src/chatlog.ts";
 import { findCommand } from "../../src/commands.ts";
 import {
@@ -28,6 +29,7 @@ import {
 } from "../../src/codex.ts";
 import { buildRpSummaryPrompt, serializeForSummary } from "../../src/compaction.ts";
 import { buildGreeting, buildSystemPrompt, buildTurnInjection, detectsLanguageMismatch } from "../../src/director.ts";
+import { memoryRecallForTurn } from "../../src/memory/index.ts";
 import {
 	constantEntries,
 	appendOverlayEntry,
@@ -154,6 +156,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	let systemPromptStory = "";
 	/** 非剧情 system（不含预设块）——纯办事回合用 */
 	let systemPromptOps = "";
+	/** 卡作者状态栏格式（StatusBlock / state1…）；空=卡未设计，勿硬造 */
+	let statusBarFormats: string[] = [];
 	let state: WorldState = defaultState();
 	let stateFile = "";
 	// agent 自建面板（柱 2）：与 state 同一套「磁盘缓存 + 会话树快照」机制
@@ -1237,7 +1241,15 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				// 旧 lorebook 单本 → lorebooks[]；与 REST loadConfig 一致
 				config = setMountedLorebooks(raw, mountedLorebookPaths(raw));
 			}
-			card = loadCardFile(resolvePath(ctx.cwd, config.card));
+			{
+				const cardAbs = resolvePath(ctx.cwd, config.card);
+				card = loadCardFile(cardAbs);
+				try {
+					statusBarFormats = cardStatusBarFormats(readCardRawJson(cardAbs).raw);
+				} catch {
+					statusBarFormats = [];
+				}
+			}
 
 			// 世界书只来自「已挂载的独立书（0..N 本）」+ agent 补充设定集；
 			// 卡内 character_book 不自动进上下文（与角色卡解耦，可另存为独立书再挂）。
@@ -1386,6 +1398,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			constantLore: constantEntries(entries),
 			skills: listSkills(cwd),
 			mcpIndex: mcpIndexCache,
+			statusBarFormats,
 		};
 		systemPromptOps = buildSystemPrompt({ ...base, presetSystemBlocks: undefined });
 		systemPromptStory = buildSystemPrompt({
@@ -1491,6 +1504,31 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		const lastUserText = lastUser ? extractText(lastUser) : "";
 		const legacyBackstage = !!lastUserText && isBackstageText(lastUserText);
 
+		// 向量记忆：仅检索「当前角色卡 + 当前对话」的库，注入【剧情记忆】（失败则跳过，不挡剧情）
+		let memoryHits: Array<{ text: string; score?: number; source?: string }> | undefined;
+		if (!legacyBackstage && lastUserText.trim().length >= 2) {
+			try {
+				const sessionId =
+					typeof ctx.sessionManager?.getSessionId === "function"
+						? ctx.sessionManager.getSessionId()
+						: "_default";
+				const hits = await memoryRecallForTurn(
+					appCwd,
+					{ sessionId, card: config.card || undefined },
+					lastUserText,
+				);
+				if (hits.length) {
+					memoryHits = hits.map((h) => ({
+						text: h.text.slice(0, 500),
+						score: h.score,
+						source: h.meta.title || h.meta.fileName || h.meta.source,
+					}));
+				}
+			} catch (e) {
+				console.warn("[memory] recall failed", e);
+			}
+		}
+
 		// 工具轮 context 复用 before_agent_start 的判定；若本轮尚未跑过 start（极少），再按 last user 估一次
 		const applyPreset = applyStoryPresetThisTurn;
 		messages.push({
@@ -1511,6 +1549,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				codexIndex: codexIndexCache ?? undefined,
 				uploadIndex: formatUploadIndex(listUploads(appCwd)) ?? undefined,
 				userText: legacyBackstage ? undefined : lastUserText,
+				memoryHits,
+				statusBarFormats,
 			}),
 			display: false,
 			timestamp: Date.now(),
@@ -2157,7 +2197,15 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			const raw = { ...DEFAULT_CONFIG, ...(JSON.parse(readFileSync(configPath, "utf8")) as Partial<RpConfig>) };
 			config = setMountedLorebooks(raw, mountedLorebookPaths(raw));
 		}
-		card = loadCardFile(resolvePath(cwd, config.card));
+		{
+			const cardAbs = resolvePath(cwd, config.card);
+			card = loadCardFile(cardAbs);
+			try {
+				statusBarFormats = cardStatusBarFormats(readCardRawJson(cardAbs).raw);
+			} catch {
+				statusBarFormats = [];
+			}
+		}
 		const fileGroups: LorebookEntry[][] = [];
 		for (const rel of mountedLorebookPaths(config)) {
 			const abs = resolvePath(cwd, rel);

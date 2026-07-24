@@ -24,9 +24,22 @@ export interface DirectorOptions {
 	skills?: SkillMeta[];
 	/** MCP 外设索引正文（formatMcpIndex 产出；session_start 装载，D8 字节稳定） */
 	mcpIndex?: string;
+	/**
+	 * 卡作者状态栏格式（如 StatusBlock / state1）。
+	 * 非空则剧情回合必须输出；与用户预设无关。空=卡未设计状态栏，勿硬造。
+	 */
+	statusBarFormats?: string[];
 }
 
-export function buildSystemPrompt({ card, config, constantLore, presetSystemBlocks, skills, mcpIndex }: DirectorOptions): string {
+export function buildSystemPrompt({
+	card,
+	config,
+	constantLore,
+	presetSystemBlocks,
+	skills,
+	mcpIndex,
+	statusBarFormats,
+}: DirectorOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const m = (s: string) => applyMacros(s, macro);
 	const sections: string[] = [];
@@ -81,14 +94,23 @@ export function buildSystemPrompt({ card, config, constantLore, presetSystemBloc
 - 忌 AI 腔：不总结升华、不说教、不加免责声明；避免依赖万能句式（如反复的"眼中闪过一丝……"）。
 - 【语言】无论角色卡、开场白或世界书原文是什么语言，你的叙事与对白一律使用${config.language}（人名、地名等专有名词可保留原文）。
 
-# 输出结构（只计用户可见正文）
-界面只会把「纯叙事」当正文展示；草稿、思维链、状态栏会被折叠或画成面板。
-1. **（可选）草稿 / 思考标签**：分析、推演——若写标签须**成对闭合**，勿只开不关。
-2. **正文**：纯剧情叙事与对白，**不要**包在标签里，**不要**在正文里写 \`<StatusBlock>\` / 分析标签 / HTML 注释导演旁注。
-   - **剧情回合**：正文必有；篇幅与思维链格式**以本轮是否注入的用户预设为准**（有预设跟预设，无预设则 harness 缺省约 800–1500 字可见正文，短打可约 400）。
-   - **纯非剧情回合**：正文非必有；本轮不注入预设，办完即可，勿硬套剧情字数/思维链模板。
-3. **（可选）状态栏** \`<StatusBlock>…</StatusBlock>\`：给面板用。
-- 禁止用加长草稿/状态栏「凑字数」。状态栏与分析进标签，**正文仍是纯叙事**。
+# 输出结构
+界面把「叙事」当主气泡，草稿/思维链可折叠，**状态栏是扮演的一部分**（卡作者设计则每轮要有），由界面渲染，**不依赖用户预设是否开启**。
+1. **（可选）草稿 / 思考标签**：分析、推演——须**成对闭合**，勿只开不关。不计正文字数。
+2. **正文（剧情回合必有）**：纯剧情叙事与对白。
+   - 正文本身不要包在 \`<content>\` / 分析类标签里，不要写 HTML 注释导演旁注（如 Prism）。
+   - 篇幅与思维链格式：有用户预设则跟预设；无预设时 harness 缺省可见正文约 800–1500 字（短打约 400）。
+   - **纯非剧情办事回合**：正文非必有；不套剧情字数/思维链模板。
+3. **状态栏（卡作者有设计时：剧情回合必有）**：
+${
+	statusBarFormats && statusBarFormats.length > 0
+		? `   - **本卡定义了状态栏**，格式线索：${statusBarFormats.join("；")}。
+   - **每个剧情回合在正文之后必须输出状态栏**（字段随剧情更新：地点/时间/关系/数值等）；无预设时同样必须有。
+   - 状态栏用上述标签包住整块写出——这是卡作者设计的一部分，不是「可选装饰」，也不是预设提醒项。`
+		: `   - 本卡未检测到 StatusBlock/state 等状态栏格式；**不要硬造**状态栏。
+   - 若卡作者另有约定（写在卡说明里），仍按卡作者格式执行。`
+}
+- 禁止用加长草稿「凑字数」。正文是叙事；状态栏是状态——二者都要，但职责分开。
 
 # 台侧过程（RP agent 化——用户看得见的「先干什么」）
 界面会把你的**工具前短旁白**和工具步骤显示成生成中的过程条（像导演笔记，不是运维日志）。纪律：
@@ -186,7 +208,8 @@ ${mcpIndex}`,
 		`# 消息流约定
 - 标注【开场】的消息是 ${card.name} 的既定开场白，剧情从那一刻继续。
 - 标注【世界状态】的消息是当前事实基准：若剧情记忆与它冲突，以状态为准并在叙事内自然圆回，绝不跳出剧情解释。
-- 标注【相关设定】的消息是自动附上的世界书参考，按需取用。`,
+- 标注【相关设定】的消息是自动附上的世界书参考，按需取用。
+- 标注【剧情记忆】的消息是向量记忆检索片段（曾写入的正文摘要/外部资料），按需取用，勿整段照抄。`,
 	);
 
 	if (presetSystemBlocks && presetSystemBlocks.length > 0) {
@@ -265,6 +288,13 @@ export interface TurnInjectionOptions {
 	uploadIndex?: string;
 	/** 本轮用户原文（用于求方向检测；ask 档） */
 	userText?: string;
+	/**
+	 * 向量记忆检索命中（已格式化短句列表，或 {text,score,source}）。
+	 * 由 harness 在 before_agent_start 检索后传入。
+	 */
+	memoryHits?: Array<string | { text: string; score?: number; source?: string }>;
+	/** 卡作者状态栏格式；非空则末端钉「正文后必须出状态栏」 */
+	statusBarFormats?: string[];
 }
 
 /** 每轮注入消息流末端的动态内容（custom 消息 → 以 user 角色送达模型） */
@@ -280,6 +310,8 @@ export function buildTurnInjection({
 	codexIndex,
 	uploadIndex,
 	userText,
+	memoryHits,
+	statusBarFormats,
 }: TurnInjectionOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const blocks: string[] = [];
@@ -325,6 +357,19 @@ export function buildTurnInjection({
 		blocks.push(`【相关设定】\n${lore}`);
 	}
 
+	// 向量记忆：与世界书并列；短片段、按需取用
+	if (memoryHits && memoryHits.length > 0) {
+		const lines = memoryHits.map((h, i) => {
+			if (typeof h === "string") return `${i + 1}. ${h}`;
+			const tag = h.source ? `〔${h.source}〕` : "";
+			const sc = typeof h.score === "number" ? ` (${h.score.toFixed(2)})` : "";
+			return `${i + 1}. ${tag}${h.text}${sc}`;
+		});
+		blocks.push(
+			`【剧情记忆】以下为与本轮相关的向量记忆片段（可能含旧摘要或外部资料），按需取用，勿整段照抄堆砌：\n${lines.join("\n")}`,
+		);
+	}
+
 	// 预设 post-history：仅剧情生成回合注入（ST 字数/思维链等模板压在这里）
 	if (applyStoryPreset && presetPostHistoryBlocks && presetPostHistoryBlocks.length > 0) {
 		const sorted = [...presetPostHistoryBlocks].sort(
@@ -349,10 +394,15 @@ export function buildTurnInjection({
 	);
 	if (applyStoryPreset) {
 		notes.push(
-			`本轮为剧情生成：篇幅与输出格式优先遵循上方【预设末端指令】（若有）；无预设时可见正文 harness 缺省约 800–1500 字（短打约 400）。draft_notes/思维链/StatusBlock 不计字。`,
+			`本轮为剧情生成：篇幅优先遵循上方【预设末端指令】（若有）；无预设时可见正文 harness 缺省约 800–1500 字（短打约 400）。草稿/思维链不计正文字数。`,
 		);
 	} else {
 		notes.push(`本轮为非剧情办事：不套用预设字数/思维链；工具结果交回后倾向结束，勿续写长剧情。`);
+	}
+	if (applyStoryPreset && statusBarFormats && statusBarFormats.length > 0) {
+		notes.push(
+			`⚠ 状态栏是本卡扮演的一部分（非预设可选项）：正文之后必须输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本轮剧情更新；漏写状态栏即未完成回合。`,
+		);
 	}
 	notes.push(
 		`台侧过程：若本轮要动工具（设定/账本/面板/检索等），动手前用 1～3 句**可见短旁白**说明创作意图（RP 人话，非工具名）；旁白勿只写在 thinking 里。正文仍一次成文。`,

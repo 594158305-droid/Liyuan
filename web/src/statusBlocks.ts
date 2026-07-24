@@ -150,9 +150,19 @@ export function statusClassSuffix(tag: string): string {
 	return n || "status";
 }
 
+/**
+ * 是否「整段就是一份 yaml 状态」——仅用于纯 pre 展示。
+ * 含 HTML 标签、多段 markdown 围栏、summary 分节等混合体时必须 false，
+ * 否则会把 <summary> 与 ``` 整坨丢进 pre 原样漏出（玄牝状态栏回归）。
+ */
 export function looksLikeYamlBlock(body: string): boolean {
 	const t = body.trim();
-	if (/^```ya?ml\b/i.test(t)) return true;
+	if (!t) return false;
+	// 整段单一 yaml 围栏
+	if (/^```ya?ml\b/i.test(t) && (t.match(/^```/gm) ?? []).length === 2) return true;
+	// 混合 markdown / 标签 → 走 Paragraphs + 策略过滤
+	if (/<[A-Za-z_/\u4e00-\u9fff]/.test(t)) return false;
+	if (/```/.test(t)) return false;
 	const lines = t.split(/\r?\n/).filter((l) => l.trim());
 	if (lines.length < 2) return false;
 	const kv = lines.filter((l) => /[:：]/.test(l)).length;

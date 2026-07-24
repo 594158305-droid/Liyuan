@@ -3,8 +3,10 @@
  * 必须含 splitStatusParts 同序，否则会绿测坏集成（皮肤内 <status> 被状态面板撕碎）。
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import test from "node:test";
-import { displayRules, extractRegexScripts } from "../src/cardfront.ts";
+import { readCardRawJson } from "../src/card.ts";
+import { buildCardFrontSnapshot, displayRules, extractRegexScripts } from "../src/cardfront.ts";
 import { applyCardSkin } from "../web/src/cardSkin.ts";
 import { isFullInterface, splitHtmlParts } from "../web/src/htmlEmbed.ts";
 import { buildSrcDoc } from "../web/src/frameDoc.ts";
@@ -133,4 +135,58 @@ test("pipeline: 关闭皮肤=不应用规则时 StatusBlock 仍为文本段(html
 	const parts = splitHtmlParts(text);
 	assert.equal(parts.length, 1);
 	assert.equal(parts[0].kind, "text");
+});
+
+/** 实卡回归:淫宫美人录一档皮肤绝对不能回落 StatusPanel */
+test("实卡 淫宫美人录: first_mes/备选开场白 一律 html 皮肤、零 status 段", () => {
+	const cardPath = "assets/cards/淫宫美人录.png";
+	if (!existsSync(cardPath)) {
+		// 发行包可不带样本卡;有卡则必须全绿
+		return;
+	}
+	const { raw } = readCardRawJson(cardPath);
+	const data = (raw.data && typeof raw.data === "object" ? raw.data : raw) as Record<string, unknown>;
+	const snap = buildCardFrontSnapshot(
+		{ card: cardPath, userName: "旅人" },
+		raw as Record<string, unknown>,
+		String(data.name ?? "淫宫美人录"),
+	);
+	assert.equal(snap.enabled, true);
+	assert.equal(snap.hasSkin, true);
+	assert.ok(snap.rules.length >= 2, "至少两条 StatusBlock 开闭规则");
+
+	const skin = { rules: snap.rules, charName: snap.charName, userName: snap.userName };
+	const greetings = [
+		String(data.first_mes ?? ""),
+		...((Array.isArray(data.alternate_greetings) ? data.alternate_greetings : []) as unknown[]).map((g) =>
+			String(g),
+		),
+	].filter((t) => t.includes("StatusBlock"));
+
+	assert.ok(greetings.length >= 1, "开场白应含 StatusBlock");
+	for (const text of greetings) {
+		const parts = splitRichContentParts(text, skin);
+		const statuses = parts.filter((p) => p.kind === "status");
+		const htmls = parts.filter((p) => p.kind === "html");
+		assert.equal(statuses.length, 0, "不得回落梨园 StatusPanel");
+		assert.equal(htmls.length, 1, "作者皮肤应成单一 html 段");
+		if (htmls[0].kind === "html") {
+			assert.ok(htmls[0].html.includes("rgba(0, 0, 0, 0.5)"), "须含作者黑底样式");
+			assert.ok(!htmls[0].html.includes("<StatusBlock"), "StatusBlock 开标签须被替换");
+			assert.ok(!htmls[0].html.includes("</StatusBlock"), "StatusBlock 闭标签须被替换");
+			// 原文换行必须还在 html 段里(后续靠 seamless pre-wrap 显示为多行)
+			assert.ok(
+				htmls[0].html.includes("地点:") && /地点:[^\n]*\n\s*姓名:/.test(htmls[0].html.replace(/\r\n/g, "\n")),
+				"皮肤产物须保留「地点/姓名」之间的换行,不能已压成一行",
+			);
+			const doc = buildSrcDoc(htmls[0].html, false, true);
+			assert.ok(doc.includes("rgba(0, 0, 0, 0.5)"));
+			assert.ok(!doc.includes("PingFang"), "无痕帧不得强塞宿主字体");
+			assert.ok(doc.includes("white-space:pre-wrap"), "seamless 必须 pre-wrap,对齐酒馆多行状态栏");
+		}
+	}
+
+	// 无皮肤注入时才允许 status 段(对照)
+	const bare = splitRichContentParts(greetings[0], null);
+	assert.ok(bare.some((p) => p.kind === "status"), "无皮时应走统一状态卡(对照)");
 });

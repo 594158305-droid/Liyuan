@@ -49,11 +49,9 @@ import {
 	type CardFieldPatch,
 } from "../src/card.ts";
 import {
-	displayRules,
-	extractRegexScripts,
-	isSkinEnabled,
+	buildCardFrontSnapshot,
 	setSkinEnabled,
-	type DisplayRule,
+	type CardFrontSnapshot,
 } from "../src/cardfront.ts";
 import {
 	appendCodexEntry,
@@ -65,6 +63,20 @@ import {
 	userEntryToCodexInput,
 } from "../src/codex.ts";
 import { RP_COMMANDS } from "../src/commands.ts";
+import {
+	getMemoryStatus,
+	memoryClearStore,
+	memoryDeleteChunk,
+	memoryImportText,
+	memoryListChunks,
+	memoryManualAdd,
+	memoryReembedScope,
+	memoryRemoveStore,
+	memorySearch,
+	probeCloudEmbed,
+	updateMemoryConfig,
+	updateStoreConfig,
+} from "../src/memory/index.ts";
 import { resolveConfigPath } from "../src/paths.ts";
 import type { WorldlineView } from "../src/worldline.ts";
 import {
@@ -236,6 +248,8 @@ export interface RestHost {
 	renameWorldline(worldlineId: string, name: string): void;
 	/** 文生音并写入会话（气泡「配音」/ REST） */
 	ttsSpeak(text: string, caption?: string): Promise<{ src: string; bytes: number }>;
+	/** 向量记忆作用域：当前角色卡 + 当前对话（换卡/新对话 = 独立库） */
+	memoryScope(): { sessionId: string; card?: string };
 }
 
 export interface SessionInfoLite {
@@ -310,6 +324,28 @@ export function loadConfig(cwd: string): RpConfig {
 	const raw = { ...DEFAULT_CONFIG, ...(JSON.parse(readFileSync(p, "utf8")) as Partial<RpConfig>) };
 	// 规范化：旧 lorebook 单本 → lorebooks 数组
 	return setMountedLorebooks(raw, mountedLorebookPaths(raw));
+}
+
+/**
+ * 一档皮肤快照(hello 与 GET /api/cardfront 唯一组装点)。
+ * 读盘失败不抛:无皮肤即可,前端清空 cardSkin。
+ */
+export function loadCardFrontSnapshot(cwd: string): CardFrontSnapshot {
+	const config = loadConfig(cwd);
+	const abs = resolvePath(cwd, config.card);
+	let raw: Record<string, unknown> | null = null;
+	let charName = "";
+	try {
+		raw = readCardRawJson(abs).raw as Record<string, unknown>;
+		charName = loadCardFile(abs).name;
+	} catch {
+		try {
+			charName = loadCardFile(abs).name;
+		} catch {
+			/* ignore */
+		}
+	}
+	return buildCardFrontSnapshot(config, raw, charName);
 }
 
 /** config PUT 白名单（card 不在内：换卡必须走 /api/card/switch 的完整流程） */
@@ -1076,6 +1112,190 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 			}
 
+			// ---- 内置向量记忆（按「角色卡+对话」隔离；设置面板一等公民） ----
+			case "GET /api/memory": {
+				sendJson(res, 200, getMemoryStatus(host.cwd, host.memoryScope()));
+				return true;
+			}
+			case "PUT /api/memory": {
+				const body = JSON.parse(await readBody(req)) as {
+					enabled?: boolean;
+					searchTopK?: number;
+					injectOnTurn?: boolean;
+					embedMode?: "local" | "cloud";
+					cloudEmbed?: { baseUrl?: string; apiKey?: string; model?: string };
+					stores?: Array<{
+						id: string;
+						enabled?: boolean;
+						everyNTurns?: number;
+						maxChunks?: number;
+						name?: string;
+					}>;
+				};
+				const sc = host.memoryScope();
+				const cur = getMemoryStatus(host.cwd, sc).config;
+				updateMemoryConfig(host.cwd, {
+					...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}),
+					...(typeof body.searchTopK === "number" ? { searchTopK: body.searchTopK } : {}),
+					...(typeof body.injectOnTurn === "boolean" ? { injectOnTurn: body.injectOnTurn } : {}),
+					...(body.embedMode === "local" || body.embedMode === "cloud" ? { embedMode: body.embedMode } : {}),
+					...(body.cloudEmbed
+						? {
+								cloudEmbed: {
+									baseUrl: body.cloudEmbed.baseUrl ?? cur.cloudEmbed.baseUrl,
+									apiKey: body.cloudEmbed.apiKey ?? "",
+									model: body.cloudEmbed.model ?? cur.cloudEmbed.model,
+								},
+							}
+						: {}),
+				});
+				if (Array.isArray(body.stores)) {
+					for (const s of body.stores) {
+						if (!s?.id) continue;
+						updateStoreConfig(host.cwd, s.id, {
+							...(typeof s.enabled === "boolean" ? { enabled: s.enabled } : {}),
+							...(typeof s.everyNTurns === "number" ? { everyNTurns: s.everyNTurns } : {}),
+							...(typeof s.maxChunks === "number" ? { maxChunks: s.maxChunks } : {}),
+							...(typeof s.name === "string" ? { name: s.name } : {}),
+						});
+					}
+				}
+				sendJson(res, 200, getMemoryStatus(host.cwd, sc));
+				return true;
+			}
+			case "POST /api/memory/search": {
+				const body = JSON.parse(await readBody(req)) as { storeId?: string; query?: string; topK?: number };
+				const storeId = (body.storeId ?? "narrative").trim();
+				const query = (body.query ?? "").trim();
+				if (!query) throw new Error("缺少 query");
+				const hits = await memorySearch(host.cwd, host.memoryScope(), storeId, query, body.topK);
+				sendJson(res, 200, { hits });
+				return true;
+			}
+			case "POST /api/memory/import": {
+				const body = JSON.parse(await readBody(req)) as {
+					storeId?: string;
+					text?: string;
+					fileName?: string;
+				};
+				// 仅额外库；剧情库禁止导入
+				const storeId = (body.storeId ?? "external").trim() || "external";
+				const text = (body.text ?? "").trim();
+				if (!text) throw new Error("缺少 text");
+				const sc = host.memoryScope();
+				const r = await memoryImportText(host.cwd, sc, storeId, text, body.fileName);
+				if (r.added > 0) {
+					const label = body.fileName?.trim() || "额外库";
+					host.notify(
+						"info",
+						`向量记忆：向量化成功 · 额外库 +${r.added} 条（「${label}」· 当前对话）`,
+					);
+				} else if (r.chunks > 0) {
+					host.notify("info", "向量记忆：内容已在库中（无新增）");
+				}
+				sendJson(res, 200, { ok: true, ...r, ...getMemoryStatus(host.cwd, sc) });
+				return true;
+			}
+			case "POST /api/memory/manual": {
+				// 手动向量化 → 仅额外库，每段/块一条
+				const body = JSON.parse(await readBody(req)) as {
+					text?: string;
+					title?: string;
+					storeId?: string;
+				};
+				const text = (body.text ?? "").trim();
+				if (!text) throw new Error("缺少 text");
+				const sc = host.memoryScope();
+				const r = await memoryManualAdd(host.cwd, sc, text, {
+					title: body.title,
+					storeId: body.storeId,
+				});
+				if (r.added > 0) {
+					host.notify(
+						"info",
+						`向量记忆：手动向量化成功 · 额外库 +${r.added} 条（当前对话）`,
+					);
+				} else {
+					host.notify("info", "向量记忆：内容已在库中（无新增）");
+				}
+				sendJson(res, 200, { ok: true, ...r, ...getMemoryStatus(host.cwd, sc) });
+				return true;
+			}
+			case "GET /api/memory/chunks": {
+				const storeId = (query.get("storeId") ?? "external").trim() || "external";
+				const sc = host.memoryScope();
+				const chunks = memoryListChunks(host.cwd, sc, storeId);
+				sendJson(res, 200, { storeId, chunks });
+				return true;
+			}
+			case "DELETE /api/memory/chunk": {
+				const storeId = (query.get("storeId") ?? "").trim();
+				const id = (query.get("id") ?? "").trim();
+				if (!storeId) throw new Error("缺少 storeId");
+				if (!id) throw new Error("缺少 id");
+				const sc = host.memoryScope();
+				const ok = memoryDeleteChunk(host.cwd, sc, storeId, id);
+				if (!ok) throw new Error("条目不存在或已删除");
+				host.notify("info", "向量记忆：已删除 1 条");
+				sendJson(res, 200, { ok: true, ...getMemoryStatus(host.cwd, sc) });
+				return true;
+			}
+			case "POST /api/memory/chunk/delete": {
+				// 兼容不便发 DELETE body 的客户端
+				const body = JSON.parse(await readBody(req)) as { storeId?: string; id?: string };
+				const storeId = (body.storeId ?? "").trim();
+				const id = (body.id ?? "").trim();
+				if (!storeId) throw new Error("缺少 storeId");
+				if (!id) throw new Error("缺少 id");
+				const sc = host.memoryScope();
+				const ok = memoryDeleteChunk(host.cwd, sc, storeId, id);
+				if (!ok) throw new Error("条目不存在或已删除");
+				host.notify("info", "向量记忆：已删除 1 条");
+				sendJson(res, 200, { ok: true, ...getMemoryStatus(host.cwd, sc) });
+				return true;
+			}
+			case "POST /api/memory/probe-embed": {
+				const r = await probeCloudEmbed(host.cwd);
+				sendJson(res, 200, r);
+				return true;
+			}
+			case "POST /api/memory/reembed": {
+				// 保留原文，按当前 embed 模式重算向量（换 local/cloud 后用）
+				const body = JSON.parse((await readBody(req)) || "{}") as { storeId?: string };
+				const sc = host.memoryScope();
+				const r = await memoryReembedScope(host.cwd, sc, {
+					storeId: body.storeId?.trim() || undefined,
+				});
+				const modeLabel = r.mode === "cloud" ? `云端(${r.model})` : "本地";
+				if (r.totalChunks === 0) {
+					host.notify("info", "向量记忆：当前对话库为空，无需重向量化");
+				} else {
+					host.notify(
+						"info",
+						`向量记忆：重向量化完成 · ${r.totalUpdated}/${r.totalChunks} 条 → ${modeLabel}（当前对话）`,
+					);
+				}
+				sendJson(res, 200, { ok: true, ...r, ...getMemoryStatus(host.cwd, sc) });
+				return true;
+			}
+			case "POST /api/memory/clear": {
+				const body = JSON.parse(await readBody(req)) as { storeId?: string };
+				const storeId = (body.storeId ?? "").trim();
+				if (!storeId) throw new Error("缺少 storeId");
+				const sc = host.memoryScope();
+				memoryClearStore(host.cwd, sc, storeId);
+				sendJson(res, 200, { ok: true, ...getMemoryStatus(host.cwd, sc) });
+				return true;
+			}
+			case "DELETE /api/memory/store": {
+				const storeId = (query.get("id") ?? "").trim();
+				if (!storeId) throw new Error("缺少 id");
+				const sc = host.memoryScope();
+				memoryRemoveStore(host.cwd, sc, storeId);
+				sendJson(res, 200, { ok: true, ...getMemoryStatus(host.cwd, sc) });
+				return true;
+			}
+
 			// ---- 技能库：面板只读展示 + /skill:name 显式触发（触发经会话通道，同输入框打命令） ----
 			case "GET /api/skills": {
 				sendJson(res, 200, {
@@ -1472,28 +1692,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			// ---- 卡前端(一档皮肤,spec 2026-07-22 §7 P1) ----
 			case "GET /api/cardfront": {
 				// 与 GET /api/card 同：当前卡用 resolvePath（支持按路径换卡的非库内路径）
-				const config = loadConfig(host.cwd);
-				const abs = resolvePath(host.cwd, config.card);
-				let rules: DisplayRule[] = [];
-				let charName = "";
-				try {
-					rules = displayRules(extractRegexScripts(readCardRawJson(abs).raw));
-					charName = loadCardFile(abs).name;
-				} catch {
-					// 坏卡/无 extensions:无皮肤即可,不是错误
-					try {
-						charName = loadCardFile(abs).name;
-					} catch {
-						/* ignore */
-					}
-				}
-				sendJson(res, 200, {
-					enabled: isSkinEnabled(config, config.card),
-					hasSkin: rules.length > 0,
-					rules,
-					charName,
-					userName: config.userName,
-				});
+				// 载荷必须与 hello.cardfront 同源(buildCardFrontSnapshot)
+				sendJson(res, 200, loadCardFrontSnapshot(host.cwd));
 				return true;
 			}
 			case "PUT /api/cardfront": {

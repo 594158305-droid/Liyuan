@@ -294,7 +294,8 @@ function CardDetail({
 		let cancelled = false;
 		void (async () => {
 			try {
-				const r = await apiGet<CardFrontInfo>("/api/cardfront");
+				// 详情随 data.path 变：必须 bypass，避免吃到上一张卡的 hasSkin
+				const r = await apiGet<CardFrontInfo>("/api/cardfront", { bypassCache: true });
 				if (!cancelled) setFront(r);
 			} catch {
 				if (!cancelled) setFront(null);
