@@ -186,8 +186,37 @@ test("prepareDisplayText: 先皮肤再策略——state 标记不被 unwrap 拆�
 	assert.ok(!skinned.includes("<state1>"), "标记应已被正则吃掉");
 });
 
-test("prepareDisplayText: 开场前缀+占位符经皮肤成围栏文档", () => {
-	const raw = `【开场 · LWS】\n【本世界身份认证】`;
+test("prepareDisplayText: 皮肤状态栏 div 与 thinking 混排——div 保留，thinking/注释仍被过滤", () => {
+	const raw = [
+		"<!-- 本回合承接：先对齐人设再落笔 -->",
+		"<thinking>",
+		"【问题】非传统写作: 逐项过 cot",
+		"</thinking>",
+		"她跪坐在案边，把墨条搁进砚池。",
+		"<state1>\n时间: 白日\n地点: 御书房\n</state1>",
+	].join("\n");
+	const skin = {
+		rules: [
+			{
+				name: "状态栏皮肤",
+				source: "<(state\\d+)>([\\s\\S]+?)<\\/\\1>",
+				flags: "g",
+				replace: '<div style="background:#123">$2</div>',
+			},
+		],
+		charName: "婉",
+		userName: "爷",
+	};
+	const out = prepareDisplayText(raw, skin);
+	assert.ok(out.includes('<div style="background:#123">'), "皮肤 div 应完整保留");
+	assert.ok(out.includes("时间: 白日"), "div 内容应保留");
+	assert.ok(out.includes("她跪坐在案边"), "叙事应保留");
+	assert.ok(!out.includes("<thinking>"), "thinking 标签不得裸露");
+	assert.ok(!out.includes("非传统写作"), "思维链内容应被折叠移除");
+	assert.ok(!out.includes("<!--"), "HTML 注释应被剥除");
+});
+
+test("prepareDisplayText: 开场前缀+占位符经皮肤成围栏文档", () => {	const raw = `【开场 · LWS】\n【本世界身份认证】`;
 	const html = `<!doctype html>\n<html><head></head><body><h1>性别</h1><script>1</script></body></html>`;
 	const skin = {
 		rules: [{ name: "开局", source: "【本世界身份认证】", flags: "g", replace: "```\n" + html + "\n```" }],

@@ -285,6 +285,15 @@ export type DisplaySkin = {
  */
 export function isHtmlDisplayPayload(text: string): boolean {
 	if (!text) return false;
+	if (isFullPageHtmlPayload(text)) return true;
+	// 皮肤包的大块 styled div（淫宫状态栏等）
+	if (/<div\b[^>]*\bstyle\s*=/i.test(text) && /<\/div>/i.test(text) && text.length > 60) return true;
+	return false;
+}
+
+/** 整页 HTML（doctype/html 整文档或围栏整页）——只有这种才允许跳过全部显示层策略 */
+function isFullPageHtmlPayload(text: string): boolean {
+	if (!text) return false;
 	const t = text.trim();
 	// 围栏整页（可带开场前缀）
 	if (/(?:^|\n)```[^\n`]*\r?\n\s*<!doctype\s+html/i.test(text) && /<\/html\s*>/i.test(text)) return true;
@@ -293,16 +302,62 @@ export function isHtmlDisplayPayload(text: string): boolean {
 	// 裸整页
 	const head = t.slice(0, 80).toLowerCase();
 	if (head.startsWith("<!doctype html") || head.startsWith("<html")) return true;
-	// 皮肤包的大块 styled div（淫宫状态栏等）
-	if (/<div\b[^>]*\bstyle\s*=/i.test(text) && /<\/div>/i.test(text) && text.length > 60) return true;
 	return false;
+}
+
+/** 占位符：私用区字符包裹序号，正常文本不可能撞车 */
+const skinDivToken = (i: number) => `${i}`;
+
+/**
+ * 把皮肤产出的 styled div 块（含嵌套）换成占位符暂存，避免被标签策略撕碎；
+ * 过滤完成后按占位符原样还原。不成对的残块原样留下不保护。
+ */
+function protectSkinDivs(text: string): { text: string; stash: string[] } {
+	const stash: string[] = [];
+	const startRe = /<div\b[^>]*\bstyle\s*=/gi;
+	let out = "";
+	let i = 0;
+	for (;;) {
+		startRe.lastIndex = i;
+		const m = startRe.exec(text);
+		if (!m) {
+			out += text.slice(i);
+			break;
+		}
+		out += text.slice(i, m.index);
+		const tokenRe = /<div\b|<\/div\s*>/gi;
+		tokenRe.lastIndex = m.index + 1;
+		let depth = 1;
+		let end = -1;
+		let tk: RegExpExecArray | null;
+		while ((tk = tokenRe.exec(text))) {
+			if (tk[0].toLowerCase().startsWith("</")) {
+				depth--;
+				if (depth === 0) {
+					end = tokenRe.lastIndex;
+					break;
+				}
+			} else {
+				depth++;
+			}
+		}
+		if (end < 0) {
+			out += text.slice(m.index);
+			break;
+		}
+		out += skinDivToken(stash.length);
+		stash.push(text.slice(m.index, end));
+		i = end;
+	}
+	return { text: out, stash };
 }
 
 /**
  * 上屏正文唯一入口（wire narrative/greeting/import）：
  * 1) **先** apply 卡显示正则（标记仍在）
- * 2) 若已是 HTML 界面载荷 → 原样交出（前端 HtmlFrame）
- * 3) 否则再 displayAssistantText（fold/panel/unwrap）
+ * 2) **整页** HTML 载荷 → 原样交出（前端 HtmlFrame）
+ * 3) 皮肤 div 与叙事混排 → div 占位保护后照常过滤（thinking/注释不得因皮肤漏网），再还原
+ * 4) 其余 displayAssistantText（fold/panel/unwrap）
  */
 export function prepareDisplayText(text: string, skin?: DisplaySkin | null): string {
 	if (!text) return "";
@@ -310,8 +365,16 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 	if (skin?.rules?.length) {
 		t = applyCardSkin(t, skin.rules, { charName: skin.charName, userName: skin.userName });
 	}
-	if (isHtmlDisplayPayload(t)) {
+	if (isFullPageHtmlPayload(t)) {
 		return t;
+	}
+	if (/<div\b[^>]*\bstyle\s*=/i.test(t) && /<\/div>/i.test(t)) {
+		const { text: protectedText, stash } = protectSkinDivs(t);
+		let cleaned = displayAssistantText(protectedText);
+		for (let i = 0; i < stash.length; i++) {
+			cleaned = cleaned.split(skinDivToken(i)).join(stash[i]);
+		}
+		return cleaned;
 	}
 	return displayAssistantText(t);
 }
