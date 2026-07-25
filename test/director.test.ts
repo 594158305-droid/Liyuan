@@ -88,6 +88,39 @@ test("末端注入：预设末端指令恒注入（双姿态已退役，无戏�
 	assert.ok(!withPreset.includes("戏外"), "不再有戏外措辞");
 });
 
+test("扮演规范让位：presetActive 时 system 与末端不再钉「不替 user」等扮演条款", () => {
+	const spOn = buildSystemPrompt({ card, config: DEFAULT_CONFIG, constantLore: [], presetActive: true });
+	assert.ok(!spOn.includes("绝不替"), "有预设时 system 不注入代言硬边界");
+	assert.ok(!spOn.includes("忌 AI 腔"), "有预设时文风纪律让位");
+	assert.ok(spOn.includes("扮演规范以用户预设为准"), "应明示扮演规范归预设");
+	assert.ok(spOn.includes("【语言】"), "语言属管线条款，保留");
+	const spOff = buildSystemPrompt({ card, config: DEFAULT_CONFIG, constantLore: [], presetActive: false });
+	assert.ok(spOff.includes("绝不替"), "无预设时保留兜底扮演纪律");
+
+	const base = { state: defaultState(), activatedLore: [], card, config: DEFAULT_CONFIG };
+	const injOn = buildTurnInjection({ ...base, presetActive: true });
+	assert.ok(!injOn.includes("不替"), "有预设时末端不钉代言禁令");
+	assert.ok(injOn.includes("按用户预设执行"), "末端应把视角/代言边界交给预设");
+	const injOff = buildTurnInjection({ ...base, presetActive: false });
+	assert.ok(injOff.includes("不替"), "无预设时末端保留兜底禁令");
+});
+
+test("末端注入：工具续轮不重注预设模板，改注续轮备注（防记账死循环）", () => {
+	const base = { state: defaultState(), activatedLore: [], card, config: DEFAULT_CONFIG };
+	const cont = buildTurnInjection({
+		...base,
+		applyStoryPreset: true,
+		toolContinuation: true,
+		presetPostHistoryBlocks: [
+			{ id: "x", name: "x", channel: "postHistory" as const, role: "system" as const, content: "预设指令内容", enabled: true },
+		],
+	});
+	assert.ok(!cont.includes("预设指令内容"), "续轮不得重注预设 postHistory 模板");
+	assert.ok(cont.includes("同一回合的继续"), "应明示这是同一回合的继续");
+	assert.ok(cont.includes("不要再次调用 world_state_update"), "应禁止重复记账");
+	assert.ok(!cont.includes("台侧过程"), "续轮不再要求工具前短旁白");
+});
+
 test("末端注入：applyStoryPreset=false 时不注入预设 postHistory", () => {
 	const base = { state: defaultState(), activatedLore: [], card, config: DEFAULT_CONFIG };
 	const off = buildTurnInjection({

@@ -29,6 +29,12 @@ export interface DirectorOptions {
 	 * 非空则剧情回合必须输出；与用户预设无关。空=卡未设计状态栏，勿硬造。
 	 */
 	statusBarFormats?: string[];
+	/**
+	 * 用户预设处于启用状态（有任一 enabled 块）。
+	 * 扮演规范（视角/代言边界/文风/AI 腔）属预设职权：预设在场时 harness 全部让位，
+	 * 只保留管线条款（语言、状态栏、工具纪律）；无预设才注入兜底扮演纪律。
+	 */
+	presetActive?: boolean;
 }
 
 export function buildSystemPrompt({
@@ -39,6 +45,7 @@ export function buildSystemPrompt({
 	skills,
 	mcpIndex,
 	statusBarFormats,
+	presetActive,
 }: DirectorOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const m = (s: string) => applyMacros(s, macro);
@@ -86,12 +93,16 @@ export function buildSystemPrompt({
 
 	sections.push(
 		`# 叙事与文风纪律
-- 以 ${card.name} 的视角行动和说话；动作、神态与场景描写用 *斜体*，对白用引号。
+${
+	presetActive
+		? `- **扮演规范以用户预设为准**：人称视角、代言/抢话边界、文风、篇幅、节奏等一律按预设执行，harness 不另立规矩；预设未提及的按角色卡与上下文自然处理。`
+		: `- 以 ${card.name} 的视角行动和说话；动作、神态与场景描写用 *斜体*，对白用引号。
 - 【硬边界】绝不替 ${config.userName} 说话、行动或代述内心想法；**剧情回合**结尾给 ${config.userName} 留出行动空间。
 - 用具体的感官细节（光线、声音、气味、触感、温度）落实场景，不要抽象概括情绪。
 - **剧情/共创回合**：至少推进一小步（新信息、新动作、环境或情绪转折）；不原地兜圈，不复读前文。**纯非剧情办事回合不适用本条**——办完即可，勿硬推进。
 - ${card.name} 是有自我的人物：有欲望、恐惧、底线与秘密，会拒绝、犹豫、犯错、撒娇或撒谎，不做有求必应的客服。
-- 忌 AI 腔：不总结升华、不说教、不加免责声明；避免依赖万能句式（如反复的"眼中闪过一丝……"）。
+- 忌 AI 腔：不总结升华、不说教、不加免责声明；避免依赖万能句式（如反复的"眼中闪过一丝……"）。`
+}
 - 【语言】无论角色卡、开场白或世界书原文是什么语言，你的叙事与对白一律使用${config.language}（人名、地名等专有名词可保留原文）。
 
 # 输出结构
@@ -295,6 +306,14 @@ export interface TurnInjectionOptions {
 	memoryHits?: Array<string | { text: string; score?: number; source?: string }>;
 	/** 卡作者状态栏格式；非空则末端钉「正文后必须出状态栏」 */
 	statusBarFormats?: string[];
+	/**
+	 * 本次请求是工具续轮（消息流最后一条是 toolResult）。
+	 * 续轮不再注入预设 postHistory 模板与「工具前短旁白」指令——否则每个工具回执后
+	 * 模型都会把末端模板当成新回合重新起笔，与 world_state_update 形成死循环。
+	 */
+	toolContinuation?: boolean;
+	/** 用户预设启用中：末端不再钉「不替 user 行动」等扮演类条款（那是预设的职权），只留语言等管线条款 */
+	presetActive?: boolean;
 }
 
 /** 每轮注入消息流末端的动态内容（custom 消息 → 以 user 角色送达模型） */
@@ -312,6 +331,8 @@ export function buildTurnInjection({
 	userText,
 	memoryHits,
 	statusBarFormats,
+	toolContinuation,
+	presetActive,
 }: TurnInjectionOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const blocks: string[] = [];
@@ -370,8 +391,9 @@ export function buildTurnInjection({
 		);
 	}
 
-	// 预设 post-history：仅剧情生成回合注入（ST 字数/思维链等模板压在这里）
-	if (applyStoryPreset && presetPostHistoryBlocks && presetPostHistoryBlocks.length > 0) {
+	// 预设 post-history：仅剧情生成回合的**首次请求**注入（ST 字数/思维链等模板压在这里）。
+	// 工具续轮不重注：模板重现于末端会被当成「新回合开始」，触发旁白→记账→旁白死循环。
+	if (applyStoryPreset && !toolContinuation && presetPostHistoryBlocks && presetPostHistoryBlocks.length > 0) {
 		const sorted = [...presetPostHistoryBlocks].sort(
 			(a, b) => (b.depth ?? 0) - (a.depth ?? 0), // depth 大者更早出现（离末端更远）
 		);
@@ -388,11 +410,21 @@ export function buildTurnInjection({
 	if (card.postHistoryInstructions) {
 		notes.push(applyMacros(card.postHistoryInstructions, macro));
 	}
-	notes.push(`以${config.language}写叙事与对白（专有名词可保留原文）；不替 ${config.userName} 行动、说话或代述想法。`);
+	if (presetActive) {
+		notes.push(
+			`以${config.language}写叙事与对白（专有名词可保留原文）；人称视角与代言/抢话边界**按用户预设执行**。`,
+		);
+	} else {
+		notes.push(`以${config.language}写叙事与对白（专有名词可保留原文）；不替 ${config.userName} 行动、说话或代述想法。`);
+	}
 	notes.push(
 		`用户消息一律先由你接（含怎么办/下一步这类抉择）；禁止助手口吻聊剧情。系统/API/配置类办事用 assistant_run 委托，不要推诿「去点右栏」。`,
 	);
-	if (applyStoryPreset) {
+	if (toolContinuation) {
+		notes.push(
+			`【续轮】上一步工具结果已交回——这是**同一回合的继续**，不是新回合：不要重新走思维链/预设模板，不要再写开场旁白或重复已写内容，直接接着完成剩余正文（与状态栏，如有）后收笔。除非此后剧情又发生了**新的**持久变化，不要再次调用 world_state_update——本轮已记过的账严禁重复记。`,
+		);
+	} else if (applyStoryPreset) {
 		notes.push(
 			`本轮为剧情生成：篇幅优先遵循上方【预设末端指令】（若有）；无预设时可见正文 harness 缺省约 800–1500 字（短打约 400）。草稿/思维链不计正文字数。`,
 		);
@@ -404,9 +436,11 @@ export function buildTurnInjection({
 			`⚠ 状态栏是本卡扮演的一部分（非预设可选项）：正文之后必须输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本轮剧情更新；漏写状态栏即未完成回合。`,
 		);
 	}
-	notes.push(
-		`台侧过程：若本轮要动工具（设定/账本/面板/检索等），动手前用 1～3 句**可见短旁白**说明创作意图（RP 人话，非工具名）；旁白勿只写在 thinking 里。正文仍一次成文。`,
-	);
+	if (!toolContinuation) {
+		notes.push(
+			`台侧过程：若本轮要动工具（设定/账本/面板/检索等），动手前用 1～3 句**可见短旁白**说明创作意图（RP 人话，非工具名）；旁白勿只写在 thinking 里。正文仍一次成文。`,
+		);
+	}
 	// 决策门禁：末端钉死；求方向 / 身份生成等句升级为强制调用
 	if (config.creationMode === "ask") {
 		const seeks = userText ? userSeeksDirection(userText) : false;

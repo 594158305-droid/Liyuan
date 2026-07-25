@@ -30,6 +30,7 @@ import {
 import { buildRpSummaryPrompt, serializeForSummary } from "../../src/compaction.ts";
 import { buildGreeting, buildSystemPrompt, buildTurnInjection, detectsLanguageMismatch } from "../../src/director.ts";
 import { memoryRecallForTurn } from "../../src/memory/index.ts";
+import { createMacroEnv, evalPresetMacros } from "../../src/preset-macro.ts";
 import {
 	constantEntries,
 	appendOverlayEntry,
@@ -1388,6 +1389,25 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		}
 	};
 
+	/** 用户预设启用中（任一渠道有 enabled 块）——扮演规范让位给预设的判定依据 */
+	const presetHasEnabledBlocks = () =>
+		!!preset && (enabledBlocks(preset, "system").length > 0 || enabledBlocks(preset, "postHistory").length > 0);
+
+	/** system 块求值后的变量表快照：postHistory 每轮求值时以此为初值（前块 setvar、后块 getvar） */
+	let presetVarSnapshot = new Map<string, string>();
+
+	/** postHistory 块每轮求值：变量继承 system 块，lastusermessage 用本轮原文；全空块过滤 */
+	const evalPostHistoryBlocks = (userText: string) => {
+		if (!preset || !card) return undefined;
+		const env = createMacroEnv({ charName: card.name, userName: config.userName, userText });
+		env.vars = new Map(presetVarSnapshot);
+		const out = enabledBlocks(preset, "postHistory").map((b) => ({
+			...b,
+			content: evalPresetMacros(b.content, env).text,
+		}));
+		return out.filter((b) => b.content.trim().length > 0);
+	};
+
 	/** 重装剧情/非剧情两套 system（预设 system 块只进 story） */
 	const rebuildSystemPrompts = (cwd: string) => {
 		if (!card) return;
@@ -1401,9 +1421,32 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			statusBarFormats,
 		};
 		systemPromptOps = buildSystemPrompt({ ...base, presetSystemBlocks: undefined });
+		// 预设宏求值：system 块按序求值并留下变量表；顺带预演 postHistory 汇总清单外宏（显式降级告警）
+		const macroEnv = createMacroEnv({ charName: card.name, userName: config.userName });
+		const unsupported = new Set<string>();
+		const evaledSystemBlocks = (preset ? enabledBlocks(preset, "system") : []).map((b) => {
+			const r = evalPresetMacros(b.content, macroEnv);
+			for (const u of r.unsupported) unsupported.add(u);
+			return { ...b, content: r.text };
+		});
+		presetVarSnapshot = new Map(macroEnv.vars);
+		if (preset) {
+			const probe = createMacroEnv({ charName: card.name, userName: config.userName, userText: "" });
+			probe.vars = new Map(presetVarSnapshot);
+			for (const b of enabledBlocks(preset, "postHistory")) {
+				for (const u of evalPresetMacros(b.content, probe).unsupported) unsupported.add(u);
+			}
+		}
+		if (unsupported.size > 0) {
+			console.warn(
+				`[preset-macro] 预设含 ${unsupported.size} 个不支持的宏（已从送模文本剥除）：${[...unsupported].join("、")}`,
+			);
+		}
+		const nonEmptySystemBlocks = evaledSystemBlocks.filter((b) => b.content.trim().length > 0);
 		systemPromptStory = buildSystemPrompt({
 			...base,
-			presetSystemBlocks: preset ? enabledBlocks(preset, "system") : undefined,
+			presetSystemBlocks: nonEmptySystemBlocks.length > 0 ? nonEmptySystemBlocks : undefined,
+			presetActive: presetHasEnabledBlocks(),
 		});
 	};
 
@@ -1531,6 +1574,10 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 
 		// 工具轮 context 复用 before_agent_start 的判定；若本轮尚未跑过 start（极少），再按 last user 估一次
 		const applyPreset = applyStoryPresetThisTurn;
+		// 工具续轮判定：最后一条是 toolResult ⇒ 本次请求是同一回合的继续。
+		// 续轮不得重注预设 postHistory / 「工具前短旁白」——否则每个工具回执后模板重现于末端，
+		// 模型当成新回合重新起笔 → 旁白→world_state_update→旁白 死循环（2026-07-24 实测）。
+		const isToolContinuation = messages.length > 0 && messages[messages.length - 1]?.role === "toolResult";
 		messages.push({
 			role: "custom",
 			customType: "rp-inject",
@@ -1541,9 +1588,13 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				config,
 				languageMismatch,
 				applyStoryPreset: applyPreset,
-				// 剧情预设 postHistory（字数/思维链等）仅剧情回合注入
+				// 剧情预设 postHistory（字数/思维链等）仅剧情回合首次请求注入；宏已求值
 				presetPostHistoryBlocks:
-					applyPreset && preset ? enabledBlocks(preset, "postHistory") : undefined,
+					applyPreset && !isToolContinuation && preset
+						? evalPostHistoryBlocks(legacyBackstage ? "" : lastUserText)
+						: undefined,
+				toolContinuation: isToolContinuation,
+				presetActive: applyPreset && presetHasEnabledBlocks(),
 				// 全文快照（sync 之后）：用户手改后模型续写可见；超长截断仍可用 panel_read
 				panelIndex: formatPanelSnapshot(panels) ?? formatPanelIndex(panels) ?? undefined,
 				codexIndex: codexIndexCache ?? undefined,
