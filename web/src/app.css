@@ -2477,6 +2477,11 @@ input.panel-search.num {
 	flex-direction: column;
 	gap: 8px;
 }
+/* 新增条目表单：与条目行区隔，强调这是「在写新的一条」 */
+.lore-add-form {
+	border: 1px solid var(--hairline-strong);
+	margin-bottom: 10px;
+}
 .lore-edit-row {
 	align-items: flex-start;
 	flex-wrap: wrap;

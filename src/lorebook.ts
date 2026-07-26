@@ -209,6 +209,133 @@ export function patchLorebookFileEntry(
 }
 
 /**
+ * 按内容指纹从世界书 JSON 里删除一条（其余条目原样保留，含未知 ST 字段）。
+ * 兼容 ST 对象 entries（uid→条目）与卡内嵌/补充设定数组 entries。
+ * 返回被删条目的归一化视图；未命中返回 null（文件不写）。
+ */
+export function deleteLorebookFileEntry(path: string, fingerprint: string): LorebookEntry | null {
+	const json = readJsonFile(path) as Record<string, unknown>;
+	const raw = json.entries;
+	if (raw == null) return null;
+
+	const matches = (e: unknown): e is Record<string, unknown> =>
+		!!e &&
+		typeof e === "object" &&
+		typeof (e as Record<string, unknown>).content === "string" &&
+		loreFingerprint((e as Record<string, unknown>).content as string) === fingerprint;
+
+	let removed: LorebookEntry | null = null;
+
+	if (Array.isArray(raw)) {
+		const idx = raw.findIndex(matches);
+		if (idx < 0) return null;
+		removed = normalizeEntries([raw[idx]])[0];
+		json.entries = [...raw.slice(0, idx), ...raw.slice(idx + 1)];
+	} else if (raw && typeof raw === "object") {
+		const obj = { ...(raw as Record<string, unknown>) };
+		const key = Object.keys(obj).find((k) => matches(obj[k]));
+		if (key === undefined) return null;
+		removed = normalizeEntries([obj[key]])[0];
+		delete obj[key];
+		json.entries = obj;
+	} else {
+		return null;
+	}
+
+	writeFileSync(path, `${JSON.stringify(json, null, "\t")}\n`, "utf8");
+	return removed;
+}
+
+/** 新增条目的输入（面板「加一条」与 agent 写书共用） */
+export interface NewLoreEntryInput {
+	comment: string;
+	keys: string[];
+	content: string;
+	secondaryKeys?: string[];
+	constant?: boolean;
+	selective?: boolean;
+	order?: number;
+}
+
+/**
+ * 向世界书文件追加一条条目——**保持文件原有 entries 形态**与其它顶层字段（name 等）。
+ * - 对象 entries（ST 格式）：新键取空闲 uid 的字符串
+ * - 数组 entries（卡内嵌 / 补充设定）：追加到末尾
+ * - 文件不存在：按数组格式新建（同 appendOverlayEntry）
+ *
+ * 两套字段名同写（key/keys、order/insertion_order、disable/enabled），导回酒馆与再读都认。
+ * 内容指纹与既有条目重复时返回 null，且不写文件。
+ */
+export function appendLorebookFileEntry(path: string, input: NewLoreEntryInput): LorebookEntry | null {
+	let json: Record<string, unknown> = {};
+	let existing: Record<string, unknown>[] = [];
+	let obj: Record<string, unknown> | null = null;
+	if (existsSync(path)) {
+		json = readJsonFile(path) as Record<string, unknown>;
+		const raw = json.entries;
+		if (Array.isArray(raw)) {
+			existing = raw.filter((e): e is Record<string, unknown> => !!e && typeof e === "object");
+		} else if (raw && typeof raw === "object") {
+			obj = { ...(raw as Record<string, unknown>) };
+			existing = Object.values(obj).filter((e): e is Record<string, unknown> => !!e && typeof e === "object");
+		}
+	}
+
+	const content = input.content.replace(/\r\n/g, "\n").trim();
+	const comment = input.comment.trim();
+	if (!content) return null;
+	const fp = loreFingerprint(content);
+	for (const e of existing) {
+		if (typeof e.content === "string" && loreFingerprint(e.content) === fp) return null;
+	}
+
+	// 新 uid = 现有最大值 +1；对象 entries 再避开已占用的键
+	let uid = 0;
+	for (const e of existing) {
+		const u = typeof e.uid === "number" ? e.uid : typeof e.id === "number" ? e.id : Number.NaN;
+		if (Number.isFinite(u) && u >= uid) uid = u + 1;
+	}
+	if (obj) {
+		while (Object.hasOwn(obj, String(uid))) uid++;
+	}
+
+	const keys = input.keys.map((k) => k.trim()).filter(Boolean);
+	const sec = (input.secondaryKeys ?? []).map((k) => k.trim()).filter(Boolean);
+	const order =
+		typeof input.order === "number" && Number.isFinite(input.order)
+			? Math.max(0, Math.min(9999, Math.round(input.order)))
+			: 100;
+
+	const raw: Record<string, unknown> = {
+		uid,
+		key: keys,
+		keys,
+		keysecondary: sec,
+		secondary_keys: sec,
+		comment,
+		name: comment,
+		content,
+		constant: input.constant === true,
+		selective: input.selective === true && sec.length > 0,
+		disable: false,
+		enabled: true,
+		order,
+		insertion_order: order,
+		addMemo: true,
+	};
+
+	if (obj) {
+		obj[String(uid)] = raw;
+		json.entries = obj;
+	} else {
+		json.entries = [...existing, raw];
+	}
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(json, null, "\t")}\n`, "utf8");
+	return normalizeEntries([raw])[0];
+}
+
+/**
  * 归一化条目 → 标准世界书 JSON（entries 为 uid→条目对象，key/keysecondary/disable/order…）。
  * 与酒馆世界信息公开格式兼容，可导回酒馆或再导入梨园。
  * 只写梨园真实承载的字段；对端未写字段走其默认值（粘滞/冷却等扩展不往返）。

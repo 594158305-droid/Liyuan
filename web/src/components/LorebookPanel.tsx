@@ -78,6 +78,7 @@ function EntryRow({
 	expanded,
 	onToggle,
 	onPatch,
+	onDelete,
 }: {
 	e: LoreEntryView;
 	busy: boolean;
@@ -85,6 +86,7 @@ function EntryRow({
 	expanded: boolean;
 	onToggle: (fingerprint: string, enabled: boolean) => void;
 	onPatch: (body: LoreEntryPatchBody, doneText?: string) => void;
+	onDelete: (fingerprint: string) => void;
 }) {
 	const [open, setOpen] = useState(false);
 	const [editing, setEditing] = useState(false);
@@ -202,6 +204,9 @@ function EntryRow({
 								<button type="button" className="drawer-btn" disabled={busy} onClick={() => void startEdit()}>
 									编辑
 								</button>
+								<ConfirmButton disabled={busy} confirmText="确认删除" onConfirm={() => onDelete(e.fingerprint)}>
+									删除
+								</ConfirmButton>
 							</div>
 						</>
 					)}
@@ -519,6 +524,8 @@ export function LorebookPanel({ toast }: { toast: (level: "info" | "warning" | "
 		setLimit(40);
 		setQuery("");
 		setHits(null);
+		// 换书必须关掉新增表单：它按当前书投递，留着会写错本
+		setAdding(false);
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- 仅随 viewKey 切换
 	}, [viewKey]);
 
@@ -530,6 +537,13 @@ export function LorebookPanel({ toast }: { toast: (level: "info" | "warning" | "
 	const [expandTick, setExpandTick] = useState(0);
 	const [expanded, setExpanded] = useState(false);
 	const [limit, setLimit] = useState(40);
+	// 新增条目表单
+	const [adding, setAdding] = useState(false);
+	const [newComment, setNewComment] = useState("");
+	const [newKeys, setNewKeys] = useState("");
+	const [newContent, setNewContent] = useState("");
+	const [newConstant, setNewConstant] = useState(false);
+	const [newOrder, setNewOrder] = useState("100");
 
 	const doSearch = async () => {
 		const q = query.trim();
@@ -559,6 +573,41 @@ export function LorebookPanel({ toast }: { toast: (level: "info" | "warning" | "
 			await apiPut("/api/lorebook/entry", body);
 			reload();
 		}, doneText);
+
+	/** 当前浏览的书（写操作都限定在它身上；agent = 本卡补充设定） */
+	const scopePath = view?.kind === "file" ? view.path : "agent";
+
+	// 删除限定当前浏览的书，防多本书同指纹时误删别本
+	const removeEntry = (fingerprint: string) =>
+		run(async () => {
+			await apiDelete(`/api/lorebook/entry?fp=${encodeURIComponent(fingerprint)}&path=${encodeURIComponent(scopePath)}`);
+			reload();
+		}, "条目已删除");
+
+	const resetAddForm = () => {
+		setAdding(false);
+		setNewComment("");
+		setNewKeys("");
+		setNewContent("");
+		setNewConstant(false);
+		setNewOrder("100");
+	};
+
+	const addEntry = () =>
+		run(async () => {
+			const order = Number.parseInt(newOrder, 10);
+			const r = await apiPost<{ duplicate?: boolean }>("/api/lorebook/entry", {
+				path: scopePath,
+				comment: newComment.trim(),
+				content: newContent,
+				keys: parseKeyLine(newKeys),
+				constant: newConstant,
+				order: Number.isFinite(order) ? order : 100,
+			});
+			resetAddForm();
+			reload();
+			if (r.duplicate) toast("warning", "正文与本书已有条目重复，未重复写入");
+		}, "条目已添加");
 
 	const filtered = useMemo(() => {
 		const list = data?.entries ?? [];
@@ -644,6 +693,71 @@ export function LorebookPanel({ toast }: { toast: (level: "info" | "warning" | "
 								{expanded ? "全部收起" : "全部展开"}
 							</button>
 						</div>
+						{!adding ? (
+							<button className="drawer-btn" disabled={busy} onClick={() => setAdding(true)}>
+								＋ 新增条目
+							</button>
+						) : (
+							<div className="lore-edit lore-add-form">
+								<div className="field-hint">写进「{titleName}」。关键词留空会自动按标题生成。</div>
+								<Field label="标题">
+									<input
+										className="panel-search"
+										placeholder="如：南阳城 · 宵禁"
+										value={newComment}
+										autoFocus
+										onChange={(ev) => setNewComment(ev.target.value)}
+									/>
+								</Field>
+								<div className="panel-row lore-edit-row">
+									<Field label="类型">
+										<select
+											className="panel-search"
+											value={newConstant ? "constant" : "keyed"}
+											onChange={(ev) => setNewConstant(ev.target.value === "constant")}
+										>
+											<option value="keyed">蓝灯 · 关键词</option>
+											<option value="constant">绿灯 · 常驻</option>
+										</select>
+									</Field>
+									<Field label="优先级 order" hint="越小越靠前">
+										<input
+											className="panel-search lore-order-input"
+											type="number"
+											min={0}
+											max={9999}
+											value={newOrder}
+											onChange={(ev) => setNewOrder(ev.target.value)}
+										/>
+									</Field>
+								</div>
+								<Field label="关键词" hint={newConstant ? "常驻条目不靠关键词触发；填了可供检索" : "逗号 / 顿号分隔；留空则按标题生成"}>
+									<input className="panel-search" value={newKeys} onChange={(ev) => setNewKeys(ev.target.value)} placeholder="如：南阳、宵禁" />
+								</Field>
+								<Field label="正文">
+									<textarea
+										className="panel-search lore-content-edit"
+										rows={8}
+										placeholder="这条设定的具体内容…"
+										value={newContent}
+										onChange={(ev) => setNewContent(ev.target.value)}
+									/>
+								</Field>
+								<div className="panel-row">
+									<button
+										type="button"
+										className="drawer-btn save-btn"
+										disabled={busy || !newComment.trim() || !newContent.trim()}
+										onClick={addEntry}
+									>
+										添加
+									</button>
+									<button type="button" className="drawer-btn" disabled={busy} onClick={resetAddForm}>
+										取消
+									</button>
+								</div>
+							</div>
+						)}
 						{filtered.length === 0 && <div className="sp-empty">此书无匹配条目。</div>}
 						{filtered.slice(0, limit).map((e) => (
 							<EntryRow
@@ -654,6 +768,7 @@ export function LorebookPanel({ toast }: { toast: (level: "info" | "warning" | "
 								expanded={expanded}
 								onToggle={toggle}
 								onPatch={patch}
+								onDelete={removeEntry}
 							/>
 						))}
 						{filtered.length > limit && (

@@ -58,6 +58,7 @@ import {
 	createCodex,
 	deleteCodexEntry,
 	findCodex,
+	keysFromTitle,
 	listCodexes,
 	loadCodexEntries,
 	userEntryToCodexInput,
@@ -80,7 +81,9 @@ import {
 import { resolveConfigPath } from "../src/paths.ts";
 import type { WorldlineView } from "../src/worldline.ts";
 import {
+	appendLorebookFileEntry,
 	applyDisabledLore,
+	deleteLorebookFileEntry,
 	exportStLorebook,
 	loadLorebookFile,
 	loreFingerprint,
@@ -3025,6 +3028,73 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 			}
 			/**
+			 * 新增条目：写进指定世界书文件（body.path=书路径，或 "agent"=本卡补充设定）。
+			 * 面板只必填标题 + 正文；关键词留空则从标题派生——蓝灯条目没有 key 永远不会触发。
+			 */
+			case "POST /api/lorebook/entry": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					path?: string;
+					comment?: string;
+					name?: string;
+					content?: string;
+					info?: string;
+					keys?: string[];
+					secondaryKeys?: string[];
+					constant?: boolean;
+					selective?: boolean;
+					order?: number;
+				};
+				const comment = (body.comment ?? body.name ?? "").trim();
+				const content = (body.content ?? body.info ?? "").trim();
+				if (!comment) throw new Error("标题不能为空");
+				if (!content) throw new Error("正文不能为空");
+				const config = loadConfig(host.cwd);
+				const card = loadCardFile(resolvePath(host.cwd, config.card));
+				const target = (body.path ?? "").replace(/\\/g, "/").trim();
+				let abs: string;
+				let targetLabel: string;
+				if (!target || target === "agent") {
+					abs = overlayPathFor(host.cwd, card.name);
+					targetLabel = "补充设定";
+				} else {
+					// 与 DELETE 同源：只认书单里的路径
+					const known = listLorebookFiles(host.cwd, config);
+					const hit = known.find((b) => b.path === target);
+					if (!hit) throw new Error("不是已知的世界书文件");
+					abs = resolvePath(host.cwd, target);
+					targetLabel = hit.name;
+				}
+				const rawKeys = Array.isArray(body.keys)
+					? body.keys.filter((k): k is string => typeof k === "string").map((k) => k.trim()).filter(Boolean)
+					: [];
+				const entry = appendLorebookFileEntry(abs, {
+					comment,
+					keys: rawKeys.length > 0 ? rawKeys : keysFromTitle(comment),
+					content,
+					secondaryKeys: Array.isArray(body.secondaryKeys)
+						? body.secondaryKeys.filter((k): k is string => typeof k === "string")
+						: [],
+					constant: body.constant === true,
+					selective: body.selective === true,
+					order: typeof body.order === "number" ? body.order : undefined,
+				});
+				if (!entry) {
+					sendJson(res, 200, { ok: true, duplicate: true, fingerprint: loreFingerprint(content) });
+					return true;
+				}
+				await host.softRefreshConfig();
+				host.notify("info", `已向「${targetLabel}」新增条目：${entry.comment}`);
+				sendJson(res, 200, {
+					ok: true,
+					duplicate: false,
+					fingerprint: loreFingerprint(entry.content),
+					comment: entry.comment,
+					keys: entry.keys,
+				});
+				return true;
+			}
+			/**
 			 * 编辑条目：写回源文件（独立世界书 file / agent 补充设定）。
 			 * 可改 constant（绿/蓝灯）、order（优先级）、keys、selective、comment、content。
 			 */
@@ -3094,6 +3164,59 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					constant: result.entry.constant,
 					order: result.entry.order,
 					path: wrotePath.startsWith(host.cwd) ? wrotePath.slice(host.cwd.length + 1).replace(/\\/g, "/") : wrotePath,
+				});
+				return true;
+			}
+			/**
+			 * 删除条目：从源文件（独立世界书 / agent 补充设定）里移除该条。
+			 * 与 PUT 同一寻址方式：按指纹扫全部书文件 + 补充设定，命中哪本删哪本。
+			 * 传 ?path= 时只在该文件内删（避免多本书含同指纹条目时误删别本）。
+			 */
+			case "DELETE /api/lorebook/entry": {
+				if (refuseWhileStreaming()) return true;
+				const fp = (query.get("fp") ?? query.get("fingerprint") ?? "").trim();
+				if (!fp) throw new Error("缺少条目 fingerprint");
+				const pathQ = (query.get("path") ?? "").replace(/\\/g, "/").trim();
+				const config = loadConfig(host.cwd);
+				const card = loadCardFile(resolvePath(host.cwd, config.card));
+				const known = listLorebookFiles(host.cwd, config).map((b) => b.path);
+				const candidates: string[] = [];
+				if (pathQ === "agent") {
+					candidates.push(overlayPathFor(host.cwd, card.name));
+				} else if (pathQ) {
+					// 只认书单里的路径（与面板展示同源），不接受任意文件路径
+					if (!known.includes(pathQ)) throw new Error("不是已知的世界书文件");
+					candidates.push(resolvePath(host.cwd, pathQ));
+				} else {
+					for (const p of known) candidates.push(resolvePath(host.cwd, p));
+					candidates.push(overlayPathFor(host.cwd, card.name));
+				}
+				let removed: LorebookEntry | null = null;
+				let fromPath = "";
+				for (const abs of candidates) {
+					if (!existsSync(abs)) continue;
+					const r = deleteLorebookFileEntry(abs, fp);
+					if (r) {
+						removed = r;
+						fromPath = abs;
+						break;
+					}
+				}
+				if (!removed) throw new Error("未找到该条目（世界书可能已更换，或条目不在可写文件中）");
+				// 清理停用清单里的残留指纹
+				if (config.disabledLore?.includes(fp)) {
+					const disabled = config.disabledLore.filter((d) => d !== fp);
+					const next = { ...config } as Record<string, unknown>;
+					if (disabled.length > 0) next.disabledLore = disabled;
+					else delete next.disabledLore;
+					writeJsonWithBackup(configPath(host.cwd), next);
+				}
+				await host.softRefreshConfig();
+				host.notify("info", `已删除条目「${removed.comment || removed.keys[0] || fp}」`);
+				sendJson(res, 200, {
+					ok: true,
+					comment: removed.comment,
+					path: fromPath.startsWith(host.cwd) ? fromPath.slice(host.cwd.length + 1).replace(/\\/g, "/") : fromPath,
 				});
 				return true;
 			}
