@@ -6879,14 +6879,15 @@ label.drawer-btn {
 		overflow-x: hidden;
 	}
 
-	/* ── ③ 侧栏面板（含右栏助手）：真全屏——盖过顶栏，固定于视口 ──
-	   刘海/键盘边距不在此处：panel-head 顶部安全区、panel-body 底部
-	   safe-area+kb-inset 已各自处理，叠加会出双倍留白 */
+	/* ── ③ 侧栏面板（含右栏助手）：占满顶栏以下，顶栏保持可点 ──
+	   用户定稿（2026-07-26）：面板打开时顶栏按钮直接可用——再点同钮=关，
+	   点别的钮=切换，不必先找 ×。故不盖顶栏：absolute 铺满 .layout
+	   （基础规则已 inset:0），此处只去掉浮动卡片的边距圆角投影。
+	   panel-head 的顶部安全区 padding 在顶栏可见时多余，压回普通值。 */
 	.side {
-		position: fixed;
-		inset: 0;
-		height: 100dvh;
-		z-index: 60; /* 顶栏 50，必须盖过 */
 		border-radius: 0;
+	}
+	.panel-head {
+		padding-top: 12px;
 	}
 }
