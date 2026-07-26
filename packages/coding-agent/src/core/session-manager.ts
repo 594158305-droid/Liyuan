@@ -885,6 +885,18 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Force-write all in-memory entries to the session file now (no-op if already flushed).
+	 * The hasAssistant gate in _persist defers the first write until an assistant reply to
+	 * avoid littering empty sessions; callers whose sessions are meaningful without one
+	 * (e.g. imported chat history injected as custom messages) use this to persist anyway.
+	 */
+	flush(): void {
+		if (!this.persist || !this.sessionFile || this.flushed) return;
+		this._rewriteFile();
+		this.flushed = true;
+	}
+
 	isPersisted(): boolean {
 		return this.persist;
 	}

@@ -2018,7 +2018,15 @@ const handlePrompt = async (text: string) => {
 	// 流式中送达的用户输入排队到本轮结束（RP 语境：不打断正在进行的叙事）
 	await session.prompt(trimmed, session.isStreaming ? { streamingBehavior: "followUp" } : undefined);
 	// 斜杠命令可能改写历史（/rewind /reroll /import）或注入消息：全量对齐
-	if (isCommand) resyncAll();
+	if (isCommand) {
+		// /import：前情块是 custom 消息，SessionManager 在「尚无 assistant 回复」的
+		// 新会话里默认不落盘（防空会话刷屏）——导入的会话没有回复也必须持久化，
+		// 否则重启/切会话后整段前情蒸发、会话列表里也找不到（用户实测踩中）。
+		if (/^\/import\b/i.test(trimmed)) {
+			session.sessionManager.flush();
+		}
+		resyncAll();
+	}
 };
 
 /** 流式中禁止的操作统一挡下 */

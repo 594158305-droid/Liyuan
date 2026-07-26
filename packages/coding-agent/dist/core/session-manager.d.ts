@@ -181,6 +181,12 @@ export declare class SessionManager {
     newSession(options?: NewSessionOptions): string | undefined;
     private _buildIndex;
     private _rewriteFile;
+    /**
+     * Force-write all in-memory entries to the session file now (no-op if already flushed).
+     * Sessions gated on first assistant reply use this to persist custom-only content
+     * (e.g. imported chat history).
+     */
+    flush(): void;
     isPersisted(): boolean;
     getCwd(): string;
     getSessionDir(): string;
