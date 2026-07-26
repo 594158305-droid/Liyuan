@@ -481,8 +481,8 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 					{missing && <div className="panel-error">配置指向的预设文件不存在：{missing}</div>}
 
 					{draft && (
-						<>
-							<section className="sp-section">
+						<div className="preset-columns">
+							<section className="sp-section preset-col">
 								<h4>采样参数</h4>
 								{Object.keys(draft.samplers).length === 0 && <div className="sp-empty">该预设未带采样参数。</div>}
 								{orderedSamplers.known.map((m) => (
@@ -524,38 +524,36 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 								))}
 							</section>
 
-							<section className="sp-section">
-								<h4>提示词块</h4>
-								<div className="field-hint">点条目或「修改」展开编辑正文。开关立即生效，不会自动写文件。</div>
-								{grouped.map(([channel, blocks]) => {
-									const totalChars = blocks.reduce((n, b) => n + (b.enabled ? b.content.length : 0), 0);
-									const allOn = blocks.every((b) => b.enabled);
-									return (
-										<div key={channel} className="preset-group">
-											<div className="preset-group-head">
-												<span className="preset-group-name">
-													{CHANNEL_LABEL[channel] ?? channel}
-													<span className="lore-meta">
-														{blocks.length} 块 · 启用 {totalChars.toLocaleString()} 字
-													</span>
-												</span>
-												<button className="act" disabled={busy} onClick={() => toggleChannel(blocks, !allOn)}>
+							{(["system", "postHistory"] as const).map((channel) => {
+								const blocks = grouped.find(([c]) => c === channel)?.[1] ?? [];
+								const totalChars = blocks.reduce((n, b) => n + (b.enabled ? b.content.length : 0), 0);
+								const allOn = blocks.length > 0 && blocks.every((b) => b.enabled);
+								return (
+									<section key={channel} className="sp-section preset-col">
+										<h4>
+											{CHANNEL_LABEL[channel]}
+											<span className="lore-meta preset-col-meta">
+												{blocks.length} 块 · 启用 {totalChars.toLocaleString()} 字
+											</span>
+											{blocks.length > 0 && (
+												<button className="act preset-col-toggle" disabled={busy} onClick={() => toggleChannel(blocks, !allOn)}>
 													{allOn ? "全关" : "全开"}
 												</button>
-											</div>
-											{blocks.map((b) => (
-												<PresetBlockEditor
-													key={b.id}
-													block={b}
-													busy={busy}
-													onChange={(patch) => patchBlock(b.id, patch)}
-												/>
-											))}
-										</div>
-									);
-								})}
-							</section>
-						</>
+											)}
+										</h4>
+										{blocks.length === 0 && <div className="sp-empty">该预设无此通道块。</div>}
+										{blocks.map((b) => (
+											<PresetBlockEditor
+												key={b.id}
+												block={b}
+												busy={busy}
+												onChange={(patch) => patchBlock(b.id, patch)}
+											/>
+										))}
+									</section>
+								);
+							})}
+						</div>
 					)}
 					{!draft && !missing && !loadingDetail && (
 						<div className="sp-empty">当前未使用预设。可从上方「导入」一份 ST 预设（自动转换）。</div>

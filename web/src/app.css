@@ -6891,3 +6891,39 @@ label.drawer-btn {
 		padding-top: 12px;
 	}
 }
+
+/* ══════════ 预设面板三栏（v1.1.2）：采样参数 | 系统区 | 末端注入 ══════════ */
+/* 预设面板加宽画布（桌面）；手机端 .side 铺满规则优先级更高不受影响 */
+.side-xwide {
+	width: min(calc(100% - 28px), 1080px);
+}
+.preset-columns {
+	display: grid;
+	grid-template-columns: minmax(220px, 300px) 1fr 1fr;
+	gap: 0 18px;
+	align-items: start;
+}
+.preset-col {
+	min-width: 0;
+}
+.preset-col h4 {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+}
+.preset-col-meta {
+	font-weight: 400;
+	letter-spacing: 0;
+}
+.preset-col-toggle {
+	margin-left: auto;
+}
+/* 窄容器（手机端面板 / 桌面窄窗）回落单列堆叠——行为与旧版一致 */
+@media (max-width: 999px) {
+	.side-xwide {
+		width: auto;
+	}
+	.preset-columns {
+		grid-template-columns: 1fr;
+	}
+}
