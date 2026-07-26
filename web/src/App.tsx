@@ -1473,11 +1473,9 @@ export default function App() {
 			setManualTick((t) => ({ ...t, [side]: t[side] + 1 }));
 		};
 		const wide = open && !agent && WIDE_PANELS.has(headId as PanelId);
-		// 预设三栏（采样|系统区|末端注入）需要更宽的画布；手机端 .side 宽度规则优先，不受影响
-		const xwide = open && headId === "preset";
 		return (
 			<aside
-				className={`side side-${side} ${wide ? "side-wide" : ""} ${xwide ? "side-xwide" : ""} ${open ? "" : "side-collapsed"}`}
+				className={`side side-${side} ${wide ? "side-wide" : ""} ${open ? "" : "side-collapsed"}`}
 				aria-hidden={!open}
 			>
 				{open && (

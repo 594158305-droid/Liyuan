@@ -276,6 +276,9 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 		return { known, unknown };
 	}, [draft]);
 
+	/** 页签：采样参数 | 系统区 | 末端注入（点按钮切换，不堆叠） */
+	const [tab, setTab] = useState<"samplers" | "system" | "postHistory">("samplers");
+
 	const grouped = useMemo(() => {
 		const map = new Map<string, DraftBlock[]>();
 		for (const b of draft?.blocks ?? []) {
@@ -481,9 +484,38 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 					{missing && <div className="panel-error">配置指向的预设文件不存在：{missing}</div>}
 
 					{draft && (
-						<div className="preset-columns">
-							<section className="sp-section preset-col">
-								<h4>采样参数</h4>
+						<>
+							<div className="preset-tabs" role="tablist">
+								<button
+									type="button"
+									role="tab"
+									aria-selected={tab === "samplers"}
+									className={`preset-tab ${tab === "samplers" ? "active" : ""}`}
+									onClick={() => setTab("samplers")}
+								>
+									采样参数
+								</button>
+								{(["system", "postHistory"] as const).map((ch) => {
+									const blocks = grouped.find(([c]) => c === ch)?.[1] ?? [];
+									const on = blocks.filter((b) => b.enabled).length;
+									return (
+										<button
+											key={ch}
+											type="button"
+											role="tab"
+											aria-selected={tab === ch}
+											className={`preset-tab ${tab === ch ? "active" : ""}`}
+											onClick={() => setTab(ch)}
+										>
+											{CHANNEL_LABEL[ch]}
+											<span className="preset-tab-count">{on}/{blocks.length}</span>
+										</button>
+									);
+								})}
+							</div>
+
+							{tab === "samplers" && (
+							<section className="sp-section">
 								{Object.keys(draft.samplers).length === 0 && <div className="sp-empty">该预设未带采样参数。</div>}
 								{orderedSamplers.known.map((m) => (
 									<SliderField
@@ -523,37 +555,39 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 									</div>
 								))}
 							</section>
+							)}
 
-							{(["system", "postHistory"] as const).map((channel) => {
-								const blocks = grouped.find(([c]) => c === channel)?.[1] ?? [];
-								const totalChars = blocks.reduce((n, b) => n + (b.enabled ? b.content.length : 0), 0);
-								const allOn = blocks.length > 0 && blocks.every((b) => b.enabled);
-								return (
-									<section key={channel} className="sp-section preset-col">
-										<h4>
-											{CHANNEL_LABEL[channel]}
-											<span className="lore-meta preset-col-meta">
-												{blocks.length} 块 · 启用 {totalChars.toLocaleString()} 字
-											</span>
-											{blocks.length > 0 && (
-												<button className="act preset-col-toggle" disabled={busy} onClick={() => toggleChannel(blocks, !allOn)}>
-													{allOn ? "全关" : "全开"}
-												</button>
-											)}
-										</h4>
-										{blocks.length === 0 && <div className="sp-empty">该预设无此通道块。</div>}
-										{blocks.map((b) => (
-											<PresetBlockEditor
-												key={b.id}
-												block={b}
-												busy={busy}
-												onChange={(patch) => patchBlock(b.id, patch)}
-											/>
-										))}
-									</section>
-								);
-							})}
-						</div>
+							{tab !== "samplers" &&
+								(() => {
+									const channel = tab;
+									const blocks = grouped.find(([c]) => c === channel)?.[1] ?? [];
+									const totalChars = blocks.reduce((n, b) => n + (b.enabled ? b.content.length : 0), 0);
+									const allOn = blocks.length > 0 && blocks.every((b) => b.enabled);
+									return (
+										<section className="sp-section">
+											<div className="preset-chan-head">
+												<span className="lore-meta">
+													{blocks.length} 块 · 启用 {totalChars.toLocaleString()} 字 · 开关立即生效，点条目展开编辑
+												</span>
+												{blocks.length > 0 && (
+													<button className="act" disabled={busy} onClick={() => toggleChannel(blocks, !allOn)}>
+														{allOn ? "全关" : "全开"}
+													</button>
+												)}
+											</div>
+											{blocks.length === 0 && <div className="sp-empty">该预设无此通道块。</div>}
+											{blocks.map((b) => (
+												<PresetBlockEditor
+													key={b.id}
+													block={b}
+													busy={busy}
+													onChange={(patch) => patchBlock(b.id, patch)}
+												/>
+											))}
+										</section>
+									);
+								})()}
+						</>
 					)}
 					{!draft && !missing && !loadingDetail && (
 						<div className="sp-empty">当前未使用预设。可从上方「导入」一份 ST 预设（自动转换）。</div>

@@ -6892,38 +6892,53 @@ label.drawer-btn {
 	}
 }
 
-/* ══════════ 预设面板三栏（v1.1.2）：采样参数 | 系统区 | 末端注入 ══════════ */
-/* 预设面板加宽画布（桌面）；手机端 .side 铺满规则优先级更高不受影响 */
-.side-xwide {
-	width: min(calc(100% - 28px), 1080px);
-}
-.preset-columns {
-	display: grid;
-	grid-template-columns: minmax(220px, 300px) 1fr 1fr;
-	gap: 0 18px;
-	align-items: start;
-}
-.preset-col {
-	min-width: 0;
-}
-.preset-col h4 {
+/* ══════════ 预设面板页签（v1.1.2）：采样参数 | 系统区 | 末端注入 点按钮切换 ══════════ */
+.preset-tabs {
 	display: flex;
-	align-items: baseline;
-	gap: 8px;
+	gap: 6px;
+	margin: 2px 0 14px;
+	padding: 4px;
+	background: var(--surface-dim);
+	border-radius: 12px;
 }
-.preset-col-meta {
+.preset-tab {
+	flex: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	min-height: 36px;
+	padding: 6px 4px;
+	border: none;
+	border-radius: 9px;
+	background: none;
+	color: var(--text-soft);
+	font-size: 13px;
+	cursor: pointer;
+	transition: background 0.15s, color 0.15s;
+}
+.preset-tab:hover {
+	color: var(--text);
+}
+.preset-tab.active {
+	background: var(--surface);
+	color: var(--accent);
+	font-weight: 600;
+	box-shadow: var(--shadow-1);
+}
+.preset-tab-count {
+	font-size: 11px;
 	font-weight: 400;
-	letter-spacing: 0;
+	color: var(--text-faint);
 }
-.preset-col-toggle {
-	margin-left: auto;
+.preset-tab.active .preset-tab-count {
+	color: var(--accent);
+	opacity: 0.75;
 }
-/* 窄容器（手机端面板 / 桌面窄窗）回落单列堆叠——行为与旧版一致 */
-@media (max-width: 999px) {
-	.side-xwide {
-		width: auto;
-	}
-	.preset-columns {
-		grid-template-columns: 1fr;
-	}
+.preset-chan-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin: 0 0 8px;
 }
