@@ -170,6 +170,33 @@ export interface AssistantModelInfo {
 	name: string;
 }
 
+/**
+ * 在线更新状态（主页 chip / 弹窗 / 进度气泡共用一份状态）。
+ * phase 流转：none → available →(下载)→ downloading → ready；失败回 available 带 error。
+ * ready 跨重启持久（暂存包在 .liyuan-cache/update/，启动脚本应用后自然回 none）。
+ */
+export interface UpdateWire {
+	phase: "none" | "available" | "downloading" | "ready";
+	currentVersion: string;
+	latestVersion?: string;
+	releaseName?: string;
+	/** release 正文 markdown（弹窗展示） */
+	releaseNotes?: string;
+	releaseUrl?: string;
+	publishedAt?: string;
+	/** 资产字节数（弹窗体积展示） */
+	assetSize?: number;
+	/** downloading 专用：进度 */
+	received?: number;
+	total?: number;
+	/** ready 专用：zip 校验方式（none=release 未附清单，UI 明示） */
+	verified?: "sha256sums" | "none";
+	/** 最近一次失败原因（available 态展示，供重试） */
+	error?: string;
+	/** 启动脚本监护下运行（true 才能「立即重启」；直跑 node 只能下次启动时升级） */
+	supervised?: boolean;
+}
+
 /** Server → Client 帧 */
 export type ServerFrame =
 	| {
@@ -229,6 +256,8 @@ export type ServerFrame =
 	| { type: "assistant_delta"; kind: "text" | "thinking"; delta: string }
 	| { type: "assistant_state"; state: "start" | "end" }
 	| { type: "assistant_activity"; activity: WireActivity }
+	/** 在线更新状态变化（发现新版/下载进度/就绪）：全量状态推送 */
+	| { type: "update"; update: UpdateWire }
 	| { type: "error"; text: string };
 
 /** 助手会话列表条目（绑定角色卡，与剧情会话列表同构裁剪） */

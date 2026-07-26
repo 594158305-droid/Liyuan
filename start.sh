@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Liyuan Agent 1.0.2 - Linux / macOS launcher
+# Liyuan Agent - Linux / macOS launcher
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -10,7 +10,7 @@ MIN_NODE_MAJOR=22
 
 echo ""
 echo "  ========================================"
-echo "    Liyuan Agent  v1.0.2"
+echo "    Liyuan Agent"
 echo "  ========================================"
 echo ""
 
@@ -59,14 +59,26 @@ if [[ ! -f liyuan.agent.json && -f liyuan.agent.example.json ]]; then
   echo "[liyuan] Edit liyuan.agent.json and set your API key before chatting."
 fi
 
+# Apply staged online update (downloaded via the in-app updater; no-op otherwise)
+if [[ -f .liyuan-cache/update/pending.json ]]; then
+  echo "[liyuan] Applying staged update ..."
+  node scripts/apply-update.mjs || true
+fi
+
 if [[ ! -d node_modules ]]; then
-  echo "[liyuan] node_modules missing 鈥?running npm install ..."
+  echo "[liyuan] node_modules missing - running npm install ..."
   echo "[liyuan] First run needs network; later starts are offline-ready."
   npm install
 fi
 
+# Online update changed dependencies -> reinstall once
+if [[ -f .liyuan-cache/needs-npm-install ]]; then
+  echo "[liyuan] Update changed dependencies - running npm install ..."
+  npm install && rm -f .liyuan-cache/needs-npm-install
+fi
+
 if [[ ! -f web/dist/index.html ]]; then
-  echo "[liyuan] Frontend dist missing 鈥?running web:build ..."
+  echo "[liyuan] Frontend dist missing - running web:build ..."
   npm run web:build
 fi
 
@@ -102,5 +114,22 @@ if [[ "${OPEN_BROWSER}" != "0" ]]; then
   ) &
 fi
 
-exec node server/main.ts "$@"
+# Supervised run: exit 87 = in-app "restart to apply update" -> apply + relaunch
+export LIYUAN_SUPERVISED=1
+while true; do
+  set +e
+  node server/main.ts "$@"
+  ec=$?
+  set -e
+  if [[ "$ec" == "87" ]]; then
+    echo ""
+    echo "[liyuan] Restarting to apply update ..."
+    [[ -f .liyuan-cache/update/pending.json ]] && node scripts/apply-update.mjs || true
+    if [[ -f .liyuan-cache/needs-npm-install ]]; then
+      npm install && rm -f .liyuan-cache/needs-npm-install
+    fi
+    continue
+  fi
+  exit "$ec"
+done
 

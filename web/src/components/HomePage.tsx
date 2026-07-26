@@ -3,6 +3,7 @@
  * 顶栏 / 侧栏 / 输入框照常可用。
  */
 
+import { UpdateChip } from "./UpdateFlow.tsx";
 import { useEffect, useMemo, useState } from "react";
 import type { WireSessionInfo } from "../wire.ts";
 import { BrandLogo } from "./BrandLogo.tsx";
@@ -36,6 +37,9 @@ function sessionTitle(s: { name?: string; firstMessage: string }): string {
 }
 
 export interface WelcomePanelProps {
+	/** 在线更新状态（有新版/就绪时 GitHub 徽标旁出 chip） */
+	update?: import("../wire.ts").UpdateWire | null;
+	onUpdateClick?: () => void;
 	sessions: WireSessionInfo[] | null;
 	conn: string;
 	charName: string;
@@ -49,6 +53,8 @@ export interface WelcomePanelProps {
 }
 
 export function WelcomePanel({
+	update,
+	onUpdateClick,
 	sessions,
 	conn,
 	charName,
@@ -101,6 +107,7 @@ export function WelcomePanel({
 							<IconGithub size={18} />
 							<span>GitHub</span>
 						</a>
+						<UpdateChip update={update ?? null} onClick={() => onUpdateClick?.()} />
 					</div>
 					<p className="welcome-hero-tag">角色扮演 Agent · 开源</p>
 					{charName && (

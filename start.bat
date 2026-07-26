@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul 2>&1
-title Liyuan Agent 1.0.4
+title Liyuan Agent
 
 :: Product root = this bat's folder
 cd /d "%~dp0"
@@ -16,7 +16,7 @@ if not exist "server\main.ts" (
 
 echo.
 echo  ========================================
-echo    Liyuan Agent  v1.0.4
+echo    Liyuan Agent
 echo  ========================================
 echo.
 
@@ -41,6 +41,12 @@ if not exist "liyuan.agent.json" if exist "liyuan.agent.example.json" (
   echo [liyuan] Edit liyuan.agent.json and set your API key before chatting.
 )
 
+:: Apply staged online update (downloaded via the in-app updater; no-op otherwise)
+if exist ".liyuan-cache\update\pending.json" (
+  echo [liyuan] Applying staged update ...
+  node scripts\apply-update.mjs
+)
+
 if not exist "node_modules\" (
   echo [liyuan] node_modules missing — running npm install ...
   echo [liyuan] First run needs network; later starts are offline-ready.
@@ -49,6 +55,18 @@ if not exist "node_modules\" (
     echo [ERROR] npm install failed.
     goto :fail
   )
+  echo.
+)
+
+:: Online update changed dependencies -> reinstall once
+if exist ".liyuan-cache\needs-npm-install" (
+  echo [liyuan] Update changed dependencies — running npm install ...
+  call npm install
+  if errorlevel 1 (
+    echo [ERROR] npm install failed.
+    goto :fail
+  )
+  del /q ".liyuan-cache\needs-npm-install" >nul 2>&1
   echo.
 )
 
@@ -79,8 +97,21 @@ set "VBS=%TEMP%\liyuan-open-browser.vbs"
 >>"%VBS%" echo CreateObject("WScript.Shell").Run "http://localhost:%PORT%/", 1, False
 wscript //nologo "%VBS%"
 
+:: Supervised run: exit 87 = in-app "restart to apply update" -> apply + relaunch
+set "LIYUAN_SUPERVISED=1"
+:serve
 node server/main.ts %*
 set "EC=%ERRORLEVEL%"
+if "%EC%"=="87" (
+  echo.
+  echo [liyuan] Restarting to apply update ...
+  if exist ".liyuan-cache\update\pending.json" node scripts\apply-update.mjs
+  if exist ".liyuan-cache\needs-npm-install" (
+    call npm install
+    del /q ".liyuan-cache\needs-npm-install" >nul 2>&1
+  )
+  goto :serve
+)
 
 del /q "%VBS%" >nul 2>&1
 

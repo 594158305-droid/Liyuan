@@ -253,6 +253,15 @@ export interface RestHost {
 	ttsSpeak(text: string, caption?: string): Promise<{ src: string; bytes: number }>;
 	/** 向量记忆作用域：当前角色卡 + 当前对话（换卡/新对话 = 独立库） */
 	memoryScope(): { sessionId: string; card?: string };
+	// ---- 在线更新（主页 chip → 弹窗 → toast；状态经 WS update 帧推送） ----
+	/** 手动检查（启动已静默查过一次；这里给弹窗里的重试） */
+	updateCheckNow(): Promise<void>;
+	/** 开始下载暂存（mirror=镜像前缀，空=直连）；进度经 WS 推送 */
+	updateDownload(mirror?: string): Promise<void>;
+	/** 丢弃已暂存的更新 */
+	updateDiscard(): void;
+	/** 重启进程应用更新（启动脚本包裹下：退出后由脚本循环重拉） */
+	updateRestart(): void;
 }
 
 export interface SessionInfoLite {
@@ -3432,6 +3441,32 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				}
 				await host.softRefreshConfig();
 				sendJson(res, 200, { report, blockCount: preset.blocks.length, samplers: preset.samplers });
+				return true;
+			}
+
+			// ---- 在线更新 ----
+			case "POST /api/update/check": {
+				await host.updateCheckNow();
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/update/download": {
+				const body = JSON.parse((await readBody(req)) || "{}") as { mirror?: string };
+				// 不 await 完成：进度经 WS 推送，失败也经 WS 回 available+error
+				void host.updateDownload(typeof body.mirror === "string" ? body.mirror : undefined).catch(() => {});
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/update/discard": {
+				host.updateDiscard();
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/update/restart": {
+				if (refuseWhileStreaming()) return true;
+				sendJson(res, 200, { ok: true });
+				// 先回包再退：前端收到 ok 后展示「重启中」并等重连
+				host.updateRestart();
 				return true;
 			}
 

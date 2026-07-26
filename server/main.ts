@@ -106,6 +106,14 @@ import { registerAssistantRunner } from "../src/assistant-gateway.ts";
 import { sameCardPath } from "../src/paths.ts";
 import { syncStoryPanelsFromDisk, syncStoryStateFromDisk } from "../src/story-sync.ts";
 import { toolStartDetail } from "../src/activity-format.ts";
+import {
+	checkLatestRelease,
+	downloadAndStage,
+	discardPendingUpdate,
+	readPendingUpdate,
+	type UpdateCheckResult,
+} from "../src/update.ts";
+import type { UpdateWire } from "./wire.ts";
 
 const cwd = process.cwd();
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -195,6 +203,110 @@ const broadcast = (frame: ServerFrame) => {
 		if (ws.readyState === ws.OPEN) ws.send(data);
 	}
 };
+
+// ---------- 在线更新（主页 chip → 弹窗 → toast 进度；替换由启动脚本完成） ----------
+
+const APP_VERSION: string = (() => {
+	try {
+		return (JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as { version?: string }).version ?? "0.0.0";
+	} catch {
+		return "0.0.0";
+	}
+})();
+
+let updateState: UpdateWire = { phase: "none", currentVersion: APP_VERSION };
+let updateCheck: UpdateCheckResult | null = null;
+let updateBusy = false;
+
+const UPDATE_SUPERVISED = process.env.LIYUAN_SUPERVISED === "1";
+const pushUpdate = () => broadcast({ type: "update", update: { ...updateState, supervised: UPDATE_SUPERVISED } });
+
+/** 启动后静默检查一次；失败不提示（manual 时才把 error 带给 UI） */
+const runUpdateCheck = async (manual: boolean): Promise<void> => {
+	// 已有暂存包：直接就绪态（跨重启持久；旧暂存版本低于当前版则丢弃）
+	const pending = readPendingUpdate(cwd);
+	if (pending) {
+		if (pending.version === APP_VERSION || pending.version < APP_VERSION) {
+			discardPendingUpdate(cwd);
+		} else {
+			updateState = {
+				phase: "ready",
+				currentVersion: APP_VERSION,
+				latestVersion: pending.version,
+				verified: pending.verified,
+			};
+			pushUpdate();
+			return;
+		}
+	}
+	const r = await checkLatestRelease(APP_VERSION);
+	updateCheck = r;
+	if (r.error) {
+		if (manual) {
+			updateState = { ...updateState, phase: updateState.phase === "ready" ? "ready" : "none", error: r.error };
+			pushUpdate();
+		}
+		return; // 静默降级：启动检查失败不打扰
+	}
+	if (r.hasUpdate && r.asset) {
+		updateState = {
+			phase: "available",
+			currentVersion: APP_VERSION,
+			latestVersion: r.latestVersion ?? undefined,
+			releaseName: r.releaseName,
+			releaseNotes: r.releaseNotes,
+			releaseUrl: r.releaseUrl,
+			publishedAt: r.publishedAt,
+			assetSize: r.asset.size,
+		};
+	} else {
+		updateState = { phase: "none", currentVersion: APP_VERSION, latestVersion: r.latestVersion ?? undefined };
+	}
+	pushUpdate();
+};
+
+/** 下载并暂存（进度限流 500ms 一帧）；完成后 ready，失败回 available 带 error */
+const startUpdateDownload = async (mirror?: string): Promise<void> => {
+	if (updateBusy) throw new Error("已在下载中");
+	if (!updateCheck?.hasUpdate || !updateCheck.asset) throw new Error("没有可下载的更新");
+	updateBusy = true;
+	const base = updateState;
+	updateState = { ...base, phase: "downloading", received: 0, total: updateCheck.asset.size, error: undefined };
+	pushUpdate();
+	let lastPush = 0;
+	try {
+		const pending = await downloadAndStage({
+			cwd,
+			check: updateCheck,
+			mirror,
+			onProgress: (p) => {
+				const now = Date.now();
+				if (now - lastPush < 500) return;
+				lastPush = now;
+				updateState = { ...updateState, received: p.received, total: p.total || updateCheck?.asset?.size || 0 };
+				pushUpdate();
+			},
+		});
+		updateState = {
+			phase: "ready",
+			currentVersion: APP_VERSION,
+			latestVersion: pending.version,
+			releaseUrl: base.releaseUrl,
+			verified: pending.verified,
+		};
+		pushUpdate();
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		updateState = { ...base, phase: "available", error: msg };
+		pushUpdate();
+		throw new Error(`下载更新失败：${msg}`);
+	} finally {
+		updateBusy = false;
+	}
+};
+
+// 启动 3s 后后台静默检查（不卡启动、不打扰；失败无声）
+setTimeout(() => void runUpdateCheck(false).catch(() => {}), 3000);
 
 // ---------- 会话统计与世界状态（右栏信息面板的数据源） ----------
 
@@ -1271,6 +1383,19 @@ const restHost: RestHost = {
 		broadcast({ type: "message", message: wireMsg });
 		return { src: saved.src, bytes: saved.bytes };
 	},
+	updateCheckNow: () => runUpdateCheck(true),
+	updateDownload: (mirror) => startUpdateDownload(mirror),
+	updateDiscard: () => {
+		discardPendingUpdate(cwd);
+		updateState = { phase: "none", currentVersion: APP_VERSION };
+		pushUpdate();
+	},
+	updateRestart: () => {
+		// 启动脚本循环重拉（LIYUAN_SUPERVISED=1 时 exit 87 = 请求重启）；
+		// 直跑 node 的开发场景没有监护，退了就是退了（下次手动启动时应用）。
+		console.log("[liyuan] 收到重启应用更新请求，退出进程…");
+		setTimeout(() => process.exit(87), 300);
+	},
 	/** 向量记忆：绑定当前角色卡 + 当前对话会话 */
 	memoryScope: () => ({
 		sessionId: session.sessionId,
@@ -2153,6 +2278,9 @@ wss.on("connection", (ws, req) => {
 	if (session.isStreaming) ws.send(JSON.stringify({ type: "agent", state: "start" } satisfies ServerFrame));
 	// 助手面板：连接即对齐（busy 随帧携带，断线重连恢复生成中状态）
 	ws.send(JSON.stringify(assistantHelloFrame()));
+	// 在线更新状态：新连接即对齐（有新版/就绪时主页 chip 才能亮）
+	if (updateState.phase !== "none")
+		ws.send(JSON.stringify({ type: "update", update: { ...updateState, supervised: UPDATE_SUPERVISED } } satisfies ServerFrame));
 	// 断线重连 / 新端接入：补发当前挂起的决策询问（未决卡不随 hello 历史走）
 	for (const [id, p] of pendingChoices) ws.send(JSON.stringify(choiceFrame(id, p)));
 

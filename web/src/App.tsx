@@ -33,6 +33,7 @@ import { CardPanel } from "./components/CardPanel.tsx";
 import { CodexPanel } from "./components/CodexPanel.tsx";
 import { ConnectPanel } from "./components/ConnectPanel.tsx";
 import { WelcomePanel } from "./components/HomePage.tsx";
+import { UpdateChip, UpdateModal, UpdateToast } from "./components/UpdateFlow.tsx";
 import { PanelRefreshContext } from "./components/kit.tsx";
 import { registerTavernChatBridge } from "./tavernShim.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
@@ -90,6 +91,7 @@ import type {
 	WireActivity,
 	WireSessionInfo,
 	WireStats,
+	UpdateWire,
 	WorldState,
 } from "./wire.ts";
 
@@ -217,6 +219,11 @@ export default function App() {
 	/** 本轮过程步骤（实时清单渲染用；与 turnActsRef 同内容） */
 	const [liveActs, setLiveActs] = useState<WireActivity[]>([]);
 	const [toasts, setToasts] = useState<Toast[]>([]);
+	// 在线更新：WS update 帧驱动；modal 开关与 ready 气泡的本次会话收起标记
+	const [updateInfo, setUpdateInfo] = useState<UpdateWire | null>(null);
+	const [updateModalOpen, setUpdateModalOpen] = useState(false);
+	const [updateToastDismissed, setUpdateToastDismissed] = useState(false);
+	const updateErrRef = useRef<string | null>(null);
 	const [input, setInput] = useState("");
 	// 待发送附件（附件随消息，上传即落服务端 .liyuan-uploads/，发送时路径附在消息尾行）
 	const [pending, setPending] = useState<PendingUpload[]>([]);
@@ -839,6 +846,17 @@ export default function App() {
 							: null,
 					);
 					break;
+				case "update": {
+					const prevErr = updateErrRef.current;
+					updateErrRef.current = frame.update.error ?? null;
+					setUpdateInfo(frame.update);
+					if (frame.update.phase === "downloading" || frame.update.phase === "ready") setUpdateToastDismissed(false);
+					// 下载失败（downloading→available+error）：临时气泡提示，否则用户不重开弹窗看不到原因
+					if (frame.update.error && frame.update.error !== prevErr) {
+						pushToast("error", `更新失败：${frame.update.error}（点主页提示可重试/设镜像）`);
+					}
+					break;
+				}
 				case "notify":
 					pushToast(frame.level, frame.text);
 					if (frame.level !== "info") {
@@ -1731,12 +1749,22 @@ export default function App() {
 			)}
 
 			<div className="toasts">
+				<UpdateToast
+					update={updateInfo}
+					dismissed={updateToastDismissed}
+					onDismiss={() => setUpdateToastDismissed(true)}
+					onToast={pushToast}
+				/>
 				{toasts.map((t) => (
 					<div key={t.id} className={`toast toast-${t.level}`} onClick={() => setToasts((ts) => ts.filter((x) => x.id !== t.id))}>
 						{t.text}
 					</div>
 				))}
 			</div>
+
+			{updateModalOpen && updateInfo && (updateInfo.phase === "available" || updateInfo.phase === "downloading") && (
+				<UpdateModal update={updateInfo} onClose={() => setUpdateModalOpen(false)} onToast={pushToast} />
+			)}
 
 			<div className="layout">
 				{sidePanel(leftPanel, "left")}
@@ -1747,6 +1775,8 @@ export default function App() {
 							{/* 欢迎区嵌在聊天流（学 ST）：顶栏/侧栏/输入框仍可用 */}
 							{welcome ? (
 								<WelcomePanel
+									update={updateInfo}
+									onUpdateClick={() => setUpdateModalOpen(true)}
 									sessions={sessions}
 									conn={conn}
 									charName={charName}
