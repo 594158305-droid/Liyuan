@@ -2407,7 +2407,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				const recent = cleaned.slice(-KEEP_RECENT);
 				const older = cleaned.slice(0, -KEEP_RECENT);
 
-				notify(ctx, `解析 ${parsed.messages.length} 条（清洗后剩 ${cleaned.length}，剔除 ${removed} 条空壳）。正在消化旧剧情（${older.length} 条）…`);
+				const hiddenNote = parsed.hiddenCount > 0 ? `，含 ${parsed.hiddenCount} 条对方隐藏楼层（剧情照常纳入）` : "";
+				notify(ctx, `解析 ${parsed.messages.length} 条（清洗后剩 ${cleaned.length}，剔除 ${removed} 条空壳${hiddenNote}）。正在消化旧剧情（${older.length} 条）…`);
 
 				// 旧轮次 → 剧情向接力摘要（复用压缩摘要提示词）
 				let summary = "";

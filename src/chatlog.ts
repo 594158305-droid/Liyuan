@@ -25,17 +25,24 @@ export interface StChatMessage {
 	name: string;
 	/** 原始 mes（未清洗） */
 	text: string;
+	/** ST 中被 /hide 的隐藏楼层（is_system）；导入照常消化，仅供提示 */
+	hidden?: boolean;
 }
 
 export interface ParsedStChat {
 	meta: StChatMeta;
 	messages: StChatMessage[];
+	/** 被 ST 隐藏（is_system）但仍纳入导入的楼层数 */
+	hiddenCount: number;
 }
 
 /**
  * 解析 ST 聊天 jsonl：首行元数据，后续每行一条消息。
  * - `mes` 即用户选中的 swipe（ST 保证 mes === swipes[swipe_id]），mes 为空才回退 swipes
- * - `is_system` 为真的行（ST 的隐藏注释/系统横幅）跳过
+ * - `is_system` 行**不整体跳过**：ST 的 /hide 隐藏楼层就是 is_system=true，程序卡
+ *   （状态栏 HTML 卡）常自动隐藏全部历史层只留最后一层省上下文——逐条跳过会让
+ *   导入「只剩最后一条」。隐藏楼层是剧情本体，只是不进 ST 的上下文；导入是素材
+ *   消化，正需要它们。仅 /comment 旁注（extra.type === "comment"，从不送模）跳过。
  */
 export function parseStChat(jsonlText: string): ParsedStChat {
 	const lines = jsonlText.split(/\r?\n/).filter((l) => l.trim().length > 0);
@@ -57,6 +64,7 @@ export function parseStChat(jsonlText: string): ParsedStChat {
 	};
 
 	const messages: StChatMessage[] = [];
+	let hiddenCount = 0;
 	for (let i = 1; i < lines.length; i++) {
 		let m: Record<string, unknown>;
 		try {
@@ -64,7 +72,12 @@ export function parseStChat(jsonlText: string): ParsedStChat {
 		} catch {
 			continue; // 容忍个别损坏行
 		}
-		if (m.is_system === true) continue;
+		const hidden = m.is_system === true;
+		if (hidden) {
+			// /comment 旁注（extra.type === "comment"）是用户笔记，从不属于剧情——跳过
+			const extra = m.extra && typeof m.extra === "object" ? (m.extra as Record<string, unknown>) : undefined;
+			if (extra?.type === "comment") continue;
+		}
 		let text = typeof m.mes === "string" ? m.mes : "";
 		if (!text && Array.isArray(m.swipes)) {
 			const idx = typeof m.swipe_id === "number" ? m.swipe_id : 0;
@@ -72,13 +85,15 @@ export function parseStChat(jsonlText: string): ParsedStChat {
 			if (typeof s === "string") text = s;
 		}
 		if (!text.trim()) continue;
+		if (hidden) hiddenCount++;
 		messages.push({
 			role: m.is_user === true ? "user" : "assistant",
 			name: typeof m.name === "string" ? m.name : m.is_user === true ? meta.userName : meta.charName,
 			text,
+			...(hidden ? { hidden: true } : {}),
 		});
 	}
-	return { meta, messages };
+	return { meta, messages, hiddenCount };
 }
 
 

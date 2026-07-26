@@ -12,12 +12,12 @@ import {
 const header = JSON.stringify({ user_name: "阿远", character_name: "青梧", create_date: "2025-1-1@00h00m00s" });
 const line = (o: object) => JSON.stringify(o);
 
-test("解析：首行元数据、角色分配、is_system 跳过、swipe 回退", () => {
+test("解析：首行元数据、角色分配、comment 旁注跳过、swipe 回退", () => {
 	const jsonl = [
 		header,
 		line({ name: "青梧", is_user: false, mes: "*她看着你醒来。*" }),
 		line({ name: "阿远", is_user: true, mes: "这里是哪里？" }),
-		line({ name: "System", is_system: true, mes: "隐藏系统横幅" }),
+		line({ name: "阿远", is_system: true, mes: "备忘：回头查一下设定", extra: { type: "comment" } }),
 		line({ name: "青梧", is_user: false, mes: "", swipes: ["第一版", "选中的第二版"], swipe_id: 1 }),
 		"这一行是损坏的 JSON {{{",
 		line({ name: "阿远", is_user: true, mes: "   " }),
@@ -25,10 +25,28 @@ test("解析：首行元数据、角色分配、is_system 跳过、swipe 回退"
 	const { meta, messages } = parseStChat(jsonl);
 	assert.equal(meta.userName, "阿远");
 	assert.equal(meta.charName, "青梧");
-	assert.equal(messages.length, 3, "系统行/损坏行/空白行都应跳过");
+	assert.equal(messages.length, 3, "comment 旁注/损坏行/空白行都应跳过");
 	assert.equal(messages[0].role, "assistant");
 	assert.equal(messages[1].role, "user");
 	assert.equal(messages[2].text, "选中的第二版", "mes 为空时回退到选中 swipe");
+});
+
+test("解析：/hide 隐藏楼层（is_system）纳入导入——程序卡整段隐藏历史不得只剩最后一条", () => {
+	// 程序卡（状态栏 HTML 卡）常把除最后一层外全部 /hide：is_system=true 但剧情仍在
+	const jsonl = [
+		header,
+		line({ name: "青梧", is_user: false, is_system: true, mes: "第一幕开场。" }),
+		line({ name: "阿远", is_user: true, is_system: true, mes: "我推门进去。" }),
+		line({ name: "青梧", is_user: false, is_system: true, mes: "*门轴吱呀作响。*" }),
+		line({ name: "青梧", is_user: false, mes: "「你终于来了。」（唯一未隐藏层）" }),
+	].join("\n");
+	const { messages, hiddenCount } = parseStChat(jsonl);
+	assert.equal(messages.length, 4, "隐藏楼层是剧情本体，必须全部纳入");
+	assert.equal(hiddenCount, 3);
+	assert.equal(messages[0].hidden, true);
+	assert.equal(messages[0].role, "assistant", "隐藏层保留 is_user 角色判定");
+	assert.equal(messages[1].role, "user");
+	assert.equal(messages[3].hidden, undefined, "未隐藏层不带标记");
 });
 
 test("解析：非 ST 文件报错", () => {
