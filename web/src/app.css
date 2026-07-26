@@ -1269,6 +1269,9 @@ html[data-theme="dark"] .msg-md-code {
 	margin-top: 6px;
 	padding-left: 12px;
 	border-left: 2px solid var(--hairline);
+	/* 思维链常整段贴 URL/代码：禁止撑宽外层出横向滑动 */
+	word-break: break-word;
+	overflow-wrap: anywhere;
 }
 .thinking-body p {
 	margin: 0 0 0.5em;
@@ -6451,6 +6454,8 @@ label.drawer-btn {
 	flex: 1;
 	min-height: 0;
 	overflow-y: auto;
+	/* 长 URL/长 key 撑宽子元素时不得变成横向滑动（手机上尤其明显） */
+	overflow-x: hidden;
 	padding: 12px 14px 16px;
 	display: flex;
 	flex-direction: column;
@@ -6460,6 +6465,9 @@ label.drawer-btn {
 
 /* 用户吩咐:白卡右缩进(与主聊天用户消息同语言,缩小一号) */
 .asst-user {
+	min-width: 0;
+	word-break: break-word;
+	overflow-wrap: anywhere;
 	align-self: flex-end;
 	max-width: 88%;
 	background: var(--surface);
@@ -6474,6 +6482,9 @@ label.drawer-btn {
 .asst-reply {
 	font-size: 13.5px;
 	line-height: 1.7;
+	min-width: 0;
+	word-break: break-word;
+	overflow-wrap: anywhere;
 }
 .asst-reply .turn-activity {
 	margin-bottom: 6px;
@@ -6858,6 +6869,14 @@ label.drawer-btn {
 	}
 	.list {
 		overscroll-behavior: contain;
+	}
+
+	/* ── ④ 横向溢出兕底：面板体/助手流/消息流一律锁 x 轴，
+	   长 URL/长 token 撑不出横向滑动（内容级 break-word 另在各自类上） ── */
+	.side,
+	.asst-list,
+	.list {
+		overflow-x: hidden;
 	}
 
 	/* ── ③ 侧栏面板（含右栏助手）：真全屏——盖过顶栏，固定于视口 ──
