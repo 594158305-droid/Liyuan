@@ -166,16 +166,21 @@ function Stage-Clean {
   $dest = Join-Path $StageRoot "Liyuan"
   New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-  # robocopy /XD matches directory names anywhere
+  # robocopy /XD matches directory names anywhere.
+  # NOTE: ".liyuan" is excluded wholesale (it holds user settings/sessions),
+  # so the product wiring layer ".liyuan/extensions" is re-copied explicitly below.
+  # Without it the shipped app silently loses ALL RP commands/tools (v1.0.0-v1.1.0 bug).
   $xd = @(
     "node_modules",
     ".git",
     ".github",
     ".liyuan", ".liyuan-artifacts", ".liyuan-assistant", ".liyuan-cache", ".liyuan-codex",
-    ".liyuan-lore", ".liyuan-media", ".liyuan-skills", ".liyuan-state",
+    ".liyuan-lore", ".liyuan-media", ".liyuan-memory", ".liyuan-skills", ".liyuan-state",
     ".liyuan-uploads", ".liyuan-audio", ".liyuan-worldline",
     ".rp-media", ".rp-uploads",
     ".playwright-mcp",
+    ".superpowers", "superpowers",
+    "scratch", "summaries", "output", "persist",
     "ab-test", "import-test", "liyuan-profiles", "assets/gen"
   )
   $xf = @(
@@ -186,7 +191,7 @@ function Stage-Clean {
     "liyuan-preset.json",
     "shot-*.png", "bug-*.png", "fix-*.png", "latest-ui.png",
     "white-screen-check.png",
-    "tmp-*.png",
+    "tmp-*.png", "liyuan-*.png",
     "_privacy_scan.py", "_inspect_session.py"
   )
   $robArgs = @($prod, $dest, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/nc", "/ns", "/np")
@@ -194,6 +199,15 @@ function Stage-Clean {
   foreach ($f in $xf) { $robArgs += "/XF"; $robArgs += $f }
   & robocopy @robArgs | Out-Null
   if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
+
+  # Product wiring layer: the ONLY code inside .liyuan/ (git-tracked). Ship it.
+  $extSrc = Join-Path $prod ".liyuan\extensions"
+  $extDst = Join-Path $dest ".liyuan\extensions"
+  New-Item -ItemType Directory -Force -Path $extDst | Out-Null
+  Copy-Item (Join-Path $extSrc "*.ts") $extDst -Force
+  if (-not (Test-Path (Join-Path $extDst "roleplay.ts"))) {
+    throw "PACK BUG: .liyuan/extensions/roleplay.ts missing from stage - release would ship without RP layer"
+  }
 
   # Keep only Liyuan default_* sample cards (never ship ST/community demo packs
   # like Seraphina/Eldoria, nor personal Chinese test cards).
@@ -216,17 +230,29 @@ function Stage-Clean {
   # Drop test / internal tooling from release tree
   $dropGlobs = @(
     "test",
+    "packages\*\test",
     "scripts\drive-*.mjs",
     "scripts\smoke-*.mjs",
     "scripts\scenario-runner.mjs",
     "scripts\analyze-session.mjs",
     "scripts\probe-backstage.mjs",
     "scripts\rename-paths-once.mjs",
+    "scripts\check-*.mjs",
+    "scripts\debug-*.mjs",
+    "scripts\find-*.mjs",
+    "scripts\live-*.mjs",
+    "scripts\probe-*.mjs",
+    "scripts\verify-*.mjs",
+    "scripts\write-*.mjs",
+    "scripts\build-fanren-*.mjs",
     "scripts\_*.py",
     "scripts\_*.ps1",
     "scripts\_*.sh",
+    # root-level dev scratch (underscore convention) + probe dumps
+    "_*",
     "TESTING.md",
-    "docs\st-ux-inventory.md"
+    "docs\st-ux-inventory.md",
+    "docs\superpowers"
   )
   foreach ($g in $dropGlobs) {
     $p = Join-Path $dest $g
@@ -265,10 +291,12 @@ import zipfile, os
 from pathlib import Path
 stage = Path(r'''$SourceDir''')
 zip_path = Path(r'''$ZipPath''')
+# NOTE: '.liyuan' must NOT be skipped here - the stage only contains
+# .liyuan/extensions (product code); user data dirs were excluded at stage time.
 skip_dirs = {
-  'node_modules', '.git', '.github', '.liyuan', '.liyuan-cache',
+  'node_modules', '.git', '.github', '.liyuan-cache',
   '.liyuan-artifacts', '.liyuan-assistant', '.liyuan-codex', '.liyuan-lore',
-  '.liyuan-media', '.liyuan-skills', '.liyuan-state',
+  '.liyuan-media', '.liyuan-memory', '.liyuan-skills', '.liyuan-state',
   '.liyuan-uploads', '.liyuan-audio', '.liyuan-worldline',
   '.rp-media', '.rp-uploads'
 }
@@ -294,6 +322,47 @@ print(zip_path, zip_path.stat().st_size)
   python $pyFile
   if ($LASTEXITCODE -ne 0) { throw "python zip failed" }
   Remove-Item $pyFile -Force -ErrorAction SilentlyContinue
+}
+
+# Post-pack sanity check: a zip that fails any of these must never reach users.
+# - MUST contain the RP wiring layer (.liyuan/extensions/roleplay.ts)
+# - MUST NOT contain user data dirs / dev scratch / personal configs
+function Test-ReleaseZip {
+  param([string]$ZipPath)
+  $py = @"
+import sys, zipfile
+z = zipfile.ZipFile(r'''$ZipPath''')
+names = z.namelist()
+errors = []
+if not any(n.endswith('.liyuan/extensions/roleplay.ts') for n in names):
+    errors.append('MISSING .liyuan/extensions/roleplay.ts (RP layer would not load)')
+forbidden_dirs = ['.liyuan-memory/', '.liyuan-state/', '.liyuan-uploads/', '.liyuan-lore/',
+                  '.liyuan-codex/', '.liyuan-assistant/', '.liyuan-worldline/', '.liyuan-media/',
+                  '.liyuan-audio/', '.liyuan-cache/', '.superpowers/', 'scratch/', 'summaries/',
+                  'output/', 'persist/', 'test/']
+for d in forbidden_dirs:
+    hits = [n for n in names if ('/' + d) in n]
+    if hits:
+        errors.append(f'LEAK {d} ({len(hits)} entries, e.g. {hits[0]})')
+junk = [n for n in names if n.count('/') == 1 and n.split('/')[1].startswith('_')]
+if junk:
+    errors.append(f'DEV SCRATCH at root: {junk[:5]}')
+for f in ('.liyuan/settings.json', '.liyuan-personas.json', 'liyuan.agent.meta.json'):
+    if any(n.endswith('/' + f) for n in names):
+        errors.append(f'PERSONAL FILE {f}')
+if errors:
+    print('ZIP CHECK FAILED: ' + r'''$ZipPath''')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('zip check OK (%d entries)' % len(names))
+"@
+  $pyFile = Join-Path $env:TEMP ("liyuan-zip-check-{0}.py" -f [guid]::NewGuid().ToString("n"))
+  Set-Content -LiteralPath $pyFile -Value $py -Encoding UTF8
+  python $pyFile
+  $code = $LASTEXITCODE
+  Remove-Item $pyFile -Force -ErrorAction SilentlyContinue
+  if ($code -ne 0) { throw "release zip failed sanity check: $ZipPath" }
 }
 
 function Write-Sha256Sums {
@@ -338,6 +407,7 @@ function Build-PlatformZip {
 
   $zip = Join-Path $OutDir "Liyuan-$Version-$Platform.zip"
   Write-Utf8Zip -SourceDir $platDest -ZipPath $zip
+  Test-ReleaseZip -ZipPath $zip
   $mb = [math]::Round((Get-Item $zip).Length / 1MB, 2)
   Write-Host "[pack] $Platform : $zip ($mb MB)"
   return $zip
