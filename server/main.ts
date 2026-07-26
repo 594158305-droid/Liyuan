@@ -1929,6 +1929,11 @@ const httpServer = createServer((req, res) => {
 					headers["cache-control"] = "public, max-age=86400";
 				}
 			}
+			// HTML 必须每次向服务器验证：无此头时手机浏览器启发式缓存旧壳，
+			// 旧壳引用已删除的 hashed 资源 → 更新「刷新也不生效」甚至白屏
+			if (ext === ".html") {
+				headers["cache-control"] = "no-cache";
+			}
 			res.writeHead(200, headers);
 			res.end(body);
 		} catch {
