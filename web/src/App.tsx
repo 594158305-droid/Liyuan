@@ -41,6 +41,7 @@ import {
 	IconApi,
 	IconAssistant,
 	IconAttach,
+	IconPlus,
 	IconBell,
 	IconCard,
 	IconChevronDown,
@@ -233,6 +234,8 @@ export default function App() {
 	const [msgEdit, setMsgEdit] = useState<{ idx: number; kind: "user" | "narrative" | "greeting"; draft: string } | null>(
 		null,
 	);
+	/** 手机端输入框左侧工具收纳：展开成上方一行（桌面端按钮常驻，此态无效） */
+	const [composerTools, setComposerTools] = useState(false);
 	const [sessions, setSessions] = useState<WireSessionInfo[] | null>(null);
 	// 右栏数据
 	const [worldState, setWorldState] = useState<WorldState | null>(null);
@@ -1770,7 +1773,7 @@ export default function App() {
 				{sidePanel(leftPanel, "left")}
 
 				<main className="center">
-					<div className="list" ref={listRef} onScroll={onScroll}>
+					<div className="list" ref={listRef} onScroll={onScroll} onPointerDown={() => composerTools && setComposerTools(false)}>
 						<div className="flow">
 							{/* 欢迎区嵌在聊天流（学 ST）：顶栏/侧栏/输入框仍可用 */}
 							{welcome ? (
@@ -2030,33 +2033,58 @@ export default function App() {
 									{argHint.usage} — {argHint.description}
 								</div>
 							)}
+							{/* 手机端：左侧三钮收进「＋」，展开为输入框上方一行；桌面端 CSS 隐藏此钮、工具常驻 */}
 							<button
 								type="button"
-								className={`dock-btn ${leftPanel === "sessions" ? "active" : ""}`}
-								title="会话"
-								aria-label="会话"
-								onClick={() => togglePanel("sessions")}
+								className={`dock-btn composer-more ${composerTools ? "active" : ""}`}
+								title="更多工具"
+								aria-label="更多工具"
+								aria-expanded={composerTools}
+								onClick={() => setComposerTools((v) => !v)}
 							>
-								<IconSessions size={18} />
+								<IconPlus size={18} />
 							</button>
-							<button
-								type="button"
-								className={`dock-btn ${leftPanel === "worldline" ? "active" : ""}`}
-								title="世界线"
-								aria-label="世界线"
-								onClick={() => togglePanel("worldline")}
-							>
-								<IconWorldline size={18} />
-							</button>
-							<button
-								type="button"
-								className="dock-btn"
-								title="上传图片/文件（也可拖入或粘贴）"
-								aria-label="上传图片或文件"
-								onClick={() => uploadInputRef.current?.click()}
-							>
-								<IconAttach size={18} />
-							</button>
+							<div className={`composer-tools ${composerTools ? "open" : ""}`}>
+								<button
+									type="button"
+									className={`dock-btn ${leftPanel === "sessions" ? "active" : ""}`}
+									title="会话"
+									aria-label="会话"
+									onClick={() => {
+										togglePanel("sessions");
+										setComposerTools(false);
+									}}
+								>
+									<IconSessions size={18} />
+									<span className="composer-tool-label">会话</span>
+								</button>
+								<button
+									type="button"
+									className={`dock-btn ${leftPanel === "worldline" ? "active" : ""}`}
+									title="世界线"
+									aria-label="世界线"
+									onClick={() => {
+										togglePanel("worldline");
+										setComposerTools(false);
+									}}
+								>
+									<IconWorldline size={18} />
+									<span className="composer-tool-label">世界线</span>
+								</button>
+								<button
+									type="button"
+									className="dock-btn"
+									title="上传图片/文件（也可拖入或粘贴）"
+									aria-label="上传图片或文件"
+									onClick={() => {
+										uploadInputRef.current?.click();
+										setComposerTools(false);
+									}}
+								>
+									<IconAttach size={18} />
+									<span className="composer-tool-label">上传</span>
+								</button>
+							</div>
 							<input
 								ref={uploadInputRef}
 								type="file"
@@ -2073,6 +2101,7 @@ export default function App() {
 								placeholder={conn === "open" ? (userName ? `以「${userName}」的身份发言…` : "输入消息…") : "等待连接…"}
 								rows={1}
 								onFocus={() => {
+									setComposerTools(false);
 									setTimeout(() => inputRef.current?.scrollIntoView({ block: "nearest" }), 250);
 								}}
 								onPaste={(e) => {

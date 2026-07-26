@@ -183,6 +183,11 @@ body,
 	margin: 0;
 }
 
+/* html 必须同色：手机橡皮筋回弹/地址栏收放时露出的是 html 底，白色会闪白边 */
+html {
+	background: var(--bg);
+}
+
 body {
 	/* 宣纸底：暖径向光 + 极淡颗粒感 */
 	background:
@@ -6786,4 +6791,83 @@ label.drawer-btn {
 	color: var(--accent);
 	background: var(--accent-wash);
 	font-weight: 600;
+}
+
+/* ══════════ v1.1.2 手机端优化 ══════════ */
+
+/* 输入框左侧工具组：桌面=常驻（与旧版一致），＋按钮不存在 */
+.composer-more {
+	display: none;
+}
+.composer-tools {
+	display: contents;
+}
+.composer-tool-label {
+	display: none;
+}
+
+@media (max-width: 999px) {
+	/* ── ① 输入框拥挤：左侧三钮收进「＋」，展开为输入框上方浮层一行 ── */
+	.composer-more {
+		display: grid;
+	}
+	.composer-tools {
+		display: none;
+	}
+	.composer-tools.open {
+		display: flex;
+		position: absolute;
+		bottom: calc(100% + 8px);
+		left: 0;
+		gap: 6px;
+		padding: 6px;
+		background: var(--surface);
+		border: 1px solid var(--hairline);
+		border-radius: 16px;
+		box-shadow: var(--shadow-3);
+		z-index: 21;
+		animation: pop-in 0.15s ease-out;
+	}
+	.composer-tools.open .dock-btn {
+		width: auto;
+		min-width: 44px;
+		height: 44px;
+		padding: 0 12px;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		border-radius: 12px;
+	}
+	.composer-tools.open .composer-tool-label {
+		display: inline;
+		font-size: 13px;
+		color: var(--text-soft);
+	}
+	.composer-tools.open .dock-btn.active .composer-tool-label {
+		color: var(--accent);
+	}
+
+	/* ── ② 视口：手机浏览器地址栏收放时 100dvh 抖动 + 橡皮筋 ── */
+	html {
+		height: 100%;
+		overscroll-behavior-y: none;
+	}
+	.app {
+		height: 100dvh;
+		min-height: 100svh;
+	}
+	.list {
+		overscroll-behavior: contain;
+	}
+
+	/* ── ③ 侧栏面板（含右栏助手）：真全屏——盖过顶栏，固定于视口 ──
+	   刘海/键盘边距不在此处：panel-head 顶部安全区、panel-body 底部
+	   safe-area+kb-inset 已各自处理，叠加会出双倍留白 */
+	.side {
+		position: fixed;
+		inset: 0;
+		height: 100dvh;
+		z-index: 60; /* 顶栏 50，必须盖过 */
+		border-radius: 0;
+	}
 }
