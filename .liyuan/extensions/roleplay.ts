@@ -27,9 +27,9 @@ import {
 	listCodexes,
 	loadCodexEntries,
 } from "../../src/codex.ts";
-import { buildRpSummaryPrompt, serializeForSummary } from "../../src/compaction.ts";
-import { buildGreeting, buildSystemPrompt, buildTurnInjection, detectsLanguageMismatch } from "../../src/director.ts";
-import { memoryRecallForTurn } from "../../src/memory/index.ts";
+import { buildRpSummaryPrompt, serializeForSummary, shouldProactiveCompact } from "../../src/compaction.ts";
+import { buildGreeting, buildSystemPrompt, buildTurnInjection, detectsLanguageMismatch, formatLoreIndex } from "../../src/director.ts";
+import { memoryArchiveCompacted, memoryRecallForTurn, memorySearch } from "../../src/memory/index.ts";
 import { createMacroEnv, evalPresetMacros } from "../../src/preset-macro.ts";
 import {
 	constantEntries,
@@ -75,6 +75,7 @@ import {
 	applyPatch,
 	canonicalizeCharacterKeys,
 	defaultState,
+	formatRosterIndex,
 	formatState,
 	loadState,
 	saveState,
@@ -180,6 +181,9 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	let appCwd = process.cwd();
 	// 场记记账：进行中标志（防重入）；连续性审查已关闭
 	let scribeBusy = false;
+	// 固定楼层压缩：距上次压缩的叙事轮数 + 主动触发在途标志（防重复触发）
+	let narrativeTurnsSinceCompact = 0;
+	let proactiveCompactInFlight = false;
 	// 世界书中文别名：一次性生成 + 磁盘缓存的懒初始化
 	let aliasPromise: Promise<void> | null = null;
 	// MCP 外设（柱 4）：本会话启用集 + 已注册工具（agent 绑对话，新对话=新窗口）
@@ -616,11 +620,52 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			},
 		});
 
+		// 索引→检索闭环：【登场名录】/【设定集索引】告诉模型「存在什么」,这个工具负责「取细节」。
+		// 检索范围 = 剧情库(滚动摘要 + 压缩归档的早期正文) + 额外库(导入资料)。
+		pi.registerTool({
+			name: "memory_search",
+			label: "检索剧情记忆",
+			description:
+				"Search archived story memory (early narrative compressed out of context, rolling summaries, imported documents) by keyword or question. Call BEFORE re-introducing a character/item/plot thread listed in 【登场名录】 whose details you no longer have — do not invent facts about things that were established earlier. Query in the story's language.",
+			parameters: Type.Object({
+				query: Type.String({ description: "Keywords or a short question about past events" }),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				const scope = {
+					sessionId:
+						typeof ctx.sessionManager?.getSessionId === "function" ? ctx.sessionManager.getSessionId() : "_default",
+					card: config.card || undefined,
+				};
+				const [narrative, external] = await Promise.all([
+					memorySearch(appCwd, scope, "narrative", params.query).catch(() => []),
+					memorySearch(appCwd, scope, "external", params.query).catch(() => []),
+				]);
+				const hits = [...narrative, ...external].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 6);
+				if (hits.length === 0) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "记忆库无命中（可能未启用向量记忆，或该内容未被归档）。不要臆造当年的具体细节——正文里模糊化处理（角色可以「记不太清」），或沿用【世界状态】【登场名录】里已有的事实。",
+							},
+						],
+					};
+				}
+				const text = hits
+					.map((h, i) => {
+						const tag = h.meta?.title || h.meta?.fileName || h.meta?.source || "记忆";
+						return `${i + 1}. 〔${tag}〕${h.text}`;
+					})
+					.join("\n\n");
+				return { content: [{ type: "text", text }], details: { count: hits.length } };
+			},
+		});
+
 		pi.registerTool({
 			name: "lorebook_write",
 			label: "写入补充设定集",
 			description:
-				"Record a NEW piece of world canon (a setting/rule/character profile you invented or agreed on with the user) into the supplementary lorebook, so it persists across sessions and becomes searchable. Use for worldbuilding facts only — plot progress belongs to world_state_update. Never duplicates: identical content is rejected.",
+				"Record world canon the user explicitly asked to keep (a setting/rule/character profile) into the supplementary lorebook, so it persists across sessions and becomes searchable. Call ONLY when the user asks to record/save a setting — never on your own initiative, and never ask the user 'shall I write this'. Use for worldbuilding facts only — plot progress belongs to world_state_update. Never duplicates: identical content is rejected.",
 			parameters: Type.Object({
 				title: Type.String({ description: "Short entry title, e.g. '北境骨誓风俗'" }),
 				keys: Type.Array(Type.String(), {
@@ -760,7 +805,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			name: "codex_write",
 			label: "写入知识库",
 			description:
-				"Record a piece of knowledge into a MOUNTED codex so it persists across ALL conversations that mount it. Use PROACTIVELY when the story produces novel knowledge/items/beings/places worth keeping beyond this story — and when the user asks to record something. Card-specific canon belongs to lorebook_write instead. Never duplicates: identical content is rejected.",
+				"Record a piece of knowledge into a MOUNTED codex so it persists across ALL conversations that mount it. Call ONLY when the user asks to record/save something — never on your own initiative, and never ask the user about it. Card-specific canon belongs to lorebook_write instead. Never duplicates: identical content is rejected.",
 			parameters: Type.Object({
 				codex: Type.String({ description: "Mounted codex name to write into" }),
 				title: Type.String({ description: "Short entry title, e.g. '赤髓·蚀骨兰'" }),
@@ -1191,7 +1236,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			name: ASK_TOOL,
 			label: "请用户定夺",
 			description:
-				"IN-STORY co-creation gate (not OOC assistant chat). Pause narrative and show a choice card so the user picks the next beat. MUST call FIRST when: (1) user seeks direction — 该做什么/怎么办/怎么走/下一步/给选项, even inside IC prose; (2) user asks to generate/define identity or persona — 生成身份/开始生成身份/建档/捏角色/人设 — do NOT write a full identity dossier yourself, split key choices into options; (3) scene has 2+ clear forks that change the next turns; (4) new important character, major irreversible plot turn, or locking world-canon. Do NOT write option lists in narrative prose — only this tool shows clickable cards. Provide 2-4 concrete IC options in the story language; user may type custom or stop. After answer, continue as the character/world, never as a system assistant. Skip only pure atmosphere with no real fork.",
+				"IN-STORY co-creation gate (not OOC assistant chat). Pause narrative and show a choice card so the user picks the next beat. MUST call FIRST when: (1) user seeks direction — 该做什么/怎么办/怎么走/下一步/给选项, even inside IC prose; (2) user asks to generate/define identity or persona — 生成身份/开始生成身份/建档/捏角色/人设 — do NOT write a full identity dossier yourself, split key choices into options; (3) scene has 2+ clear forks that change the next turns; (4) new important character, major irreversible plot turn, or locking world-canon. Do NOT write option lists in narrative prose — only this tool shows clickable cards. Provide 2-4 concrete IC options in the story language; user may type custom or stop. After answer, continue as the character/world, never as a system assistant. Skip only pure atmosphere with no real fork. Do NOT use this tool to ask whether to save/write something into the lorebook or knowledge database — those writes execute directly when the user requests them (lorebook_write / codex_write), never through this choice card.",
 			parameters: Type.Object({
 				question: Type.String({
 					description: "Question on the choice card, in story language, e.g. '御书房里文舒婉请试墨——你想这一步怎么走？'",
@@ -1601,6 +1646,10 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				uploadIndex: formatUploadIndex(listUploads(appCwd)) ?? undefined,
 				userText: legacyBackstage ? undefined : lastUserText,
 				memoryHits,
+				// 设定集索引（常驻,只出标题）：codex 条目已有【挂载知识库】速览,这里只列世界书本体
+				loreIndex: formatLoreIndex(entries),
+				// 登场名录（常驻索引）：已不在当前状态的人物/物品/剧情线,细节靠 memory_search
+				rosterIndex: formatRosterIndex(state),
 				statusBarFormats,
 			}),
 			display: false,
@@ -1696,20 +1745,79 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		})();
 	});
 
+	// 固定楼层压缩：每 N 个叙事轮主动触发一次压缩（不等上下文吃紧才被动压）。
+	// 独立于场记监听器——scribeBusy 时场记跳过本轮，但楼层计数不能漏。
+	// 计数归零在 session_before_compact（主动/被动压缩共用同一归零点）。
+	pi.on("agent_end", (event, ctx) => {
+		if (!rpMode || !card) return;
+		const msgs = event.messages as Array<{ role?: string; content?: unknown; stopReason?: string }>;
+		const lastAsst = [...msgs].reverse().find((m) => m.role === "assistant");
+		if (!lastAsst || lastAsst.stopReason === "aborted") return;
+		const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+		if (!lastUser || isBackstageText(extractText(lastUser))) return;
+		if (!extractText(lastAsst).trim()) return;
+
+		narrativeTurnsSinceCompact++;
+		const everyN = config.compactEveryNTurns ?? 30;
+		const fire = shouldProactiveCompact({
+			narrativeTurnsSinceCompact,
+			everyNTurns: everyN,
+			contextTokens: ctx.getContextUsage()?.tokens ?? null,
+			compactInFlight: proactiveCompactInFlight,
+		});
+		if (!fire) return;
+		proactiveCompactInFlight = true;
+		if (process.env.RP_DEBUG) {
+			console.error(`[rp-compact] 固定楼层压缩触发：${narrativeTurnsSinceCompact} 个叙事轮（周期 ${everyN}）`);
+		}
+		ctx.compact({
+			onComplete: () => {
+				proactiveCompactInFlight = false;
+			},
+			onError: (err) => {
+				proactiveCompactInFlight = false;
+				if (process.env.RP_DEBUG) console.error(`[rp-compact] 主动压缩失败（下轮再试）：${err.message}`);
+			},
+		});
+	});
+
 	// 剧情向压缩接管：用场记提示词替代 pi 默认的 coding 摘要模板
 	// （agent-run-02 P9：默认模板把陈旧场景写成 Critical Context，压缩后剧情倒退）。
 	// 注意：completeSimple 来自本项目自装的 pi-ai 副本，与 pi 内部实例的 provider
 	// 注册表相互独立——内置渠道（deepseek 等）两边都有，运行期注册的自定义 provider
 	// 则只在 pi 侧可见；本项目不使用运行期注册，风险可控。
 	pi.on("session_before_compact", async (event, ctx) => {
+		// 压缩正在发生（无论主动/被动、接管成败）：楼层计数归零，在途标志清掉
+		narrativeTurnsSinceCompact = 0;
+		proactiveCompactInFlight = false;
 		if (!rpMode || !card || !ctx.model) return undefined;
 		try {
 			const prep = event.preparation;
 			const msgs = [...prep.messagesToSummarize, ...(prep.isSplitTurn ? prep.turnPrefixMessages : [])];
 			if (msgs.length === 0) return undefined;
 
+			// 压缩前归档：被裁正文**完整**进剧情库（摘要管连续性,归档管细节召回）。
+			// fire-and-forget——embedding 可能要几秒,不挡压缩;失败只丢召回能力,正文仍在会话文件里。
+			const archiveText = serializeForSummary(msgs, config.userName, card.name);
+			const archiveScope = {
+				sessionId:
+					typeof ctx.sessionManager?.getSessionId === "function" ? ctx.sessionManager.getSessionId() : "_default",
+				card: config.card || undefined,
+			};
+			void memoryArchiveCompacted(appCwd, archiveScope, archiveText)
+				.then((r) => {
+					if (process.env.RP_DEBUG && r.archived) {
+						console.error(`[rp-compact] 被裁正文已归档剧情库：${r.added}/${r.chunks} 块`);
+					}
+				})
+				.catch((err: unknown) => {
+					if (process.env.RP_DEBUG) {
+						console.error(`[rp-compact] 归档失败（不影响压缩）：${err instanceof Error ? err.message : String(err)}`);
+					}
+				});
+
 			const { systemPrompt, userText } = buildRpSummaryPrompt({
-				conversationText: serializeForSummary(msgs, config.userName, card.name),
+				conversationText: archiveText,
 				stateSnapshot: formatState(state),
 				previousSummary: prep.previousSummary,
 				language: config.language,
@@ -1735,44 +1843,40 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 
 	// ---------- 正典落盘门禁（PLAN-PHASE4 柱 1 第一层，harness 级） ----------
 	//
-	// 与提示词层的 ask_director（模型自觉调用）不同，这里是真门禁：tool_call 钩子是
-	// pi 的工具执行咽喉点，落盘类工具的每次调用必然经过——ask 档下先弹批准卡，
-	// 用户不点头就 block，模型物理上写不进正典。与 coding agent 拦 Edit/Write 同构。
-	// 门禁清单只收「不可逆剧情资产落盘」；world_state_update 是每轮记账（有场记兜底），拦了会问烦。
+	// 写入设定集/知识库是「用户主动要求才执行」的动作：提示词层已把 lorebook_write/codex_write
+	// 定义为用户明确要求才调用的工具（见 director.ts）。这里是真门禁：tool_call 钩子是 pi 的
+	// 工具执行咽喉点，凡未经用户本轮明确要求的写入一律静默拦截——**不弹卡**（用户没让写就不该
+	// 被打断），只把原因回给模型；用户明确要求时直接放行。world_state_update 是每轮记账（有场记
+	// 兜底），不在门禁清单。
 	const GATED_TOOLS = ["lorebook_write", "codex_write"]; // 柱 3 的 card_write 出生即入列
+
+	// 用户主动要求记录的信号（宽松匹配：宁可放行用户明确要求的写入，也不拦错）
+	const WRITE_REQUEST_RE =
+		/(写入|写进|写一下|记下|记入|记录|登记|存进|存到|保存|收藏|归档|收进|收录|固化|入典|沉淀|备注|补充设定|世界书|设定集|知识库|图鉴|物志|record|save|store|lorebook|codex)/i;
+
+	/** 取最近一条用户消息纯文本（写入门禁判定用；会话不可读时按未要求处理，宁拦勿写） */
+	const lastUserText = (c: { sessionManager?: { getBranch?: () => unknown } }): string => {
+		try {
+			const branch = (c.sessionManager?.getBranch?.() as BranchEntry[] | undefined) ?? [];
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e.type === "message" && e.message?.role === "user") return extractText(e.message);
+			}
+		} catch {
+			// 会话不可读的极早期生命周期：按未要求处理
+		}
+		return "";
+	};
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (!rpMode || config.creationMode !== "ask") return undefined;
 		if (!GATED_TOOLS.includes(event.toolName)) return undefined;
-
-		// 卡面摘要由 harness 生成（元信息层，非正文，D10 合规）
-		const input = event.input as { codex?: unknown; title?: unknown; keys?: unknown; content?: unknown; constant?: unknown };
-		const title = typeof input.title === "string" ? input.title : "（无标题）";
-		const content = typeof input.content === "string" ? input.content : "";
-		const excerpt = content.length > 300 ? `${content.slice(0, 300)}…` : content;
-		const question =
-			event.toolName === "codex_write"
-				? `是否把这条新知识写入知识库「${typeof input.codex === "string" ? input.codex : "？"}」（跨对话共享，永久保留）？\n【${title}】\n${excerpt}`
-				: `是否把这条新设定写入设定集（跨会话保留，成为正式设定）？\n【${title}】\n${excerpt}`;
-
-		let answer: string | undefined;
-		try {
-			answer = await ctx.ui.select(question, ["写入", "不写入"]);
-		} catch {
-			// 无交互通道（print 模式等）：无法征得同意，宁拦勿写
-			return { block: true, reason: "当前无法向用户确认，设定未写入。稍后用户在场时再试。" };
-		}
-		if (answer === "写入") return undefined; // 放行，工具正常执行
-		if (answer === undefined) {
-			return { block: true, reason: "用户停止了本回合，设定未写入。" };
-		}
-		if (answer === "不写入") {
-			return { block: true, reason: "用户否决了这次写入：不要写入设定集，也不要在后续正文中把它当作已定事实。" };
-		}
-		// 自由输入 = 否决 + 修改意见
+		// 用户本轮主动要求写入 → 放行（不再弹确认卡）
+		if (WRITE_REQUEST_RE.test(lastUserText(ctx))) return undefined;
 		return {
 			block: true,
-			reason: `用户未同意原样写入，并给出意见：「${answer}」。请按意见调整后重新提交，或放弃写入。`,
+			reason:
+				"写入设定集/知识库需用户明确要求：本轮用户并未要求记录，本次写入已拒绝。不要写、也不要用 ask_director 询问「是否写入」；若用户后续明确要求再执行。",
 		};
 	});
 

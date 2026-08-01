@@ -9,22 +9,36 @@ export function programViewportHeight(win?: { innerHeight: number } | null): num
 }
 
 /**
- * 是否「全屏程序卡」（凡人修仙等 fixed 铺满）——iframe 须锁视口高。
+ * html/body 根级 CSS 是否「视口接管」：同时声明 overflow:hidden 与 height:100%/100*vh。
+ * 只认 html/body 选择器块（含 JS 模板串里的，凡人修仙整页在模板串内）；
+ * min-height:100vh 不算——那是「至少一屏」的内容流写法，正需要量高覆盖。
+ */
+function hasRootViewportCss(html: string): boolean {
+	const blocks = html.match(/(?:^|[\s,{}>;"'`])(?:html|body)\s*(?:,\s*(?:html|body)\s*)?\{[^{}]*\}/gi);
+	if (!blocks) return false;
+	const joined = blocks.join(" ");
+	return (
+		/overflow(?:-y)?\s*:\s*hidden/i.test(joined) && /(?<!min-)height\s*:\s*100(?:%|[dsl]?vh)/i.test(joined)
+	);
+}
+
+/**
+ * 是否「视口接管型程序卡」（凡人修仙主 UI、道渊开局创建器等）——iframe 须锁视口高，
+ * 且 **不得** 注入 height:auto/overflow 覆盖、不注入高度上报（见 buildSrcDoc）。
  *
- * **不要**把「doctype + script」一刀切：Living With Slaves 状态栏也是完整 HTML+JS，
- * 但折叠态只有 ~200px 内容；误判为 program 会锁 78vh → 大块黑空、各消息高度不一致。
+ * **不要**按体积一刀切：道渊 MVU 状态栏 182KB / XML 状态栏 88KB 都是完整 HTML+JS，
+ * 却是透明内容流（零 vh、根级无接管 CSS）；按体积锁 78vh 就是「大块黑空 + 抖动」事故本身。
+ * Living With Slaves 状态栏（~11KB doctype+script，折叠态 ~200px）同理。
  *
- * 判定（满足其一）：
- * - 体量很大（≥25KB 脚本界面）
- * - 明确全屏 CSS：position:fixed + 100vh/100dvh + script
+ * 判定（满足其一，均要求 scripts）：
+ * - 根级接管 CSS：html/body 同时 overflow:hidden + height:100%（道渊「开局创造角色」126KB 无 fixed，全靠这条）
+ * - fixed 铺满 + 视口单位：position:fixed 与 100vh/100dvh 并存（body 内联样式等根级 CSS 缺席的形态）
  */
 export function looksLikeProgramApp(html: string, scripts: boolean): boolean {
 	if (!scripts || !html) return false;
-	if (html.length >= 25_000) return true;
-	const hasScript = /<script[\s>]/i.test(html);
-	if (!hasScript) return false;
-	// 全屏/铺满特征（程序卡常见；状态栏不会这样写）
-	if (/position\s*:\s*fixed/i.test(html) && /(?:100vh|100dvh|100%)/i.test(html)) return true;
+	if (!/<script[\s>]/i.test(html)) return false;
+	if (hasRootViewportCss(html)) return true;
+	if (/position\s*:\s*fixed/i.test(html) && /100[dsl]?vh/i.test(html)) return true;
 	return false;
 }
 
@@ -46,11 +60,20 @@ const SEAMLESS_FRAGMENT_CSS =
 /**
  * 无痕·整页文档:透明兜底。
  * **禁止**让 html/body 吃满 100vh——iframe 量高时 100vh 会跟着父高涨，形成白底无限向下扩的反馈环。
+ * 仅用于**内容流**文档；视口接管型（looksLikeProgramApp）绝不可注入：
+ * height:auto!important 会打断卡自己的 height:100% 链 → 容器全塌陷只剩 fixed 层（道渊开局创建器事故）。
  */
 const SEAMLESS_DOC_CSS =
 	`html,body{margin:0;padding:0;background:transparent;` +
 	`min-height:0!important;height:auto!important;overflow:visible!important}` +
 	`img,video{max-width:100%;height:auto}`;
+
+/**
+ * 视口接管型整页文档:只给透明兜底，样式主权完全归卡——
+ * iframe 高度由父页按视口锁定（programViewportHeight），不量内容，无需也不能改 height/overflow。
+ */
+const TAKEOVER_DOC_CSS =
+	`html,body{margin:0;padding:0;background:transparent}` + `img,video{max-width:100%;height:auto}`;
 
 /**
  * 高度上报：量「内容盒子」而不是 documentElement.scrollHeight。
@@ -258,11 +281,13 @@ export function buildSrcDoc(html: string, scripts: boolean, seamless: boolean): 
 	// 先修用户 HTML 内脚本截断，再注入带真实 </script> 的垫片
 	const trimmed = escapeScriptEndTags(html.trim());
 	const isFull = /^\s*<(!doctype|html[\s>])/i.test(trimmed);
+	// 与 HtmlFrame 的高度策略同源：同一函数、同一入参，保证 CSS 注入与定高策略永不打架
+	const takeover = seamless && looksLikeProgramApp(html, scripts);
 	// 程序卡需拉 CDN(dexie/echarts 等) + 内联脚本；connect 放宽到 https
 	const csp = scripts
 		? `default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: http: data: blob:; style-src 'unsafe-inline' https: http: data:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; connect-src https: http: ws: wss: data: blob:; worker-src blob: data:; frame-src 'none'`
 		: `default-src 'none'; style-src 'unsafe-inline' https: http: data:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:`;
-	const seamlessCss = isFull ? SEAMLESS_DOC_CSS : SEAMLESS_FRAGMENT_CSS;
+	const seamlessCss = isFull ? (takeover ? TAKEOVER_DOC_CSS : SEAMLESS_DOC_CSS) : SEAMLESS_FRAGMENT_CSS;
 	// 脚本帧：垫片桥必须先于卡脚本，保证 eventOn / TavernHelper 在初始化时已存在
 	const bridge = scripts ? IFRAME_TAVERN_BRIDGE_SNIPPET : "";
 	const head =
@@ -270,8 +295,9 @@ export function buildSrcDoc(html: string, scripts: boolean, seamless: boolean): 
 		`<meta http-equiv="Content-Security-Policy" content="${csp}">` +
 		`<style>${seamless ? seamlessCss : LEGACY_BASE_CSS}</style>` +
 		bridge;
-	// 高度：脚本+seamless 用 postMessage；若同源也可由父页量，双通道不冲突
-	const tail = scripts && seamless ? HEIGHT_REPORTER_SNIPPET : "";
+	// 高度：脚本+seamless 用 postMessage；接管型不上报——父页锁视口高不收内容量高，
+	// 上报器与卡内 ResizeObserver 互踩正是「收拢/涨高」乒乓抖动的源头
+	const tail = scripts && seamless && !takeover ? HEIGHT_REPORTER_SNIPPET : "";
 	if (isFull) {
 		let withHead: string;
 		if (/<head[\s>]/i.test(trimmed)) {

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import {
 	allocateServerId,
+	BUILTIN_VISION_ID,
+	builtinMcpServers,
 	defaultSessionEnabledIds,
 	discoverMcpCatalog,
 	emptyMcpConfig,
@@ -14,6 +16,7 @@ import {
 	normalizeMcpConfig,
 	parametersFromMcpSchema,
 	parseMcpServersMap,
+	probeMcpServer,
 	qualifyMcpToolName,
 	resetMcpHubForTests,
 	sanitizeServerId,
@@ -204,5 +207,95 @@ test("discover from real ~/.claude.json if present", () => {
 		assert.ok(hit, `expected some of ${keys.join(",")} in catalog, got ${[...ids].join(",")}`);
 	} catch {
 		// 无 claude 配置则跳过断言
+	}
+});
+
+// ---------- 内置视觉 MCP（随发布包走） ----------
+
+test("内置视觉 MCP：目录必含，endpoint 运行时解析且脚本存在", () => {
+	const dir = mkdtempSync(join(tmpdir(), "liyuan-mcp-builtin-"));
+	try {
+		resetMcpHubForTests();
+		const cat = discoverMcpCatalog(dir);
+		const vis = cat.find((c) => c.id === BUILTIN_VISION_ID);
+		assert.ok(vis, "目录应包含 liyuan_vision");
+		assert.equal(vis!.builtin, true);
+		assert.equal(vis!.transport, "stdio");
+		assert.equal(vis!.command, process.execPath);
+		assert.match(vis!.args?.[0] ?? "", /vision-server\.mjs$/);
+		assert.ok(existsSync(vis!.args![0]), "内置 server 脚本应在仓库内");
+		// 默认关（RP 用不到的不必开）
+		assert.equal(vis!.enabled, false);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+		resetMcpHubForTests();
+	}
+});
+
+test("内置视觉 MCP：项目覆盖只并入 env，endpoint 被重钉", () => {
+	const dir = mkdtempSync(join(tmpdir(), "liyuan-mcp-builtin-ov-"));
+	try {
+		resetMcpHubForTests();
+		saveMcpConfig(dir, {
+			format: "liyuan-mcp",
+			version: 2,
+			servers: [
+				{
+					id: BUILTIN_VISION_ID,
+					name: "视觉识图",
+					enabled: false,
+					transport: "stdio",
+					command: "evil.exe",
+					args: ["stale-path.mjs"],
+					env: { LIYUAN_VISION_API_KEY: "k-test", LIYUAN_VISION_MODEL: "m" },
+				},
+			],
+			defaults: {},
+		});
+		const cat = discoverMcpCatalog(dir);
+		const vis = cat.find((c) => c.id === BUILTIN_VISION_ID);
+		assert.ok(vis);
+		assert.equal(vis!.builtin, true);
+		assert.equal(vis!.command, process.execPath, "覆盖层不得改内置 endpoint");
+		assert.match(vis!.args?.[0] ?? "", /vision-server\.mjs$/);
+		assert.equal(vis!.env?.LIYUAN_VISION_API_KEY, "k-test", "覆盖层 env 应并入");
+		assert.equal(vis!.discovered, false, "有项目条目→可删（删=回退内置默认）");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+		resetMcpHubForTests();
+	}
+});
+
+test("内置视觉 server 可启动并列出工具（无 key 也能起）", async () => {
+	const [vis] = builtinMcpServers();
+	const r = await probeMcpServer({ ...vis, env: undefined }, 30_000);
+	assert.equal(r.ok, true, r.error);
+	const names = r.tools.map((t) => t.name).sort();
+	assert.deepEqual(names, ["analyze_image", "extract_image_text"]);
+});
+
+test("内置视觉 server：未配置时调用返回配置指引", async () => {
+	const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+	const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+	const [vis] = builtinMcpServers();
+	const transport = new StdioClientTransport({
+		command: vis.command!,
+		args: vis.args ?? [],
+		cwd: vis.cwd,
+		stderr: "pipe",
+	});
+	const client = new Client({ name: "liyuan-test", version: "0.0.0" });
+	await client.connect(transport);
+	try {
+		const res = (await client.callTool({
+			name: "analyze_image",
+			arguments: { image_source: "https://example.com/x.png", prompt: "描述" },
+		})) as { isError?: boolean; content: Array<{ type: string; text?: string }> };
+		assert.equal(res.isError, true);
+		const text = res.content.map((c) => c.text ?? "").join("");
+		assert.match(text, /尚未配置/);
+		assert.match(text, /LIYUAN_VISION_API_KEY/);
+	} finally {
+		await client.close();
 	}
 });

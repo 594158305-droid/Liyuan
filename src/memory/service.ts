@@ -287,6 +287,38 @@ export function defaultMemoryConfig(): MemoryConfig {
 }
 
 /**
+ * 压缩归档：被上下文压缩裁掉的早期正文**完整**入剧情库（source=archive）。
+ * 与 onNarrativeTurnEnd 的滚动摘要互补——接力摘要管剧情连续性，归档管细节召回：
+ * 正文被压掉后，具体对白/细节仍可被 memoryRecallForTurn 按相关性捞回。
+ * 由压缩接线层 fire-and-forget 调用；失败只丢召回能力，不影响压缩本身。
+ */
+export async function memoryArchiveCompacted(
+	cwd: string,
+	scope: MemoryScope,
+	text: string,
+): Promise<{ archived: boolean; added?: number; chunks?: number; reason?: string }> {
+	const cfg = loadMemoryConfig(cwd);
+	if (!cfg.enabled) return { archived: false, reason: "memory disabled" };
+	const store = cfg.stores.find((s) => s.id === "narrative" && s.enabled);
+	if (!store) return { archived: false, reason: "narrative store disabled" };
+	const raw = text.trim();
+	if (raw.length < 20) return { archived: false, reason: "text too short" };
+
+	const sc = normalizeScope(scope);
+	const parts = splitTextChunks(raw, 600);
+	const r = await upsertTexts(
+		cwd,
+		sc,
+		"narrative",
+		parts,
+		{ source: "archive", title: "早期剧情归档", sessionId: sc.sessionId, card: sc.card },
+		store.maxChunks,
+		embedCtxFrom(cfg),
+	);
+	return { archived: r.added > 0, added: r.added, chunks: parts.length };
+}
+
+/**
  * 剧情回合检索：仅搜**当前卡+当前对话**已启用库，供 buildTurnInjection 注入。
  */
 export async function memoryRecallForTurn(

@@ -192,10 +192,27 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: options?.maxRetries ?? 0,
 			};
-			const { data: openaiStream, response } = await client.chat.completions
-				.create(params, requestOptions)
-				.withResponse();
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			let chunkSource: AsyncIterable<ChatCompletionChunk> | ChatCompletionChunk[];
+			if (compat.streaming !== false) {
+				const { data: openaiStream, response } = await client.chat.completions
+					.create(params, requestOptions)
+					.withResponse();
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+				// Race each chunk against AbortSignal so Stop works even when a proxy
+				// ignores HTTP cancellation and never closes the SSE body.
+				chunkSource = abortableAsyncIterable(openaiStream, options?.signal);
+			} else {
+				const nonStreamingParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
+					...params,
+					stream: false,
+				};
+				delete (nonStreamingParams as { stream_options?: unknown }).stream_options;
+				const { data: completion, response } = await client.chat.completions
+					.create(nonStreamingParams, requestOptions)
+					.withResponse();
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+				chunkSource = [completionToChunk(completion)];
+			}
 			stream.push({ type: "start", partial: output });
 
 			interface StreamingToolCallBlock extends ToolCall {
@@ -315,9 +332,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				return block;
 			};
 
-			// Race each chunk against AbortSignal so Stop works even when a proxy
-			// ignores HTTP cancellation and never closes the SSE body.
-			for await (const chunk of abortableAsyncIterable(openaiStream, options?.signal)) {
+			for await (const chunk of chunkSource) {
 				if (!chunk || typeof chunk !== "object") continue;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
@@ -1121,6 +1136,53 @@ function convertTools(
 	}));
 }
 
+/**
+ * Convert a non-streaming ChatCompletion into a single synthetic chunk so that
+ * compat.streaming === false runs through the same event loop as streaming.
+ */
+function completionToChunk(completion: OpenAI.Chat.Completions.ChatCompletion): ChatCompletionChunk {
+	const choice = completion.choices?.[0];
+	const message = choice?.message as
+		| (OpenAI.Chat.Completions.ChatCompletionMessage & Record<string, unknown>)
+		| undefined;
+	const delta: Record<string, unknown> = {};
+	if (message) {
+		if (typeof message.content === "string" && message.content.length > 0) {
+			delta.content = message.content;
+		}
+		// Non-streaming responses carry reasoning on the message the same way
+		// streaming responses carry it on the delta.
+		for (const field of ["reasoning_content", "reasoning", "reasoning_text"]) {
+			const value = message[field];
+			if (typeof value === "string" && value.length > 0) {
+				delta[field] = value;
+			}
+		}
+		if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+			delta.tool_calls = message.tool_calls.map((toolCall, index) => ({ index, ...toolCall }));
+		}
+		if (Array.isArray(message.reasoning_details)) {
+			delta.reasoning_details = message.reasoning_details;
+		}
+	}
+	return {
+		id: completion.id,
+		object: "chat.completion.chunk",
+		created: completion.created,
+		model: completion.model,
+		...(completion.usage ? { usage: completion.usage } : {}),
+		choices: choice
+			? [
+					{
+						index: choice.index ?? 0,
+						delta: delta as ChatCompletionChunk.Choice["delta"],
+						finish_reason: choice.finish_reason ?? "stop",
+					},
+				]
+			: [],
+	};
+}
+
 function parseChunkUsage(
 	rawUsage: {
 		prompt_tokens?: number;
@@ -1270,6 +1332,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 			isNvidia ||
 			isAntLing
 		),
+		streaming: true,
 	};
 }
 
@@ -1303,5 +1366,6 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
 		supportsLongCacheRetention: model.compat.supportsLongCacheRetention ?? detected.supportsLongCacheRetention,
+		streaming: model.compat.streaming ?? detected.streaming,
 	};
 }

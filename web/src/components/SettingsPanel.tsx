@@ -649,6 +649,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 
 	const [scanDepth, setScanDepth] = useState(4);
 	const [maxLore, setMaxLore] = useState(3);
+	const [compactEvery, setCompactEvery] = useState(30);
 	const [backendControl, setBackendControl] = useState(true);
 	const [askMode, setAskMode] = useState(false);
 	const [dirty, setDirty] = useState(false);
@@ -658,6 +659,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 		if (data) {
 			setScanDepth(data.config.scanDepth);
 			setMaxLore(data.config.maxLoreInjections);
+			setCompactEvery(data.config.compactEveryNTurns ?? 30);
 			setBackendControl(data.config.backendControl !== false);
 			setAskMode(data.config.creationMode === "ask");
 			setDirty(false);
@@ -680,6 +682,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 				greeting: true,
 				scanDepth,
 				maxLoreInjections: maxLore,
+				compactEveryNTurns: compactEvery,
 				backendControl,
 				creationMode: askMode ? "ask" : "silent",
 			});
@@ -722,6 +725,21 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 							max={10}
 							onChange={(v) => {
 								setMaxLore(v);
+								touch();
+							}}
+						/>
+					</section>
+
+					<section className="sp-section">
+						<h4>上下文压缩</h4>
+						<SliderField
+							label="固定楼层压缩周期"
+							hint="每 N 个剧情轮把早期正文压成接力摘要（原文归档进剧情库可召回）；0 = 仅在上下文吃紧时被动压缩"
+							value={compactEvery}
+							min={0}
+							max={100}
+							onChange={(v) => {
+								setCompactEvery(v);
 								touch();
 							}}
 						/>

@@ -28,6 +28,8 @@ liyuan.agent.json
 liyuan.agent.meta.json
 liyuan.config.json
 liyuan-preset.json
+.liyuan-mcp.json
+.liyuan-memory/
 rp.config*.json
 liyuan-profiles/
 *.bak

@@ -65,8 +65,12 @@ if [[ -f .liyuan-cache/update/pending.json ]]; then
   node scripts/apply-update.mjs || true
 fi
 
-if [[ ! -d node_modules ]]; then
-  echo "[liyuan] node_modules missing - running npm install ..."
+if [[ ! -d node_modules/ws ]]; then
+  if [[ -d node_modules ]]; then
+    echo "[liyuan] node_modules incomplete - reinstalling ..."
+  else
+    echo "[liyuan] node_modules missing - running npm install ..."
+  fi
   echo "[liyuan] First run needs network; later starts are offline-ready."
   npm install
 fi

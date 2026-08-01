@@ -127,7 +127,7 @@ ${
 界面会把你的**工具前短旁白**和工具步骤显示成生成中的过程条（像导演笔记，不是运维日志）。纪律：
 - 调用会改变设定/账本/面板/知识库，或需要先检索再落笔的工具前，用**1～3 句普通可见短句**说明意图（**不要**包在 thinking/draft 标签里——标签内用户默认看不到过程条）。
 - 旁白要 **RP 向、具体**：说「准备怎么设计 / 对齐哪段戏 / 补哪块设定」，**禁止**只写「我将调用 lorebook_write」「接下来读世界书」这种工具名汇报。
-- 好例子：「新配角定为世家侧近侍，外冷内谨，与${config.userName}有旧识未揭——先写入补充设定，再进这场戏。」
+- 好例子：「新配角定为世家侧近侍，外冷内谨，与${config.userName}有旧识未揭——先把这条人物关系记进账本，再进这场戏。」
 - 坏例子：「使用 lorebook_write 工具写入设定。」「先 search 一下。」
 - 工具对用户不可见；旁白可以作者向，但语气像共创导演，不要系统客服腔。
 - **正文仍一次写完**：过程旁白与工具准备完成后再输出整段剧情；不要写一半正文再停下来改前文。`,
@@ -139,8 +139,8 @@ ${
 		`- lorebook_search：剧情涉及世界观设定、地点、种族、历史事件而你不完全确定细节时，先检索再落笔。用与世界书原文一致的语言检索（英文书用英文关键词）。`,
 		`- world_state_get：对当前事实不确定时先核对再写。`,
 		`- world_state_update：剧情发生持久变化（物品得失、时间地点推移、关系与承诺、伤病）时立即记账。后台有自动记录兜底，但你亲手记的账更及时可靠。`,
-		`- lorebook_write：剧情中确立了新的世界观事实（你新造的设定、与用户共同敲定的规则），或用户要求记录设定时，写入补充设定集固化为正典——此后检索可命中，跨会话不丢。只记设定（世界观/人物档案/规则），不记剧情进展（那是 world_state_update 的事）。`,
-		`- codex_create / codex_mount / codex_unmount / codex_write：**知识库**——用户自建的命名设定库，独立于角色卡、可挂到任何对话共用（如「九州风物志」「奇物图鉴」）。用户说建库/挂库照办（codex_mount 不带名可列出全部库）；已挂载的库并入 lorebook_search 检索。剧情中出现值得长期沉淀、跨剧本复用的新奇知识/物品/人物时，主动用 codex_write 写进对口的挂载库（会先征询用户）；只跟本剧本走的设定仍写 lorebook_write。`,
+		`- lorebook_write：**仅当用户明确要求记录设定时**（「记一下」「写入设定」「存进世界书」等）才调用，把用户指定的设定固化进补充设定集——此后检索可命中，跨会话不丢。**未获明确要求前：禁止主动写，也禁止询问「要不要写入」**。只记设定（世界观/人物档案/规则），不记剧情进展（那是 world_state_update 的事）。`,
+		`- codex_create / codex_mount / codex_unmount / codex_write：**知识库**——用户自建的命名设定库，独立于角色卡、可挂到任何对话共用（如「九州风物志」「奇物图鉴」）。用户说建库/挂库照办（codex_mount 不带名可列出全部库）；已挂载的库并入 lorebook_search 检索。**codex_write 仅当用户明确要求写入时才调用**，未获要求前禁止主动写、禁止询问；只跟本剧本走的设定仍写 lorebook_write。`,
 		`- show_image：把一张图片展示到对话里（正文下方、与剧情明确区隔）。source 填 http(s) 图片地址或本机图片文件路径（如你刚生成保存的图）；可附 caption 说明。生成或取得用户要的图后必须用它交付，不要只贴链接文字。`,
 		`- show_audio：把一段音频展示到对话里（可播放控件，与正文区隔）。source 填 http(s) 或本机音频路径；外部技能生成的 mp3 等用此工具交付。`,
 		`- show_video：把一段视频展示到对话里（可播放控件，与正文区隔）。source 填 http(s) 或本机视频路径（.mp4/.webm/.mov 等）；第三方/技能生成的短视频用此工具交付，不要只贴链接。`,
@@ -183,7 +183,8 @@ ${
 - **要问就用 ask_director**，绝不在正文写「选项一/二」或「A. B.」——用户那边只有工具弹出的选择卡可点。
 - 选项用${config.language}，具体、可落地、彼此不同；用户可自写答案或停止。
 - 纯氛围铺陈、无岔路的过场、明确只有一条合理动作时，直接演，不必硬问。
-- 求方向/生成身份句却不调用 ask_director、或改用助手口吻代写完整档案，均属违规。`,
+- 求方向/生成身份句却不调用 ask_director、或改用助手口吻代写完整档案，均属违规。
+- **不要**用 ask_director 问「要不要写入设定集/知识库」——写入由用户主动提出时直接执行（lorebook_write/codex_write），不是剧情决策，不占选择卡。`,
 		);
 	}
 
@@ -304,6 +305,16 @@ export interface TurnInjectionOptions {
 	 * 由 harness 在 before_agent_start 检索后传入。
 	 */
 	memoryHits?: Array<string | { text: string; score?: number; source?: string }>;
+	/**
+	 * 设定集条目索引行（formatLoreIndex 产出）：让模型知道世界书里**有什么可查**。
+	 * 只出条目标题——检索靠 lorebook_search，索引一旦塞内容就退化回全量注入。
+	 */
+	loreIndex?: string;
+	/**
+	 * 登场名录索引行（formatRosterIndex 产出）：已不在当前状态的人物/物品/剧情线。
+	 * 只出名字——细节靠 memory_search 召回，索引一旦塞内容就退化回全量注入。
+	 */
+	rosterIndex?: string;
 	/** 卡作者状态栏格式；非空则末端钉「正文后必须出状态栏」 */
 	statusBarFormats?: string[];
 	/**
@@ -314,6 +325,34 @@ export interface TurnInjectionOptions {
 	toolContinuation?: boolean;
 	/** 用户预设启用中：末端不再钉「不替 user 行动」等扮演类条款（那是预设的职权），只留语言等管线条款 */
 	presetActive?: boolean;
+}
+
+/** 设定集索引单行渲染的字符预算（超出按条目边界截断，补「等 N 条」） */
+const LORE_INDEX_MAX_CHARS = 500;
+
+/**
+ * 设定集条目索引行：`共 N 条：标题A、标题B、……`。
+ * 常驻注入的硬纪律——**只出名字**（comment，缺失回落首个关键词），一个条目一小段字；
+ * 超预算截断并标注剩余条数。无可列条目返回 undefined（调用方不注入该块）。
+ */
+export function formatLoreIndex(entries: Array<Pick<LorebookEntry, "comment" | "keys" | "enabled">>): string | undefined {
+	const titles: string[] = [];
+	for (const e of entries) {
+		if (e.enabled === false) continue;
+		const title = (e.comment || e.keys?.[0] || "").trim();
+		if (title) titles.push(title);
+	}
+	if (titles.length === 0) return undefined;
+
+	const shown: string[] = [];
+	let used = 0;
+	for (const t of titles) {
+		if (used + t.length + 1 > LORE_INDEX_MAX_CHARS) break;
+		shown.push(t);
+		used += t.length + 1;
+	}
+	const rest = titles.length - shown.length;
+	return `共 ${titles.length} 条：${shown.join("、")}${rest > 0 ? `……等（另 ${rest} 条未列出，同样可检索）` : ""}`;
 }
 
 /** 每轮注入消息流末端的动态内容（custom 消息 → 以 user 角色送达模型） */
@@ -330,6 +369,8 @@ export function buildTurnInjection({
 	uploadIndex,
 	userText,
 	memoryHits,
+	loreIndex,
+	rosterIndex,
 	statusBarFormats,
 	toolContinuation,
 	presetActive,
@@ -341,6 +382,14 @@ export function buildTurnInjection({
 	blocks.push(
 		`【世界状态】当前事实基准，正文不得与之矛盾——物品在谁手里、现在是第几天几点、人在哪里，以下面为准；剧情记忆与之冲突时在叙事内自然圆回：\n${formatState(state)}`,
 	);
+
+	// 登场名录（常驻索引）：登场过但已不在当前状态的人物/物品/剧情线。
+	// 压缩/删除后模型会彻底忘记它们存在过——名录补上「存在过」这一层，细节靠检索。
+	if (rosterIndex) {
+		blocks.push(
+			`【登场名录】以下条目登场过但已不在当前状态（离场/失去/了结）：${rosterIndex}。剧情要重新带回其中条目时，先用 memory_search 召回相关细节再落笔，不得凭空改写既定事实；名录里没有的名字才是真正的新登场。`,
+		);
+	}
 
 	// 活跃面板当前内容（柱 2）：用户手改后已同步进扩展内存；此处注入全文快照（或旧式一行索引）。
 	// 模型续写必须以这里为准，禁止凭记忆用过时内容整页 panel_write 盖掉。
@@ -360,7 +409,7 @@ export function buildTurnInjection({
 	// 挂载知识库速览（柱 3）：让模型每轮记得挂着哪些库——既是检索来源，也是主动入库的提醒。
 	if (codexIndex) {
 		blocks.push(
-			`【挂载知识库】${codexIndex}——已并入 lorebook_search 检索。剧情中出现值得长期沉淀、跨剧本复用的新奇知识/物品/人物时，主动用 codex_write 写进对口的库。`,
+			`【挂载知识库】${codexIndex}——已并入 lorebook_search 检索。仅当用户明确要求记录时用 codex_write 写入。`,
 		);
 	}
 
@@ -376,6 +425,14 @@ export function buildTurnInjection({
 			.map((e) => `- ${e.comment ? `【${e.comment}】` : ""}${applyMacros(e.content, macro)}`)
 			.join("\n");
 		blocks.push(`【相关设定】\n${lore}`);
+	}
+
+	// 设定集索引（常驻）：解决「不知道自己不知道」——模型没法检索一个它不知道存在的条目。
+	// 只列标题不给内容；细节靠 lorebook_search 按需取。
+	if (loreIndex) {
+		blocks.push(
+			`【设定集索引】${loreIndex}。正文将涉及其中条目而其内容未出现在上方【相关设定】时，先 lorebook_search 查过再落笔；索引里有的设定禁止臆造。`,
+		);
 	}
 
 	// 向量记忆：与世界书并列；短片段、按需取用
@@ -461,7 +518,7 @@ export function buildTurnInjection({
 			}
 		} else {
 			notes.push(
-				`决策门禁：求方向、生成身份/人设、场景岔路、新重要角色/重大转折/设定定死 → ask_director；无岔路过场直接演。禁止正文手写选项。`,
+				`决策门禁：求方向、生成身份/人设、场景岔路、新重要角色/重大转折/设定定死 → ask_director（仅剧情走向决策，不用于「要不要写入设定集/知识库」的询问）；无岔路过场直接演。禁止正文手写选项。`,
 			);
 		}
 	}

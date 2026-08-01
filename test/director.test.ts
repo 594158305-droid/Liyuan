@@ -239,3 +239,16 @@ test("语言失配检测：英文正文报警，中文正文与短文本不报",
 	assert.equal(detectsLanguageMismatch("Okay.", "中文"), false, "短文本不判定");
 	assert.equal(detectsLanguageMismatch(en, "English"), false, "非中文目标 v0 不检测");
 });
+
+test("世界书/知识库写入=用户主动要求才执行（禁主动写、禁主动问）", () => {
+	const sp = buildSystemPrompt({ card, config: DEFAULT_CONFIG, constantLore: [] });
+	assert.ok(sp.includes("仅当用户明确要求记录设定时"), "lorebook_write 应仅在用户明确要求时调用");
+	assert.ok(sp.includes("codex_write 仅当用户明确要求写入时才调用"), "codex_write 应仅在用户明确要求时调用");
+	assert.ok(!sp.includes("主动用 codex_write"), "不得鼓励主动入库");
+	assert.ok(!sp.includes("会先征询用户"), "不得以『先征询』为由主动弹卡");
+	assert.ok(!sp.includes("你新造的设定"), "lorebook_write 不再鼓励自主造设定入典");
+	assert.ok(!sp.includes("剧情中确立了新的世界观事实"), "不得以『确立了新事实』为由主动写");
+	const askConfig = { ...DEFAULT_CONFIG, creationMode: "ask" as const };
+	const spAsk = buildSystemPrompt({ card, config: askConfig, constantLore: [] });
+	assert.ok(spAsk.includes("要不要写入设定集/知识库"), "ask 档应明令禁止用 ask_director 询问写入");
+});

@@ -1,6 +1,7 @@
 import {
 	type GenerateContentConfig,
 	type GenerateContentParameters,
+	type GenerateContentResponse,
 	GoogleGenAI,
 	type ThinkingConfig,
 } from "@google/genai";
@@ -9,6 +10,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	GoogleCompat,
 	Model,
 	ProviderHeaders,
 	SimpleStreamOptions,
@@ -84,13 +86,19 @@ export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
-			const googleStream = await client.models.generateContentStream(params);
+
+			const googleCompat = (model as Model<Api>).compat as GoogleCompat | undefined;
+			const useStreaming = googleCompat?.streaming !== false;
+
+			const chunks: AsyncIterable<GenerateContentResponse> | GenerateContentResponse[] = useStreaming
+				? await client.models.generateContentStream(params)
+				: [await client.models.generateContent(params)];
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
-			for await (const chunk of googleStream) {
+			for await (const chunk of chunks) {
 				// @google/genai documents GenerateContentResponse.responseId as an output-only field
 				// used to identify each response. Keep the first non-empty one from the stream.
 				output.responseId ||= chunk.responseId;

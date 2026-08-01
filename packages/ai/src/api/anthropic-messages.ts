@@ -536,14 +536,24 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: options?.maxRetries ?? 0,
 			};
-			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			let events: AsyncIterable<RawMessageStreamEvent> | RawMessageStreamEvent[];
+			if (model.compat?.streaming !== false) {
+				const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+				events = iterateAnthropicEvents(response, options?.signal);
+			} else {
+				const { data: message, response } = await client.messages
+					.create({ ...params, stream: false }, requestOptions)
+					.withResponse();
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+				events = messageToEvents(message);
+			}
 			stream.push({ type: "start", partial: output });
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
 
-			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
+			for await (const event of events) {
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
 					// Capture initial token usage from message_start event
@@ -1208,6 +1218,81 @@ function convertTools(
 			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};
 	});
+}
+
+/**
+ * Synthesize the streaming event sequence from a non-streaming Message so that
+ * compat.streaming === false runs through the same event loop as streaming.
+ */
+function messageToEvents(message: Anthropic.Message): RawMessageStreamEvent[] {
+	const events: RawMessageStreamEvent[] = [
+		{ type: "message_start", message: { ...message, content: [] } } as RawMessageStreamEvent,
+	];
+	message.content.forEach((block, index) => {
+		if (block.type === "text") {
+			events.push({
+				type: "content_block_start",
+				index,
+				content_block: { ...block, text: "" },
+			} as RawMessageStreamEvent);
+			if (block.text) {
+				events.push({
+					type: "content_block_delta",
+					index,
+					delta: { type: "text_delta", text: block.text },
+				} as RawMessageStreamEvent);
+			}
+		} else if (block.type === "thinking") {
+			events.push({
+				type: "content_block_start",
+				index,
+				content_block: { type: "thinking", thinking: "", signature: "" },
+			} as RawMessageStreamEvent);
+			if (block.thinking) {
+				events.push({
+					type: "content_block_delta",
+					index,
+					delta: { type: "thinking_delta", thinking: block.thinking },
+				} as RawMessageStreamEvent);
+			}
+			if (block.signature) {
+				events.push({
+					type: "content_block_delta",
+					index,
+					delta: { type: "signature_delta", signature: block.signature },
+				} as RawMessageStreamEvent);
+			}
+		} else if (block.type === "tool_use") {
+			// Emit arguments via input_json_delta: the loop re-parses partialJson at
+			// content_block_stop, so full input must flow through the delta path.
+			events.push({
+				type: "content_block_start",
+				index,
+				content_block: { type: "tool_use", id: block.id, name: block.name, input: {} },
+			} as RawMessageStreamEvent);
+			events.push({
+				type: "content_block_delta",
+				index,
+				delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input ?? {}) },
+			} as RawMessageStreamEvent);
+		} else {
+			// redacted_thinking and future block types carry everything on the start event.
+			events.push({ type: "content_block_start", index, content_block: block } as RawMessageStreamEvent);
+		}
+		events.push({ type: "content_block_stop", index } as RawMessageStreamEvent);
+	});
+	const stopDetails = (message as { stop_details?: RefusalStopDetails | null }).stop_details;
+	events.push({
+		type: "message_delta",
+		delta: {
+			stop_reason: message.stop_reason ?? "end_turn",
+			stop_sequence: message.stop_sequence ?? null,
+			...(stopDetails !== undefined ? { stop_details: stopDetails } : {}),
+		},
+		usage: message.usage,
+	} as unknown as RawMessageStreamEvent);
+	events.push({ type: "message_stop" } as RawMessageStreamEvent);
+	return events;
 }
 
 function mapStopReason(

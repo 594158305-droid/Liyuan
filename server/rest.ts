@@ -395,6 +395,8 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 	if (typeof next.language !== "string" || !next.language) next.language = DEFAULT_CONFIG.language;
 	next.scanDepth = clampInt(next.scanDepth, 1, 50, DEFAULT_CONFIG.scanDepth);
 	next.maxLoreInjections = clampInt(next.maxLoreInjections, 0, 20, DEFAULT_CONFIG.maxLoreInjections);
+	// 固定楼层压缩周期：0=关闭主动压缩；上限防手滑（500 轮≈永不触发）
+	next.compactEveryNTurns = clampInt(next.compactEveryNTurns, 0, 500, DEFAULT_CONFIG.compactEveryNTurns ?? 30);
 	next.greeting = next.greeting === true;
 	// 决策门禁档位：只认 ask / silent；非法值删除（扩展缺省按 silent）
 	if (next.creationMode !== "ask" && next.creationMode !== "silent") delete next.creationMode;
@@ -1390,6 +1392,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 						source: e.source,
 						sources: e.sources,
 						discovered: e.discovered,
+						builtin: e.builtin,
 					};
 				});
 				const project = loadMcpConfig(host.cwd);
@@ -1398,6 +1401,19 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					sessionEnabled: hub.getSessionEnabled(),
 					// 项目手写条目（编辑表单回填）
 					config: project.servers,
+					// 发现项的完整配置（编辑发现项→建项目覆盖时预填表单）
+					catalog: catalog.map((e) => ({
+						id: e.id,
+						name: e.name,
+						enabled: e.enabled,
+						transport: e.transport,
+						command: e.command,
+						args: e.args,
+						env: e.env,
+						cwd: e.cwd,
+						url: e.url,
+						headers: e.headers,
+					})),
 					// 发现摘要（调试/面板提示）
 					discovered: catalog.length,
 				});

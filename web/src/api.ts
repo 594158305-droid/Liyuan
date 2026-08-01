@@ -298,6 +298,8 @@ export interface RpConfigView {
 	disabledLore?: string[];
 	backendControl?: boolean;
 	creationMode?: "ask" | "silent";
+	/** 固定楼层压缩：每 N 个叙事轮主动压缩早期正文；0=仅被动压缩 */
+	compactEveryNTurns?: number;
 }
 
 export interface CardResponse {

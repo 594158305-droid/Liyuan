@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
@@ -127,11 +127,21 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: options?.maxRetries ?? 0,
 			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			let eventSource: AsyncIterable<ResponseStreamEvent> | ResponseStreamEvent[];
+			if (model.compat?.streaming !== false) {
+				const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+				eventSource = openaiStream;
+			} else {
+				const { data: fullResponse, response } = await client.responses
+					.create({ ...params, stream: false }, requestOptions)
+					.withResponse();
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+				eventSource = responseToEvents(fullResponse);
+			}
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model, {
+			await processResponsesStream(eventSource, output, stream, model, {
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});
@@ -265,6 +275,32 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	return params;
+}
+
+/**
+ * Synthesize the streaming event sequence from a non-streaming Response so that
+ * compat.streaming === false runs through the same event loop as streaming.
+ * processResponsesStream builds full blocks from output_item.done alone (getOrCreateSlot).
+ */
+function responseToEvents(response: OpenAI.Responses.Response): ResponseStreamEvent[] {
+	if (response.status === "failed" || response.status === "cancelled") {
+		return [{ type: "response.failed", response, sequence_number: 0 } as ResponseStreamEvent];
+	}
+	const events: ResponseStreamEvent[] = [];
+	(response.output ?? []).forEach((item, index) => {
+		events.push({
+			type: "response.output_item.done",
+			output_index: index,
+			item,
+			sequence_number: events.length,
+		} as ResponseStreamEvent);
+	});
+	events.push({
+		type: response.status === "incomplete" ? "response.incomplete" : "response.completed",
+		response,
+		sequence_number: events.length,
+	} as ResponseStreamEvent);
+	return events;
 }
 
 function getServiceTierCostMultiplier(

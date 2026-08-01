@@ -1,6 +1,7 @@
 import {
 	type GenerateContentConfig,
 	type GenerateContentParameters,
+	type GenerateContentResponse,
 	GoogleGenAI,
 	type HttpOptions,
 	ResourceScope,
@@ -12,6 +13,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	GoogleCompat,
 	Model,
 	ThinkingLevel as PiThinkingLevel,
 	ProviderEnv,
@@ -102,13 +104,19 @@ export const stream: StreamFunction<"google-vertex", GoogleVertexOptions> = (
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
-			const googleStream = await client.models.generateContentStream(params);
+
+			const googleCompat = (model as Model<Api>).compat as GoogleCompat | undefined;
+			const useStreaming = googleCompat?.streaming !== false;
+
+			const chunks: AsyncIterable<GenerateContentResponse> | GenerateContentResponse[] = useStreaming
+				? await client.models.generateContentStream(params)
+				: [await client.models.generateContent(params)];
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
-			for await (const chunk of googleStream) {
+			for await (const chunk of chunks) {
 				// Vertex uses the same @google/genai GenerateContentResponse type as Gemini.
 				// responseId is documented there as an output-only identifier for each response.
 				output.responseId ||= chunk.responseId;

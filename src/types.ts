@@ -36,6 +36,17 @@ export interface LorebookEntry {
 	order: number;
 }
 
+/**
+ * 登场名录：人物/物品/事件三张**追加式索引表**（供 agent 索引，不是给正文全量注入的内容）。
+ * 登场过就永远在案——活跃状态里删掉（离场/消耗/了结）后名录仍保留，
+ * 配合 memory_search 可召回细节。值为登记时的一句话（可空）。
+ */
+export interface StateRoster {
+	characters: Record<string, string>;
+	items: Record<string, string>;
+	events: Record<string, string>;
+}
+
 /** 结构化世界状态（v0 schema，可扩展） */
 export interface WorldState {
 	/** 剧情内时间，自由文本（如「第二天清晨」） */
@@ -50,6 +61,8 @@ export interface WorldState {
 	flags: Record<string, string>;
 	/** 未了结的剧情线/伏笔 */
 	plot_threads: string[];
+	/** 登场名录（applyPatch 咽喉点自动登记；旧存档无此字段按空处理） */
+	roster?: StateRoster;
 }
 
 export interface CharacterState {
@@ -101,6 +114,11 @@ export interface RpConfig {
 	/** 决策门禁档位（PLAN-PHASE4 柱 1）：ask=关键剧情决策点停笔询问用户；silent=不问，等同旧行为。默认 silent */
 	creationMode?: "ask" | "silent";
 	/**
+	 * 固定楼层压缩：每 N 个叙事轮主动压缩一次早期正文（被裁正文先完整归档进剧情库供召回）。
+	 * 0 = 关闭主动压缩，仅保留上下文吃紧时的被动压缩。缺省 30。
+	 */
+	compactEveryNTurns?: number;
+	/**
 	 * 右栏「助手」的独立模型（2026-07-14 拆分决策）：缺省=跟随剧情模型。
 	 * 剧情尺度大时可在助手面板单独指定宽容系模型（拒答风险与剧情模型解耦）。
 	 */
@@ -120,6 +138,7 @@ export const DEFAULT_CONFIG: RpConfig = {
 	maxLoreInjections: 3,
 	greeting: true,
 	backendControl: true,
+	compactEveryNTurns: 30,
 };
 
 /** 宏替换上下文 */

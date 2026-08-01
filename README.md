@@ -115,14 +115,15 @@ powershell -File scripts/pack-for-linux.ps1
 ## 进阶
 
 - **斜杠命令**（Web 输入框直接敲，带补全）：`/state` 账本 · `/lore` 设定检索 · `/import` 导入旧档 · `/store` `/back` `/line` 存档与世界线 · `/rewind` `/branch` 回退与分支 · `/compact` 手动压缩 等；
-- **MCP**：启动时自动扫描 `~/.claude.json`、Cursor 配置、`~/.liyuan/mcp.json`、项目 `.mcp.json` / `.liyuan-mcp.json`。**默认全关**，在「扩展能力 → MCP」按对话开启；开关记为新对话默认；
+- **MCP**：分**内置 / 外部**两栏。内置随梨园发布包走（见下条视觉识图）；外部启动时自动扫描 `~/.claude.json`、Cursor 配置、`~/.liyuan/mcp.json`、项目 `.mcp.json` / `.liyuan-mcp.json`。**默认全关**，在「扩展能力 → MCP」按对话开启；开关记为新对话默认；
+- **视觉识图（内置 MCP）**：给无视觉能力的主模型补眼睛——把图片交给任意 OpenAI 兼容的视觉模型分析。在「扩展能力 → MCP → 内置 → 视觉识图 → 编辑」的 `env` 里填 `LIYUAN_VISION_BASE_URL` / `LIYUAN_VISION_API_KEY` / `LIYUAN_VISION_MODEL`（须支持图片输入）即可；
 - **语音（TTS）**：配置环境变量 `LIYUAN_TTS_BASE_URL` + `LIYUAN_TTS_API_KEY`（或直接用 `OPENAI_API_KEY`）后，agent 可用语音工具朗读；模型与音色用 `LIYUAN_TTS_MODEL` / `LIYUAN_TTS_VOICE` 指定；
 - **技能**：`.liyuan-skills/` 下的 markdown 即技能，可让 agent 自写（详见上文第 4 条），也可手写后在「扩展能力」面板控制是否暴露给 agent。
 
 ## 已知边界（如实说）
 
 - 显示向美化正则（一档皮肤）已兼容；清理向正则由 harness 原生替代；带 JS 的酒馆助手程序卡仍在规划中（见「搬家」一节）；
-- 看图需要视觉模型；非视觉模型下 agent 会如实告知看不到，不会假装看见；
+- 主模型无视觉时默认如实告知看不到、不假装看见；配好内置「视觉识图」MCP 后可代眼看图（见「进阶」）；
 - 预设在 agent 架构下的效果需自行实测（原因见「搬家」一节）；
 - 决策卡「问的分寸」、主动建面板与主动入库的积极性，都与所用模型的智能正相关——**模型越强，梨园越强**；
 - 剧情正文永远是模型的原始输出：梨园的代码与辅助模型只做输入侧加工、结构化记账和元信息标注，绝不改写、补写正文。修音可以，假唱不行。

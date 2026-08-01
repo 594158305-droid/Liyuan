@@ -47,8 +47,12 @@ if exist ".liyuan-cache\update\pending.json" (
   node scripts\apply-update.mjs
 )
 
-if not exist "node_modules\" (
-  echo [liyuan] node_modules missing — running npm install ...
+if not exist "node_modules\ws" (
+  if exist "node_modules\" (
+    echo [liyuan] node_modules incomplete — reinstalling ...
+  ) else (
+    echo [liyuan] node_modules missing — running npm install ...
+  )
   echo [liyuan] First run needs network; later starts are offline-ready.
   call npm install
   if errorlevel 1 (

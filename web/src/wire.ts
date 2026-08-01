@@ -6,6 +6,7 @@ export type {
 	ClientFrame,
 	RpPanel,
 	ServerFrame,
+	UpdateWire,
 	WireActivity,
 	WireChannel,
 	WireChoice,

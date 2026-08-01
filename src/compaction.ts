@@ -89,3 +89,35 @@ export function serializeForSummary(messages: unknown[], userLabel: string, char
 	}
 	return lines.join("\n\n");
 }
+
+// ---------- 固定楼层压缩（主动触发策略） ----------
+
+/**
+ * 主动压缩的最低上下文门槛。核心压缩会原样保留最近约 2 万 token
+ * （keepRecentTokens），占用低于此值时可裁的早期正文所剩无几，
+ * 主动压缩只会白烧一次旁侧调用、产出一份近乎空转的摘要。
+ */
+export const PROACTIVE_COMPACT_MIN_TOKENS = 40_000;
+
+export interface ProactiveCompactInput {
+	/** 距上次压缩以来的叙事轮数（戏外轮/中止轮不计） */
+	narrativeTurnsSinceCompact: number;
+	/** 每 N 个叙事轮压缩一次；0 或负数 = 关闭主动压缩 */
+	everyNTurns: number;
+	/** 当前上下文 token 占用；未知（null/undefined）时不触发，等被动压缩兜底 */
+	contextTokens: number | null | undefined;
+	/** 已有压缩在途（主动触发后核心尚未完成） */
+	compactInFlight: boolean;
+}
+
+/**
+ * 固定楼层压缩判定：叙事轮数达到配置周期、上下文里确有可裁余量、且无在途压缩。
+ * 纯函数；触发动作（ctx.compact）与计数归零由接线层完成。
+ */
+export function shouldProactiveCompact(input: ProactiveCompactInput): boolean {
+	if (input.compactInFlight) return false;
+	if (!Number.isFinite(input.everyNTurns) || input.everyNTurns <= 0) return false;
+	if (input.narrativeTurnsSinceCompact < input.everyNTurns) return false;
+	if (typeof input.contextTokens !== "number" || !Number.isFinite(input.contextTokens)) return false;
+	return input.contextTokens >= PROACTIVE_COMPACT_MIN_TOKENS;
+}

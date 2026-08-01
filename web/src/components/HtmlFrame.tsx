@@ -6,9 +6,10 @@
  * - seamless=true：无痕模式（卡皮肤/整楼界面）——幽灵操作、真实高度、样式主权
  * - 与侧栏 ArtifactPanel 锁死策略不同：此处按消息/工具显式开关脚本，服务「中途渲染 UI」
  *
- * 三档程序卡（凡人修仙等）UI 几乎全是 position:fixed + 100vh 铺满。
+ * 视口接管型程序卡（凡人修仙、道渊开局创建器等）UI 是 fixed/100% 铺满。
  * 若初始 iframe 只有 minHeight(120)，量高永远量出 120 → 按钮被裁切在框外 → 用户感觉「点了没反应」。
- * 大脚本整页：直接按视口给高度，不再指望内容盒自报。
+ * 接管型：按视口锁高、不注入上报器、不收内容量高消息——内容量高与卡内
+ * ResizeObserver 互踩会形成「收拢/涨高」乒乓（道渊开局创建器持续抖动事故）。
  */
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -107,9 +108,10 @@ export function HtmlFrame({
 		};
 	}, [srcDoc, scripts, seamless, minHeight, cap, maxHeight]);
 
-	// 脚本帧高度上报(seamless)：小部件可跟内容；程序卡已用视口高，忽略「≈框高」的假量（fixed 铺满）
+	// 脚本帧高度上报(seamless 内容流)：小部件/状态栏跟内容。
+	// 程序卡（接管型）不订阅：视口锁高，srcdoc 也不带上报器；防御性拒收避免任何乒乓回路
 	useEffect(() => {
-		if (!scripts || !seamless) return;
+		if (!scripts || !seamless || programApp) return;
 		const onMsg = (e: MessageEvent) => {
 			const d = e.data as { liyuanFrameHeight?: unknown; frameId?: unknown };
 			if (!d || d.frameId !== frameId || typeof d.liyuanFrameHeight !== "number" || !(d.liyuanFrameHeight > 0)) {
@@ -117,20 +119,6 @@ export function HtmlFrame({
 			}
 			const raw = Math.ceil(d.liyuanFrameHeight);
 			const hardCap = Math.min(2400, typeof window !== "undefined" ? Math.floor(window.innerHeight * 0.92) : 2400);
-			// 程序卡：fixed 铺满时内容盒会跟着框高涨，须锁视口底线。
-			// 但若内容明显远小于视口（状态栏误判/小部件），按内容收拢，避免大块黑空。
-			if (programApp) {
-				const floor = programViewportHeight(typeof window !== "undefined" ? window : null);
-				if (raw + 48 < floor * 0.5) {
-					const next = Math.max(minHeight, Math.min(hardCap, raw + 12));
-					setHeight((prev) => (Math.abs(prev - next) < 2 ? prev : next));
-					return;
-				}
-				if (raw <= height + 24) return;
-				const next = Math.max(floor, Math.min(hardCap, raw));
-				setHeight((prev) => (Math.abs(prev - next) < 2 ? prev : next));
-				return;
-			}
 			const next = Math.max(minHeight, Math.min(hardCap, raw));
 			setHeight((prev) => {
 				if (Math.abs(prev - next) < 2) return prev;
@@ -141,7 +129,7 @@ export function HtmlFrame({
 		};
 		window.addEventListener("message", onMsg);
 		return () => window.removeEventListener("message", onMsg);
-	}, [scripts, seamless, frameId, minHeight, programApp, height]);
+	}, [scripts, seamless, frameId, minHeight, programApp]);
 
 	return (
 		<figure

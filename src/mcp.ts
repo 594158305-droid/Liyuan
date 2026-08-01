@@ -12,10 +12,11 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Type, type TSchema } from "typebox";
 
@@ -28,7 +29,7 @@ export const RP_MCP_TYPE = "rp-mcp"; // 会话树：本对话启用的服务器 
 export type McpTransport = "stdio" | "http" | "sse";
 
 /** 配置从哪来的（面板展示；高优先级覆盖低优先级的 endpoint） */
-export type McpSource = "claude" | "cursor" | "user" | "project-mcp" | "liyuan";
+export type McpSource = "builtin" | "claude" | "cursor" | "user" | "project-mcp" | "liyuan";
 
 export interface McpServerConfig {
 	id: string;
@@ -51,6 +52,8 @@ export interface McpCatalogEntry extends McpServerConfig {
 	sources: McpSource[];
 	/** true=仅发现/导入，无项目手写条目（删=只关，不能从本机台账抹掉） */
 	discovered: boolean;
+	/** true=梨园内置（随发布包走；endpoint 运行时解析，env 可被用户/项目层覆盖） */
+	builtin?: boolean;
 }
 
 export interface McpConfigFile {
@@ -91,6 +94,8 @@ export interface McpServerStatus {
 	source: McpSource;
 	sources: McpSource[];
 	discovered: boolean;
+	/** true=梨园内置 MCP（前端分「内置/外部」两栏用） */
+	builtin?: boolean;
 }
 
 // ---------- 路径 ----------
@@ -269,6 +274,52 @@ export function setDefaultEnabled(cwd: string, id: string, enabled: boolean): vo
 	saveMcpConfig(cwd, { ...cfg, servers, defaults });
 }
 
+// ---------- 内置 MCP（随梨园发布包走） ----------
+
+export const BUILTIN_VISION_ID = "liyuan_vision";
+
+/** 仓库根（src/mcp.ts 的上一级）：内置 server 脚本按此定位，与进程 cwd 无关 */
+function appRootDir(): string {
+	return dirname(dirname(fileURLToPath(import.meta.url)));
+}
+
+const VISION_ENV_KEYS = [
+	"LIYUAN_VISION_BASE_URL",
+	"LIYUAN_VISION_API_KEY",
+	"LIYUAN_VISION_MODEL",
+	"LIYUAN_VISION_MAX_TOKENS",
+	"LIYUAN_VISION_TIMEOUT_MS",
+] as const;
+
+/**
+ * 内置 MCP 目录：endpoint（command/args/cwd）每次运行时解析，不依赖任何持久化路径；
+ * env 取进程环境里的 LIYUAN_VISION_*，可被 ~/.liyuan/mcp.json 或项目覆盖层盖掉。
+ */
+export function builtinMcpServers(): McpCatalogEntry[] {
+	const root = appRootDir();
+	const env: Record<string, string> = {};
+	for (const k of VISION_ENV_KEYS) {
+		const v = process.env[k];
+		if (v) env[k] = v;
+	}
+	return [
+		{
+			id: BUILTIN_VISION_ID,
+			name: "视觉识图",
+			enabled: false,
+			transport: "stdio",
+			command: process.execPath,
+			args: [join(root, "server", "mcp", "vision-server.mjs")],
+			env: Object.keys(env).length ? env : undefined,
+			cwd: root,
+			source: "builtin",
+			sources: ["builtin"],
+			discovered: true,
+			builtin: true,
+		},
+	];
+}
+
 // ---------- 发现 ----------
 
 /** 原始 Claude/Cursor 风格 mcpServers 字典 → 归一化条目 */
@@ -341,10 +392,14 @@ function extractMcpServersMap(doc: unknown): Record<string, unknown> | null {
 
 /**
  * 多源发现并合并。优先级低→高（后者覆盖 endpoint）：
- * claude → cursor → user(~/.liyuan) → project .mcp.json → project .liyuan-mcp.json
+ * builtin → claude → cursor → user(~/.liyuan) → project .mcp.json → project .liyuan-mcp.json
  */
 export function discoverMcpCatalog(cwd: string): McpCatalogEntry[] {
 	const layers: Array<{ source: McpSource; entries: McpCatalogEntry[] }> = [];
+
+	// 0) 梨园内置（发布包自带；env 可被上层覆盖）
+	const builtins = builtinMcpServers();
+	layers.push({ source: "builtin", entries: builtins });
 
 	// 1) Claude Code 用户级
 	const claudeJson = readJsonFile(join(homedir(), ".claude.json"));
@@ -414,6 +469,25 @@ export function discoverMcpCatalog(cwd: string): McpCatalogEntry[] {
 				enabled: false,
 			});
 		}
+	}
+
+	// 内置项收口：endpoint 恒为本次运行时解析值（覆盖层里固化的旧绝对路径一律无效），
+	// env 合并（内置默认 ← 覆盖层），builtin 标记穿透合并保留。
+	for (const b of builtins) {
+		const merged = byId.get(b.id);
+		if (!merged) continue;
+		byId.set(b.id, {
+			...merged,
+			name: merged.name || b.name,
+			transport: b.transport,
+			command: b.command,
+			args: b.args,
+			cwd: b.cwd,
+			url: undefined,
+			headers: undefined,
+			env: { ...(b.env ?? {}), ...(merged.env ?? {}) },
+			builtin: true,
+		});
 	}
 
 	// 把 defaults 写进 enabled 字段方便 UI（defaultEnabled）
@@ -675,6 +749,7 @@ export class McpHub {
 					source: e.source,
 					sources: e.sources,
 					discovered: e.discovered,
+					builtin: e.builtin,
 				};
 			}
 			if (!live) {
@@ -690,6 +765,7 @@ export class McpHub {
 					source: e.source,
 					sources: e.sources,
 					discovered: e.discovered,
+					builtin: e.builtin,
 				};
 			}
 			return {
@@ -709,6 +785,7 @@ export class McpHub {
 				source: e.source,
 				sources: e.sources,
 				discovered: e.discovered,
+				builtin: e.builtin,
 			};
 		});
 	}
@@ -807,7 +884,8 @@ async function openConnection(server: McpServerConfig, timeoutMs: number): Promi
 		const transport = new StdioClientTransport({
 			command: server.command!,
 			args: server.args ?? [],
-			env: server.env,
+			// 显式 env 会整体替换默认环境（丢 PATH/SYSTEMROOT 导致 Windows 下 npx/网络异常）——补齐默认再覆盖
+			env: server.env ? { ...getDefaultEnvironment(), ...server.env } : undefined,
 			cwd: server.cwd,
 			stderr: "pipe",
 		});

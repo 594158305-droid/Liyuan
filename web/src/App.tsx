@@ -33,7 +33,7 @@ import { CardPanel } from "./components/CardPanel.tsx";
 import { CodexPanel } from "./components/CodexPanel.tsx";
 import { ConnectPanel } from "./components/ConnectPanel.tsx";
 import { WelcomePanel } from "./components/HomePage.tsx";
-import { UpdateChip, UpdateModal, UpdateToast } from "./components/UpdateFlow.tsx";
+import { UpdateModal, UpdateToast } from "./components/UpdateFlow.tsx";
 import { PanelRefreshContext } from "./components/kit.tsx";
 import { registerTavernChatBridge } from "./tavernShim.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";

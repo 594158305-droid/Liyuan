@@ -69,6 +69,10 @@ interface Draft {
 	models: ModelEntry[];
 	/** 编辑仓库时：原 id */
 	editId: string | null;
+	/** 流式传输（默认 true；部分中转/反代流式异常时可关闭） */
+	streaming: boolean;
+	/** 原 compat 里流式开关以外的字段（面板不管，保存时原样带回） */
+	compatRest: Record<string, unknown>;
 }
 
 function emptyDraft(): Draft {
@@ -79,6 +83,8 @@ function emptyDraft(): Draft {
 		apiKey: "",
 		models: [],
 		editId: null,
+		streaming: true,
+		compatRest: {},
 	};
 }
 
@@ -116,11 +122,20 @@ function draftToConfig(d: Draft): LiyuanAgentConfig {
 	const providers: LiyuanAgentConfig["providers"] = {};
 	const models = d.models.map((m) => normalizeModelNumericFields(m));
 	if (name) {
+		const compat: Record<string, unknown> = { ...d.compatRest };
+		delete compat.safetyThreshold; // 已废弃：第三方反代传不到官方 safetySettings，一律不再下发
+		if (d.streaming) {
+			delete compat.streaming;
+		} else {
+			compat.streaming = false;
+		}
+
 		providers[name] = {
 			baseUrl: d.baseUrl.trim(),
 			api: d.api.trim() || "openai-completions",
 			apiKey: d.apiKey.trim() || "placeholder",
 			models,
+			...(Object.keys(compat).length > 0 && { compat }),
 		};
 	}
 	const firstThink = models.find((m) => typeof m.thinkingLevel === "string" && m.thinkingLevel.trim());
@@ -145,6 +160,10 @@ function draftFromConfig(id: string, name: string, config: LiyuanAgentConfig): D
 				thinkingLevel: typeof m.thinkingLevel === "string" ? m.thinkingLevel : "",
 			}))
 		: [];
+	const compat = (p as Record<string, unknown>).compat as Record<string, unknown> | undefined;
+	const compatRest = { ...compat };
+	delete compatRest.streaming;
+	delete compatRest.safetyThreshold;
 	return {
 		editId: id,
 		name: pname || name,
@@ -152,6 +171,8 @@ function draftFromConfig(id: string, name: string, config: LiyuanAgentConfig): D
 		api: String(p.api ?? "openai-completions"),
 		apiKey: "", // 不回显；留空=保留
 		models,
+		streaming: compat?.streaming !== false,
+		compatRest,
 	};
 }
 
@@ -331,10 +352,6 @@ function ContextWindowInput({
 					应用
 				</button>
 			</div>
-			<div className="field-hint">
-				当前生效 {value > 0 ? fmtCtx(value) : "128k（默认）"} · 写入连接配置；中转站宣称 500k 时请填 500000 或
-				500k，否则占用百分比会按 128k 虚高
-			</div>
 		</div>
 	);
 }
@@ -398,6 +415,35 @@ function MaxTokensInput({
 
 // ---------- panel ----------
 
+/** 当前模型流式传输开关（写 provider.compat.streaming；关=改走非流式接口） */
+function StreamingInput({
+	value,
+	busy,
+	onCommit,
+}: {
+	value: boolean;
+	busy: boolean;
+	onCommit: (on: boolean) => void;
+}) {
+	return (
+		<label
+			className="conn-thinking"
+			style={{
+				marginTop: 8,
+				display: "flex",
+				flexDirection: "row",
+				alignItems: "center",
+				justifyContent: "space-between",
+				gap: 8,
+				cursor: "pointer",
+			}}
+		>
+			<span className="field-label">流式传输</span>
+			<input type="checkbox" checked={value} disabled={busy} onChange={(e) => onCommit(e.target.checked)} />
+		</label>
+	);
+}
+
 type Mode = null | { kind: "gen" } | { kind: "edit"; id: string };
 
 export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
@@ -440,6 +486,14 @@ export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "e
 			? modelMaxTokensOf(activeConfig, current.provider, current.id) ??
 				(typeof current.maxTokens === "number" && current.maxTokens > 0 ? current.maxTokens : undefined)
 			: undefined) ?? 0;
+	const liveStreaming =
+		current
+			? (() => {
+					const p = activeConfig.providers?.[current.provider] as Record<string, unknown> | undefined;
+					const compat = p?.compat as Record<string, unknown> | undefined;
+					return compat?.streaming !== false;
+				})()
+			: true;
 
 	const reloadAll = () => {
 		modelsData.reload();
@@ -577,6 +631,28 @@ export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "e
 			if (active) await apiPut("/api/agent-profiles", { id: active.id, name: active.name, config: cfg });
 			reloadAll();
 		}, `最大回复 ${fmtCtx(n)}（${n.toLocaleString()} tokens）`);
+
+	/** 改当前模型流式传输 → 写 agent 配置（provider.compat.streaming），重绑会话模型 */
+	const setStreaming = (on: boolean) =>
+		run(async () => {
+			if (!current) throw new Error("尚未启用模型");
+			const cfg: LiyuanAgentConfig = {
+				...activeConfig,
+				providers: { ...activeConfig.providers },
+			};
+			const prev = cfg.providers[current.provider];
+			const compat = { ...((prev?.compat as Record<string, unknown> | undefined) ?? {}) };
+			if (on) {
+				delete compat.streaming; // 默认开：不写即生效
+			} else {
+				compat.streaming = false;
+			}
+			cfg.providers[current.provider] = { ...(prev ?? {}), compat };
+			await apiPut("/api/agent-config", { config: cfg });
+			const active = profiles.find((p) => p.active);
+			if (active) await apiPut("/api/agent-profiles", { id: active.id, name: active.name, config: cfg });
+			reloadAll();
+		}, on ? "已开启流式传输" : "已关闭流式传输（该中转将改用非流式接口）");
 
 	const enableProfile = (id: string) =>
 		run(async () => {
@@ -1068,6 +1144,7 @@ export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "e
 						/>
 						<ContextWindowInput value={liveContext} busy={busy} onCommit={(n) => void setContextWindow(n)} />
 						<MaxTokensInput value={liveMaxTokens} busy={busy} onCommit={(n) => void setMaxTokens(n)} />
+						<StreamingInput value={liveStreaming} busy={busy} onCommit={(on) => void setStreaming(on)} />
 						{activeProviders.length > 0 && (
 							<ul className="conn-pick-list" style={{ marginTop: 10 }}>
 								{activeProviders.flatMap((pk) =>
@@ -1107,9 +1184,6 @@ export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "e
 			{/* ② 配置仓库：名 + 右侧 启用|刷新 / 修改 / 删除；点击行展开修改 */}
 			<section className="sp-section conn-block">
 				<div className="conn-section-label">配置仓库</div>
-				<div className="field-hint" style={{ marginBottom: 8 }}>
-					启用中可点「刷新」把仓库配置重传到运行时（models.json / 思考档），改完不必再关开启用
-				</div>
 				<PanelStatus loading={profilesData.loading} error={profilesData.error} hasData={!!profilesData.data} />
 				{profiles.length === 0 && <div className="sp-empty">仓库为空 — 用下方生成器创建</div>}
 				{profiles.map((p) => {

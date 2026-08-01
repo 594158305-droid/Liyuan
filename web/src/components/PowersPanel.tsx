@@ -1,7 +1,7 @@
 /**
  * 扩展能力面板（左栏，PLAN-PANELS-V2 §2.7）：agent 能调用的外部能力，分两类页签——
- * 技能（skill）与 MCP（本机发现 + 本对话开关）。
- * MCP：默认全关；开关绑当前对话（新对话=新窗口）；可选「记住为新对话默认」。
+ * 技能（skill）与 MCP（内置 / 外部两栏：内置随梨园发布包走，外部为本机发现 + 项目手写）。
+ * 配置编辑：单张完整 JSON 卡（JSON 为准），无表单。
  */
 
 import { useRef, useState } from "react";
@@ -12,7 +12,7 @@ import { ConfirmButton, PanelStatus, Toggle, useAction, usePanelData } from "./k
 // ---------- MCP 类型（与 /api/mcp 对齐） ----------
 
 type McpTransport = "stdio" | "http" | "sse";
-type McpSource = "claude" | "cursor" | "user" | "project-mcp" | "liyuan";
+type McpSource = "builtin" | "claude" | "cursor" | "user" | "project-mcp" | "liyuan";
 
 interface McpServerStatus {
 	id: string;
@@ -28,6 +28,8 @@ interface McpServerStatus {
 	source?: McpSource;
 	sources?: McpSource[];
 	discovered?: boolean;
+	/** true=梨园内置（「内置 MCP」栏） */
+	builtin?: boolean;
 }
 
 interface McpServerConfig {
@@ -46,6 +48,8 @@ interface McpServerConfig {
 interface McpListResponse {
 	servers: McpServerStatus[];
 	config: McpServerConfig[];
+	/** 发现项的完整配置（编辑发现项→建项目覆盖时预填） */
+	catalog?: McpServerConfig[];
 	sessionEnabled?: string[];
 	discovered?: number;
 }
@@ -58,6 +62,7 @@ const statusLabel: Record<McpServerStatus["status"], string> = {
 };
 
 const sourceLabel: Record<McpSource, string> = {
+	builtin: "内置",
 	claude: "Claude",
 	cursor: "Cursor",
 	user: "用户级",
@@ -276,53 +281,203 @@ function NewSkillForm({ onCreated, toast }: { onCreated: () => void; toast: (lev
 	);
 }
 
-function parseArgsLine(line: string): string[] {
-	// 简易：按空格拆，支持 "双引号" 包一段
-	const out: string[] = [];
-	const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(line))) {
-		out.push(m[1] ?? m[2] ?? m[3] ?? "");
-	}
-	return out.filter(Boolean);
+// ---------- MCP 配置编辑器：单张完整 JSON 卡（JSON 为准） ----------
+
+function prettyJson(o: unknown): string {
+	return JSON.stringify(o, null, 2) ?? "";
 }
 
-function parseEnvLines(text: string): Record<string, string> | undefined {
-	const env: Record<string, string> = {};
-	for (const line of text.split(/\r?\n/)) {
-		const t = line.trim();
-		if (!t || t.startsWith("#")) continue;
-		const i = t.indexOf("=");
-		if (i <= 0) continue;
-		env[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+/** 配置对象 → 编辑器初始 JSON（只留有值字段，字段顺序稳定） */
+function configToJson(initial: Partial<McpServerConfig> | undefined, mode: "create" | "edit"): string {
+	const o: Record<string, unknown> = {};
+	o.id = initial?.id ?? "";
+	o.name = initial?.name ?? "";
+	o.transport = initial?.transport ?? "stdio";
+	if (initial?.command !== undefined || (!initial?.url && mode === "create")) {
+		o.command = initial?.command ?? "npx";
+		o.args = initial?.args ?? ["-y", "@modelcontextprotocol/server-everything"];
+	} else {
+		if (initial?.command) o.command = initial.command;
+		if (initial?.args?.length) o.args = initial.args;
 	}
-	return Object.keys(env).length ? env : undefined;
+	if (initial?.cwd) o.cwd = initial.cwd;
+	o.env = initial?.env ?? {};
+	if (initial?.url) o.url = initial.url;
+	if (initial?.headers) o.headers = initial.headers;
+	o.enabled = initial?.enabled ?? true;
+	return prettyJson(o);
 }
 
-function envToLines(env?: Record<string, string>): string {
-	if (!env) return "";
-	return Object.entries(env)
-		.map(([k, v]) => `${k}=${v}`)
-		.join("\n");
+function isStringMap(v: unknown): v is Record<string, string> {
+	return !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string");
+}
+
+/** JSON 文本 → 提交体。容忍 Claude 风格 type 字段；不合法返回 error */
+function parseMcpJson(jsonText: string): { body: Partial<McpServerConfig> & { id?: string } } | { error: string } {
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(jsonText) as Record<string, unknown>;
+	} catch (e) {
+		return { error: `JSON 不合法：${e instanceof Error ? e.message : String(e)}` };
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { error: "JSON 需是对象" };
+	const t = parsed.transport ?? parsed.type;
+	const transport: McpTransport =
+		t === "http" || t === "streamable-http" || t === "streamableHttp"
+			? "http"
+			: t === "sse"
+				? "sse"
+				: t === "stdio"
+					? "stdio"
+					: typeof parsed.url === "string" && parsed.url.trim()
+						? "sse"
+						: "stdio";
+	return {
+		body: {
+			id: typeof parsed.id === "string" && parsed.id.trim() ? parsed.id.trim() : undefined,
+			name: typeof parsed.name === "string" ? parsed.name.trim() : undefined,
+			transport,
+			enabled: parsed.enabled === true,
+			command: typeof parsed.command === "string" ? parsed.command : undefined,
+			args: Array.isArray(parsed.args) ? parsed.args.filter((x): x is string => typeof x === "string") : undefined,
+			cwd: typeof parsed.cwd === "string" ? parsed.cwd : undefined,
+			env: isStringMap(parsed.env) && Object.keys(parsed.env).length ? parsed.env : undefined,
+			url: typeof parsed.url === "string" ? parsed.url : undefined,
+			headers: isStringMap(parsed.headers) && Object.keys(parsed.headers).length ? parsed.headers : undefined,
+		},
+	};
+}
+
+function McpServerForm({
+	initial,
+	mode,
+	busy,
+	submitLabel,
+	onSubmit,
+	onCancel,
+	onProbe,
+	toast,
+}: {
+	initial?: Partial<McpServerConfig>;
+	/** edit=走 PUT（id 只读）；create=POST（JSON 里的 id 可写，留空自动分配） */
+	mode: "create" | "edit";
+	busy: boolean;
+	submitLabel: string;
+	onSubmit: (body: Partial<McpServerConfig>) => void | Promise<void>;
+	onCancel?: () => void;
+	onProbe?: (body: Partial<McpServerConfig>) => void | Promise<void>;
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const [jsonText, setJsonText] = useState(() => configToJson(initial, mode));
+	const [localBusy, setLocalBusy] = useState(false);
+
+	const format = () => {
+		try {
+			setJsonText(JSON.stringify(JSON.parse(jsonText), null, 2));
+		} catch (e) {
+			toast("error", `JSON 不合法：${e instanceof Error ? e.message : String(e)}`);
+		}
+	};
+
+	const currentBody = (): (Partial<McpServerConfig> & { id?: string }) | null => {
+		const r = parseMcpJson(jsonText);
+		if ("error" in r) {
+			toast("error", r.error);
+			return null;
+		}
+		return r.body;
+	};
+
+	const submit = () => {
+		const body = currentBody();
+		if (!body) return Promise.resolve();
+		if (mode === "edit") delete body.id;
+		return Promise.resolve(onSubmit(body));
+	};
+
+	const probe = () => {
+		const body = currentBody();
+		if (!body) return Promise.resolve();
+		return Promise.resolve(onProbe!(body));
+	};
+
+	return (
+		<div className="mcp-edit">
+			<div className="conn-sec mcp-edit-card">
+				<div className="conn-sec-title mcp-json-title">
+					<span>完整的 JSON 配置</span>
+					<span className="mcp-json-acts">
+						<button type="button" className="act" onClick={format}>
+							格式化
+						</button>
+					</span>
+				</div>
+				<textarea
+					className="panel-search ta conn-json conn-json-full"
+					rows={10}
+					spellCheck={false}
+					value={jsonText}
+					onChange={(e) => setJsonText(e.target.value)}
+				/>
+			</div>
+
+			<div className="panel-row" style={{ marginTop: 8 }}>
+				<button
+					className="drawer-btn"
+					disabled={busy || localBusy}
+					onClick={() => {
+						setLocalBusy(true);
+						void submit().finally(() => setLocalBusy(false));
+					}}
+				>
+					{busy || localBusy ? "…" : submitLabel}
+				</button>
+				{onProbe && (
+					<button
+						className="drawer-btn"
+						disabled={busy || localBusy}
+						onClick={() => {
+							setLocalBusy(true);
+							void probe().finally(() => setLocalBusy(false));
+						}}
+					>
+						测试连接
+					</button>
+				)}
+				{onCancel && (
+					<button className="drawer-btn" onClick={onCancel}>
+						取消
+					</button>
+				)}
+			</div>
+		</div>
+	);
 }
 
 function McpServerRow({
 	st,
 	cfg,
+	base,
 	busy,
 	onChanged,
 	toast,
 }: {
 	st: McpServerStatus;
+	/** 项目手写配置（存在=可 PUT 编辑 / 删除） */
 	cfg?: McpServerConfig;
+	/** 发现项完整配置（编辑发现项→建项目覆盖时的预填） */
+	base?: McpServerConfig;
 	busy: boolean;
 	onChanged: () => void;
 	toast: (level: "info" | "warning" | "error", text: string) => void;
 }) {
+	const [expanded, setExpanded] = useState(false);
 	const [editing, setEditing] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const projectOwned = !!cfg || st.source === "liyuan";
 	const src = st.source ? sourceLabel[st.source] : "发现";
+	// 编辑预填：项目条目优先，发现项退回目录完整配置
+	const editInitial = cfg ?? base ?? { id: st.id, name: st.name, transport: st.transport };
 
 	const toggleEnabled = async (enabled: boolean) => {
 		setSaving(true);
@@ -355,7 +510,7 @@ function McpServerRow({
 		try {
 			const r = await apiPost<{ ok: boolean; error?: string; tools: Array<{ name: string }> }>("/api/mcp/probe", {
 				id: st.id,
-				...(cfg ?? {}),
+				...(cfg ?? base ?? {}),
 			});
 			if (r.ok) toast("info", `连通，发现 ${r.tools.length} 个工具`);
 			else toast("error", r.error || "探测失败");
@@ -366,22 +521,37 @@ function McpServerRow({
 		}
 	};
 
+	const openEdit = () => {
+		setEditing(true);
+		setExpanded(true);
+	};
+
 	return (
 		<div className="lore-item">
 			<div className="lore-head">
-				<details>
-					<summary>
-						<span className="lore-title">{st.name}</span>
-						<span className="lore-meta">
-							{src} · {st.transport} · {statusLabel[st.status]}
-							{st.tools.length ? ` · ${st.tools.length} 工具` : ""}
-						</span>
-					</summary>
-					<div className="field-hint" style={{ marginTop: 6 }}>
-						<code>{st.id}</code>
-						{st.summary ? ` · ${st.summary}` : ""}
-						{st.sources && st.sources.length > 1 ? ` · 来源 ${st.sources.map((s) => sourceLabel[s]).join("+")}` : ""}
-					</div>
+				<button type="button" className="lore-head-main" onClick={() => setExpanded((v) => !v)}>
+					<span className="lore-title">{st.name}</span>
+					<span className="lore-meta">
+						{st.builtin ? "" : `${src} · `}
+						{st.transport} · {statusLabel[st.status]}
+						{st.tools.length ? ` · ${st.tools.length} 工具` : ""}
+					</span>
+				</button>
+				<button
+					type="button"
+					className="act"
+					title={projectOwned ? "编辑配置" : "编辑（保存为项目覆盖）"}
+					disabled={busy || saving}
+					onClick={openEdit}
+				>
+					<IconPencil size={12} />
+				</button>
+				<label className="expose-toggle" title="开=本对话连接并暴露工具；关=本对话屏蔽。同时记为新对话默认。">
+					<Toggle checked={st.enabled} disabled={busy || saving} onChange={(v) => void toggleEnabled(v)} />
+				</label>
+			</div>
+			{expanded && (
+				<div className="lore-body" style={{ marginTop: 6 }}>
 					{st.error && <div className="sp-empty" style={{ color: "var(--danger, #b44)" }}>{st.error}</div>}
 					{st.tools.length > 0 && (
 						<ul className="mcp-tool-list" style={{ margin: "8px 0", paddingLeft: 18, fontSize: 12 }}>
@@ -393,18 +563,24 @@ function McpServerRow({
 							))}
 						</ul>
 					)}
-					{editing && cfg ? (
+					{editing ? (
 						<McpServerForm
-							initial={cfg}
+							initial={editInitial}
+							mode={projectOwned ? "edit" : "create"}
 							busy={saving}
 							submitLabel="保存"
+							toast={toast}
 							onCancel={() => setEditing(false)}
 							onSubmit={async (body) => {
 								setSaving(true);
 								try {
-									await apiPut("/api/mcp/servers", { ...body, id: st.id });
-									setEditing(false);
+									if (projectOwned) {
+										await apiPut("/api/mcp/servers", { ...body, id: st.id });
+									} else {
+										await apiPost("/api/mcp/servers", { ...body, id: st.id });
+									}
 									toast("info", "已保存");
+									setEditing(false);
 									onChanged();
 								} catch (e) {
 									toast("error", e instanceof Error ? e.message : String(e));
@@ -413,165 +589,33 @@ function McpServerRow({
 								}
 							}}
 							onProbe={async (body) => {
-								const r = await apiPost<{ ok: boolean; error?: string; tools: Array<{ name: string }> }>("/api/mcp/probe", {
-									...body,
-									id: st.id,
-								});
+								const r = await apiPost<{ ok: boolean; error?: string; tools: Array<{ name: string }> }>(
+									"/api/mcp/probe",
+									{ ...body, id: st.id },
+								);
 								if (r.ok) toast("info", `连通，发现 ${r.tools.length} 个工具`);
 								else toast("error", r.error || "探测失败");
 							}}
 						/>
 					) : (
 						<div className="skill-acts">
-							{projectOwned && (
-								<button className="act" disabled={busy || saving || !cfg} onClick={() => setEditing(true)}>
-									<IconPencil size={12} /> 编辑
-								</button>
-							)}
 							<button className="act" disabled={busy || saving} onClick={() => void probe()}>
 								测试连接
 							</button>
-							{projectOwned && (
+							{projectOwned && !st.builtin && (
 								<ConfirmButton confirmText="确认删除" disabled={busy || saving} onConfirm={() => void remove()}>
 									<IconTrash size={12} /> 删除
 								</ConfirmButton>
 							)}
-							{st.discovered && !projectOwned && (
-								<span className="field-hint" style={{ fontSize: 11 }}>
-									发现项：关=本对话屏蔽；开=本对话可用
-								</span>
+							{projectOwned && st.builtin && (
+								<ConfirmButton confirmText="确认重置" disabled={busy || saving} onConfirm={() => void remove()}>
+									重置配置
+								</ConfirmButton>
 							)}
 						</div>
 					)}
-				</details>
-				<label
-					className="expose-toggle"
-					title="开=仅本对话连接并暴露工具；关=本对话屏蔽。会同时记为新对话默认。"
-				>
-					<span className="expose-label">
-						{st.enabled ? (st.status === "connected" ? "本对话·开" : "本对话·启用中") : "本对话·关"}
-					</span>
-					<Toggle checked={st.enabled} disabled={busy || saving} onChange={(v) => void toggleEnabled(v)} />
-				</label>
-			</div>
-		</div>
-	);
-}
-
-function McpServerForm({
-	initial,
-	busy,
-	submitLabel,
-	onSubmit,
-	onCancel,
-	onProbe,
-}: {
-	initial?: Partial<McpServerConfig>;
-	busy: boolean;
-	submitLabel: string;
-	onSubmit: (body: Partial<McpServerConfig>) => void | Promise<void>;
-	onCancel?: () => void;
-	onProbe?: (body: Partial<McpServerConfig>) => void | Promise<void>;
-}) {
-	const [name, setName] = useState(initial?.name ?? "");
-	const [transport, setTransport] = useState<McpTransport>(initial?.transport ?? "stdio");
-	const [command, setCommand] = useState(initial?.command ?? "npx");
-	const [argsLine, setArgsLine] = useState((initial?.args ?? ["-y", "@modelcontextprotocol/server-everything"]).join(" "));
-	const [cwd, setCwd] = useState(initial?.cwd ?? "");
-	const [url, setUrl] = useState(initial?.url ?? "");
-	const [envText, setEnvText] = useState(envToLines(initial?.env));
-	const [headerText, setHeaderText] = useState(envToLines(initial?.headers));
-	const [localBusy, setLocalBusy] = useState(false);
-
-	const build = (): Partial<McpServerConfig> => {
-		const base: Partial<McpServerConfig> = {
-			name: name.trim() || undefined,
-			transport,
-			enabled: initial?.enabled !== false,
-		};
-		if (transport === "stdio") {
-			base.command = command.trim();
-			base.args = parseArgsLine(argsLine);
-			if (cwd.trim()) base.cwd = cwd.trim();
-			base.env = parseEnvLines(envText);
-		} else {
-			base.url = url.trim();
-			base.headers = parseEnvLines(headerText);
-		}
-		return base;
-	};
-
-	return (
-		<div className="provider-edit" style={{ marginTop: 8 }}>
-			<input className="panel-search" placeholder="显示名（如 Playwright）" value={name} onChange={(e) => setName(e.target.value)} />
-			<div className="seg-row" style={{ margin: "6px 0" }}>
-				{(["stdio", "http", "sse"] as McpTransport[]).map((t) => (
-					<button key={t} type="button" className={`seg ${transport === t ? "active" : ""}`} onClick={() => setTransport(t)}>
-						{t}
-					</button>
-				))}
-			</div>
-			{transport === "stdio" ? (
-				<>
-					<input className="panel-search" placeholder="command（如 npx / node / uvx）" value={command} onChange={(e) => setCommand(e.target.value)} />
-					<input
-						className="panel-search"
-						placeholder='args（空格分隔，可用 "引号"）：-y @playwright/mcp@latest'
-						value={argsLine}
-						onChange={(e) => setArgsLine(e.target.value)}
-					/>
-					<input className="panel-search" placeholder="cwd（可选）" value={cwd} onChange={(e) => setCwd(e.target.value)} />
-					<textarea
-						className="panel-search ta"
-						rows={3}
-						placeholder={"环境变量（可选，每行 KEY=value）"}
-						value={envText}
-						onChange={(e) => setEnvText(e.target.value)}
-					/>
-				</>
-			) : (
-				<>
-					<input
-						className="panel-search"
-						placeholder={transport === "sse" ? "SSE URL" : "Streamable HTTP URL（如 http://127.0.0.1:3000/mcp）"}
-						value={url}
-						onChange={(e) => setUrl(e.target.value)}
-					/>
-					<textarea
-						className="panel-search ta"
-						rows={2}
-						placeholder={"HTTP 头（可选，每行 Header=value）"}
-						value={headerText}
-						onChange={(e) => setHeaderText(e.target.value)}
-					/>
-				</>
+				</div>
 			)}
-			<div className="panel-row">
-				<button
-					className="drawer-btn"
-					disabled={busy || localBusy || (transport === "stdio" ? !command.trim() : !url.trim())}
-					onClick={() => void onSubmit(build())}
-				>
-					{busy || localBusy ? "…" : submitLabel}
-				</button>
-				{onProbe && (
-					<button
-						className="drawer-btn"
-						disabled={busy || localBusy}
-						onClick={() => {
-							setLocalBusy(true);
-							void Promise.resolve(onProbe(build())).finally(() => setLocalBusy(false));
-						}}
-					>
-						测试连接
-					</button>
-				)}
-				{onCancel && (
-					<button className="drawer-btn" onClick={onCancel}>
-						取消
-					</button>
-				)}
-			</div>
 		</div>
 	);
 }
@@ -580,11 +624,15 @@ function McpSection({ toast }: { toast: (level: "info" | "warning" | "error", te
 	const { data, error, loading, reload } = usePanelData(() => apiGet<McpListResponse>("/api/mcp"), { watchAgent: true, cacheKey: "/api/mcp" });
 	const { busy, run } = useAction(toast);
 	const [adding, setAdding] = useState(false);
+	const [kind, setKind] = useState<"builtin" | "external">("builtin");
 	const servers = data?.servers ?? [];
 	const configs = data?.config ?? [];
+	const catalog = data?.catalog ?? [];
 	const cfgById = new Map(configs.map((c) => [c.id, c]));
-	const sessionOn = data?.sessionEnabled?.length ?? servers.filter((s) => s.enabled).length;
-	const discovered = data?.discovered ?? servers.length;
+	const catById = new Map(catalog.map((c) => [c.id, c]));
+	const builtins = servers.filter((s) => s.builtin);
+	const externals = servers.filter((s) => !s.builtin);
+	const list = kind === "builtin" ? builtins : externals;
 
 	const sync = () =>
 		run(async () => {
@@ -595,28 +643,30 @@ function McpSection({ toast }: { toast: (level: "info" | "warning" | "error", te
 	return (
 		<section className="sp-section">
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
-			<div className="field-hint">
-				自动扫描本机 Claude / Cursor / <code>~/.liyuan/mcp.json</code> / 项目配置（与 Grok 同类发现）。
-				<strong>默认全关</strong>——RP 用不到的不必开。开关只影响<strong>当前对话</strong>（新对话是新窗口）；打开时会记为新对话默认。
-				工具名：<code>mcp__服务器__工具</code>。
+			<div className="seg-row" style={{ marginBottom: 8 }}>
+				<button className={`seg ${kind === "builtin" ? "active" : ""}`} onClick={() => setKind("builtin")}>
+					内置 MCP
+				</button>
+				<button className={`seg ${kind === "external" ? "active" : ""}`} onClick={() => setKind("external")}>
+					外部 MCP
+				</button>
 			</div>
-			{data && (
-				<div className="field-hint" style={{ marginBottom: 8 }}>
-					本机发现 {discovered} · 本对话启用 {sessionOn}
+			{kind === "external" && (
+				<div className="panel-row">
+					<button className="drawer-btn" onClick={() => setAdding((v) => !v)}>
+						{adding ? "收起" : "＋ 添加"}
+					</button>
+					<button className="drawer-btn" disabled={busy} onClick={() => void sync()}>
+						重新同步
+					</button>
 				</div>
 			)}
-			<div className="panel-row">
-				<button className="drawer-btn" onClick={() => setAdding((v) => !v)}>
-					{adding ? "收起" : "＋ 添加（项目覆盖）"}
-				</button>
-				<button className="drawer-btn" disabled={busy} onClick={() => void sync()}>
-					重新同步
-				</button>
-			</div>
-			{adding && (
+			{kind === "external" && adding && (
 				<McpServerForm
+					mode="create"
 					busy={busy}
 					submitLabel="写入项目"
+					toast={toast}
 					onCancel={() => setAdding(false)}
 					onSubmit={async (body) => {
 						await run(async () => {
@@ -632,16 +682,13 @@ function McpSection({ toast }: { toast: (level: "info" | "warning" | "error", te
 					}}
 				/>
 			)}
-			{data && servers.length === 0 && !adding && (
-				<div className="sp-empty">
-					未发现 MCP。可在 Claude Code 配置，或点「添加」手写；stdio 示例：command=<code>npx</code> args=<code>-y @playwright/mcp@latest</code>
-				</div>
-			)}
-			{servers.map((st) => (
+			{data && kind === "external" && externals.length === 0 && !adding && <div className="sp-empty">未发现外部 MCP。</div>}
+			{list.map((st) => (
 				<McpServerRow
 					key={st.id}
 					st={st}
 					cfg={cfgById.get(st.id)}
+					base={catById.get(st.id)}
 					busy={busy}
 					onChanged={reload}
 					toast={toast}
@@ -679,12 +726,8 @@ export function PowersPanel({ toast }: { toast: (level: "info" | "warning" | "er
 					<PanelStatus loading={loading} error={error} hasData={!!data} />
 					{data && (
 						<>
-							<div className="field-hint">
-								agent 摸通外部服务后自写的调用笔记（技能库），跨会话复用。「暴露」开着的技能进入模型可见的索引，
-								agent 会在需要时自主装载执行；关掉即对模型隐身。改动索引在下次会话重载时生效。
-							</div>
 							<NewSkillForm onCreated={reload} toast={toast} />
-							{list.length === 0 && <div className="sp-empty">技能库是空的——agent 摸通第一个外部服务后这里就有了，也可手动新建/导入。</div>}
+							{list.length === 0 && <div className="sp-empty">技能库是空的，可手动新建或导入。</div>}
 							{list.map((s) => (
 								<SkillRow key={s.file} s={s} busy={busy} onSaved={reload} onDelete={remove} toast={toast} />
 							))}

@@ -973,6 +973,10 @@ html[data-theme="dark"] [data-tip]:focus-visible::after {
 	color: var(--text-quote);
 	font-weight: 500;
 }
+.msg strong {
+	font-weight: 600;
+	color: var(--text-strong);
+}
 
 /* markdown 围栏代码块：Options 等与正文区分（对齐酒馆浅底代码块） */
 .msg-md-code {
@@ -998,6 +1002,80 @@ html[data-theme="dark"] .msg-md-code {
 	background: color-mix(in srgb, var(--accent) 12%, var(--surface, #2a2623));
 	border-color: color-mix(in srgb, var(--accent) 20%, transparent);
 	color: color-mix(in srgb, #8eb4e8 70%, var(--text, #e8e4df));
+}
+
+/* markdown 管道表格：预设「角色表」等（纯预设会话裸奔主凶）；列多时横向滚动 */
+.msg-md-tablewrap {
+	margin: 0.65em 0 0.85em;
+	overflow-x: auto;
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius);
+	background: var(--surface);
+}
+.msg-md-table {
+	border-collapse: collapse;
+	font-size: 13px;
+	line-height: 1.6;
+}
+.msg-md-table th,
+.msg-md-table td {
+	padding: 7px 12px;
+	text-align: left;
+	vertical-align: top;
+	min-width: 4.5em;
+	max-width: 24em;
+	border-bottom: 1px solid var(--hairline);
+}
+.msg-md-table th {
+	font-weight: 600;
+	white-space: nowrap;
+	background: var(--surface-dim);
+	color: var(--text-soft);
+}
+.msg-md-table tbody tr:nth-child(even) td {
+	background: color-mix(in srgb, var(--surface-dim) 45%, transparent);
+}
+.msg-md-table tbody tr:last-child td {
+	border-bottom: 0;
+}
+
+/* 字母选项列表：预设「他人推动」等 A. B. C.（纯呈现，用户仍在输入框作答） */
+.msg-options {
+	list-style: none;
+	margin: 0.65em 0 0.85em;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.msg-options li {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 7px 12px;
+	border: 1px solid var(--hairline);
+	border-radius: 10px;
+	background: var(--surface);
+}
+.msg-option-key {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	margin-top: 2px;
+	border-radius: 50%;
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1;
+	color: var(--accent-strong);
+	background: var(--accent-wash);
+}
+.msg-option-text {
+	flex: 1;
+	min-width: 0;
+	line-height: 1.65;
 }
 
 .msg-actions {
@@ -2410,6 +2488,75 @@ input.panel-search.num {
 	display: flex;
 	align-items: center;
 	gap: 5px;
+}
+/* MCP 行头主按钮（替代 summary：整行可点展开/收起） */
+.lore-head-main {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 2px;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+	font-size: 13px;
+	text-align: left;
+	color: inherit;
+	font-family: inherit;
+}
+.lore-head-main:hover .lore-title {
+	color: var(--accent, #c4a);
+}
+/* 名称独占一行、meta 缩到下一行省略，保证长名称完整（行头右侧有编辑+开关） */
+.lore-head-main .lore-title {
+	flex: none;
+	width: 100%;
+}
+.lore-head-main .lore-meta {
+	flex: none;
+	width: 100%;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+/* MCP 配置编辑器（cc-switch 风：基础信息卡 + 完整 JSON 卡） */
+.mcp-edit {
+	display: flex;
+	flex-direction: column;
+}
+.mcp-edit-card {
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	padding: 10px 12px;
+	background: var(--surface-dim);
+}
+.mcp-edit-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.mcp-edit-field .panel-search {
+	width: 100%;
+}
+.mcp-edit-toggle {
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+.mcp-json-title {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+.mcp-json-acts {
+	display: inline-flex;
+	gap: 6px;
+	flex: none;
 }
 /* ST 式状态灯：绿=常驻 · 蓝=关键词 · 灰=停用 */
 .lore-light {

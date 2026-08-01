@@ -6,7 +6,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { readJsonFile } from "./jsonio.ts";
-import type { CharacterState, WorldState } from "./types.ts";
+import type { CharacterState, StateRoster, WorldState } from "./types.ts";
 
 const TOP_KEYS = ["time", "location", "characters", "inventory", "flags", "plot_threads"] as const;
 
@@ -152,6 +152,7 @@ export function applyPatch(state: WorldState, patch: Record<string, unknown>): P
 				warnings.push(`未知字段 ${key}，允许的顶层字段：${TOP_KEYS.join(", ")}`);
 		}
 	}
+	registerRoster(next);
 	return { state: next, applied, warnings };
 }
 
@@ -170,4 +171,78 @@ export function formatState(state: WorldState): string {
 	for (const [k, v] of Object.entries(state.flags)) lines.push(`${k}：${v}`);
 	if (state.plot_threads.length) lines.push(`剧情线：${state.plot_threads.map((t) => `「${t}」`).join(" ")}`);
 	return lines.length ? lines.join("\n") : "（尚无记录）";
+}
+
+// ---------- 登场名录（agent 索引表） ----------
+
+/** 名录各表容量上限（超出丢最旧——Record 保持插入序）。防剧情线改写措辞导致的近重复无限累积。 */
+const ROSTER_CAPS = { characters: 100, items: 100, events: 60 } as const;
+
+/** 名录登记时给人物的一句话预算 */
+const ROSTER_BLURB_MAX = 30;
+
+function capRoster(reg: Record<string, string>, cap: number): Record<string, string> {
+	const keys = Object.keys(reg);
+	if (keys.length <= cap) return reg;
+	const out: Record<string, string> = {};
+	for (const k of keys.slice(keys.length - cap)) out[k] = reg[k]!;
+	return out;
+}
+
+/**
+ * 名录登记（applyPatch 咽喉点调用）：把当前活跃的人物/物品/剧情线并入名录。
+ * 只增不改——已登记条目不追新鲜度（名录记「存在过」，细节靠 memory_search 召回）；
+ * 活跃状态里删掉的条目名录保留。
+ */
+function registerRoster(next: WorldState): void {
+	const r: StateRoster = next.roster ?? { characters: {}, items: {}, events: {} };
+	for (const [name, c] of Object.entries(next.characters)) {
+		if (!(name in r.characters)) r.characters[name] = (c.status || "").slice(0, ROSTER_BLURB_MAX);
+	}
+	for (const it of next.inventory) {
+		if (it && !(it in r.items)) r.items[it] = "";
+	}
+	for (const t of next.plot_threads) {
+		if (t && !(t in r.events)) r.events[t] = "";
+	}
+	next.roster = {
+		characters: capRoster(r.characters, ROSTER_CAPS.characters),
+		items: capRoster(r.items, ROSTER_CAPS.items),
+		events: capRoster(r.events, ROSTER_CAPS.events),
+	};
+}
+
+/** 名录索引单节的字符预算（超出按条目边界截断，补「等 N 项」） */
+const ROSTER_SECTION_MAX_CHARS = 240;
+
+function rosterSection(label: string, entries: Array<[string, string]>): string | undefined {
+	if (entries.length === 0) return undefined;
+	const titles = entries.map(([name, blurb]) => (blurb ? `${name}（${blurb}）` : name));
+	const shown: string[] = [];
+	let used = 0;
+	for (const t of titles) {
+		if (used + t.length + 1 > ROSTER_SECTION_MAX_CHARS) break;
+		shown.push(t);
+		used += t.length + 1;
+	}
+	const rest = titles.length - shown.length;
+	return `${label}：${shown.join("、")}${rest > 0 ? `……等 ${titles.length} 项` : ""}`;
+}
+
+/**
+ * 名录索引渲染：只列**已不在当前状态**的条目（离场人物/失去的物品/已了结或改写的剧情线）——
+ * 活跃条目已在【世界状态】全量可见，索引只补「曾经存在」这一层。全空返回 undefined。
+ */
+export function formatRosterIndex(state: WorldState): string | undefined {
+	const r = state.roster;
+	if (!r) return undefined;
+	const gone = (reg: Record<string, string>, active: Set<string>): Array<[string, string]> =>
+		Object.entries(reg).filter(([k]) => !active.has(k));
+
+	const sections = [
+		rosterSection("已离场人物", gone(r.characters, new Set(Object.keys(state.characters)))),
+		rosterSection("曾持有物品", gone(r.items, new Set(state.inventory))),
+		rosterSection("旧剧情线", gone(r.events, new Set(state.plot_threads))),
+	].filter((s): s is string => Boolean(s));
+	return sections.length ? sections.join("；") : undefined;
 }

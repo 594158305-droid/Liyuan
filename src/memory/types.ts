@@ -67,7 +67,7 @@ export interface MemoryConfig {
 export interface MemoryChunkMeta {
 	sessionId?: string;
 	card?: string;
-	source?: "narrative" | "import" | "manual";
+	source?: "narrative" | "import" | "manual" | "archive";
 	title?: string;
 	/** 导入文件名 */
 	fileName?: string;

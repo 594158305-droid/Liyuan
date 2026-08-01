@@ -172,7 +172,6 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 
 	const [draft, setDraft] = useState<DraftPreset | null>(null);
 	const [dirty, setDirty] = useState(false);
-	const [path, setPath] = useState<string | undefined>();
 	const [missing, setMissing] = useState<string | undefined>();
 	const [loadingDetail, setLoadingDetail] = useState(false);
 	const [loadError, setLoadError] = useState<string | null>(null);
@@ -189,7 +188,6 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 		try {
 			// full=1：一次拉齐正文，方便编辑；默认磁盘已保存版
 			const r = await apiGet<FullPresetResponse>("/api/preset?full=1");
-			setPath(r.path);
 			setMissing(r.missing);
 			if (r.preset) {
 				setDraft(toDraft(r.preset));
@@ -463,7 +461,6 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 								有未保存修改：已立即用于对话；切换预设会丢弃。点「保存」写入文件。
 							</div>
 						)}
-						{path && <div className="field-hint">文件：{path}</div>}
 						{report && (
 							<details className="legacy-group" open>
 								<summary>转换分诊报告（{report.length} 项）</summary>

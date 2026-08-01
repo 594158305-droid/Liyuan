@@ -181,17 +181,20 @@ function Stage-Clean {
     ".playwright-mcp",
     ".superpowers", "superpowers",
     "scratch", "summaries", "output", "persist",
-    "ab-test", "import-test", "liyuan-profiles", "assets/gen"
+    "ab-test", "import-test", "liyuan-profiles",
+    "assets/gen", "assets/presets"
   )
   $xf = @(
     "*.log", "*.tsbuildinfo", ".DS_Store", "Thumbs.db",
     "*.bak",
     ".liyuan-personas.json",
+    ".liyuan-mcp.json",
     "liyuan.config.json", "liyuan.agent.json", "liyuan.agent.meta.json",
     "liyuan-preset.json",
     "shot-*.png", "bug-*.png", "fix-*.png", "latest-ui.png",
     "white-screen-check.png",
     "tmp-*.png", "liyuan-*.png",
+    "debug-fanren.html", "_verify-*.mjs", "_check-*.mjs",
     "_privacy_scan.py", "_inspect_session.py"
   )
   $robArgs = @($prod, $dest, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/nc", "/ns", "/np")
@@ -227,6 +230,14 @@ function Stage-Clean {
     Get-ChildItem $lore -File | Remove-Item -Force -ErrorAction SilentlyContinue
   }
 
+  # User presets: never ship. assets/presets/ is personal/community data (and
+  # gitignored), already excluded via /XD above — this is belt-and-suspenders
+  # against future edits removing that exclusion. Runtime mkdirSync's the dir.
+  $presets = Join-Path $dest "assets\presets"
+  if (Test-Path $presets) {
+    Remove-Item $presets -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
   # Drop test / internal tooling from release tree
   $dropGlobs = @(
     "test",
@@ -245,6 +256,9 @@ function Stage-Clean {
     "scripts\verify-*.mjs",
     "scripts\write-*.mjs",
     "scripts\build-fanren-*.mjs",
+    "scripts\_*.mjs",
+    "web\public\debug-fanren.html",
+    "web\dist\debug-fanren.html",
     "scripts\_*.py",
     "scripts\_*.ps1",
     "scripts\_*.sh",
@@ -336,10 +350,12 @@ names = z.namelist()
 errors = []
 if not any(n.endswith('.liyuan/extensions/roleplay.ts') for n in names):
     errors.append('MISSING .liyuan/extensions/roleplay.ts (RP layer would not load)')
+if not any(n.endswith('server/mcp/vision-server.mjs') for n in names):
+    errors.append('MISSING server/mcp/vision-server.mjs (builtin vision MCP would not ship)')
 forbidden_dirs = ['.liyuan-memory/', '.liyuan-state/', '.liyuan-uploads/', '.liyuan-lore/',
                   '.liyuan-codex/', '.liyuan-assistant/', '.liyuan-worldline/', '.liyuan-media/',
                   '.liyuan-audio/', '.liyuan-cache/', '.superpowers/', 'scratch/', 'summaries/',
-                  'output/', 'persist/', 'test/']
+                  'output/', 'persist/', 'test/', 'assets/presets/']
 for d in forbidden_dirs:
     hits = [n for n in names if ('/' + d) in n]
     if hits:
@@ -347,7 +363,7 @@ for d in forbidden_dirs:
 junk = [n for n in names if n.count('/') == 1 and n.split('/')[1].startswith('_')]
 if junk:
     errors.append(f'DEV SCRATCH at root: {junk[:5]}')
-for f in ('.liyuan/settings.json', '.liyuan-personas.json', 'liyuan.agent.meta.json'):
+for f in ('.liyuan/settings.json', '.liyuan-personas.json', 'liyuan.agent.meta.json', '.liyuan-mcp.json'):
     if any(n.endswith('/' + f) for n in names):
         errors.append(f'PERSONAL FILE {f}')
 if errors:

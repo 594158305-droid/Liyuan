@@ -293,7 +293,7 @@ type ResponsesOutputSlot =
 	| { type: "toolCall"; block: StreamingToolCall; contentIndex: number };
 
 export async function processResponsesStream<TApi extends Api>(
-	openaiStream: AsyncIterable<ResponseStreamEvent>,
+	openaiStream: AsyncIterable<ResponseStreamEvent> | Iterable<ResponseStreamEvent>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<TApi>,
