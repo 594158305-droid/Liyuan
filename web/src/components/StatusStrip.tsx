@@ -89,26 +89,25 @@ const ROSTER_TABLES = [
 	{ key: "events", label: "剧情线", activeMark: "进行中", goneMark: "已了结" },
 ] as const;
 
-/** 登场名录可视化：追加式索引表（登场过就在案），活跃条目由记账自动登记不可删，离场条目可删可改注 */
+/** 登场名录可视化：追加式索引表（登场过就在案），活跃条目由记账自动登记不可删，离场条目可删可改注。
+ * 系统自带常驻区块——空表也渲染占位，不随数据有无出现消失。 */
 function RosterSection({
 	state,
 	patch,
 }: {
-	state: WorldState;
+	state: WorldState | null;
 	patch: (p: Record<string, unknown>) => void;
 }) {
-	const roster = state.roster;
-	if (!roster) return null;
+	const roster = state?.roster;
 	const activeSets: Record<(typeof ROSTER_TABLES)[number]["key"], Set<string>> = {
-		characters: new Set(Object.keys(state.characters)),
-		items: new Set(state.inventory),
-		events: new Set(state.plot_threads),
+		characters: new Set(Object.keys(state?.characters ?? {})),
+		items: new Set(state?.inventory ?? []),
+		events: new Set(state?.plot_threads ?? []),
 	};
 	const tables = ROSTER_TABLES.map((t) => ({
 		...t,
-		rows: Object.entries(roster[t.key] ?? {}),
-	})).filter((t) => t.rows.length > 0);
-	if (tables.length === 0) return null;
+		rows: Object.entries(roster?.[t.key] ?? {}),
+	}));
 
 	return (
 		<div className="roster-section">
@@ -116,8 +115,11 @@ function RosterSection({
 			{tables.map((t) => (
 				<div key={t.key} className="roster-table">
 					<div className="roster-table-label">{t.label}</div>
-					<div className="roster-rows">
-						{t.rows.map(([name, blurb]) => {
+					{t.rows.length === 0 ? (
+						<div className="roster-empty">（尚无记录，随剧情自动登记）</div>
+					) : (
+						<div className="roster-rows">
+							{t.rows.map(([name, blurb]) => {
 							const active = activeSets[t.key].has(name);
 							return (
 								<div key={name} className={`roster-row ${active ? "" : "roster-gone"}`}>
@@ -145,7 +147,8 @@ function RosterSection({
 								</div>
 							);
 						})}
-					</div>
+						</div>
+					)}
 				</div>
 			))}
 		</div>
@@ -307,7 +310,7 @@ export function StatusStrip({
 							onSave={(v) => patch({ plot_threads: v.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) })}
 						/>
 					</div>
-					{state && <RosterSection state={state} patch={patch} />}
+					<RosterSection state={state} patch={patch} />
 					<div className="field-hint">点铅笔可直接改；你的账本你说了算，改动随剧情分支走（回退会跟着回退）。</div>
 				</div>
 			)}

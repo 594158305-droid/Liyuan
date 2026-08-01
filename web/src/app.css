@@ -2288,6 +2288,11 @@ html[data-theme="dark"] .msg-md-code {
 .roster-mark.on {
 	color: var(--accent);
 }
+.roster-empty {
+	font-size: 12px;
+	color: var(--text-faint);
+	padding: 1px 0;
+}
 .roster-gone .roster-name,
 .roster-gone .roster-blurb {
 	color: var(--text-faint);
