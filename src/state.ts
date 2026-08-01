@@ -148,6 +148,33 @@ export function applyPatch(state: WorldState, patch: Record<string, unknown>): P
 				} else warnings.push(`${key} 需要完整数组（整体替换语义），已忽略`);
 				break;
 			}
+			case "roster": {
+				// 登场名录编辑（用户主权，REST 侧用；模型工具 schema 不含此键）：
+				// {characters/items/events: {名称: null(删除) | 字符串(改一句话)}}。
+				// 注意：删除**活跃**条目会被本函数末尾的 registerRoster 立即重新登记——名录必须覆盖在场条目。
+				if (value && typeof value === "object" && !Array.isArray(value)) {
+					const roster: StateRoster = next.roster ?? { characters: {}, items: {}, events: {} };
+					for (const table of ["characters", "items", "events"] as const) {
+						const patchTable = (value as Record<string, unknown>)[table];
+						if (patchTable === undefined) continue;
+						if (!patchTable || typeof patchTable !== "object" || Array.isArray(patchTable)) {
+							warnings.push(`roster.${table} 需要对象，已忽略`);
+							continue;
+						}
+						for (const [name, v] of Object.entries(patchTable as Record<string, unknown>)) {
+							if (v === null) {
+								delete roster[table][name];
+								applied.push(`roster.${table}.${name} 已移除`);
+							} else if (typeof v === "string") {
+								roster[table][name] = v.slice(0, 60);
+								applied.push(`roster.${table}.${name} 已更新`);
+							} else warnings.push(`roster.${table}.${name} 需要字符串或 null，已忽略`);
+						}
+					}
+					next.roster = roster;
+				} else warnings.push("roster 需要对象，已忽略");
+				break;
+			}
 			default:
 				warnings.push(`未知字段 ${key}，允许的顶层字段：${TOP_KEYS.join(", ")}`);
 		}
