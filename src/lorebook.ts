@@ -26,6 +26,26 @@ export function applyDisabledLore(entries: LorebookEntry[], disabled: string[] |
 	return entries.map((e) => (off.has(loreFingerprint(e.content)) ? { ...e, enabled: false } : e));
 }
 
+/**
+ * 增删停用清单（`lorebook_toggle` 与 REST `/api/lorebook/toggle` 共用同一套语义）。
+ * 返回**去重后的新清单**；空清单由调用方决定是否从 config 里删键。
+ *
+ * ⚠ 这是 M-C2 协议禁用所用的同一条通道（TOOLING M-D2 明示不得另起一套）——
+ * 指纹是内容 md5，故条目改内容＝换身份，旧指纹自然失效（迁移见 rest.ts:3176）。
+ */
+export function toggleDisabledLore(
+	disabled: string[] | undefined,
+	fingerprints: string[],
+	enabled: boolean,
+): string[] {
+	const off = new Set(disabled ?? []);
+	for (const fp of fingerprints) {
+		if (enabled) off.delete(fp);
+		else off.add(fp);
+	}
+	return [...off];
+}
+
 function asStringArray(v: unknown): string[] {
 	if (!Array.isArray(v)) return [];
 	return v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);

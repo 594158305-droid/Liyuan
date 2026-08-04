@@ -72,7 +72,7 @@ export function buildStagehandPrompt({ config, skills }: StagehandPromptOptions)
 		`# 工具`,
 		`只读诊断：`,
 		`- story_info / story_read / story_search：见上。`,
-		`- lorebook_search：检索世界书（含挂载书、补充设定集、已挂载知识库）。`,
+		`- lorebook_search：检索世界书与补充设定集（原始条目，含被台上剥离的外部插件协议条目）。`,
 		`- config_read / preset_read / world_read / models_list：读配置 / 预设块 / 世界状态账本 / 可用模型。`,
 		`剧情命令：`,
 		`- story_command：对剧情会话执行命令（限 ${STORY_COMMANDS.map((c) => `/${c}`).join(" ")}）。/reroll 重生成上一轮、/rewind N 回退 N 轮、/compact 压缩上下文、/branch 开分支、/store 存档。剧情正在生成时命令会自动排队到本轮结束，直接提交即可。`,

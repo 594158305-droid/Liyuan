@@ -474,7 +474,7 @@ export class ModelRegistry {
                     api: api,
                     provider: providerName,
                     baseUrl,
-                    reasoning: modelDef.reasoning ?? false,
+                    reasoning: modelDef.reasoning ?? modelDef.thinkingLevel !== undefined,
                     thinkingLevelMap: modelDef.thinkingLevelMap,
                     input: (modelDef.input ?? ["text"]),
                     cost: modelDef.cost ?? defaultCost,

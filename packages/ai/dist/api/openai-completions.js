@@ -999,7 +999,7 @@ function detectCompat(model) {
         isAntLing;
     const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether || isNvidia || isAntLing;
     const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-    const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
+    const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com") || /deepseek/i.test(model.id);
     const isOpenRouterDeveloperRoleModel = isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
     const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
     return {

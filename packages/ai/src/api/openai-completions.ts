@@ -1291,7 +1291,10 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether || isNvidia || isAntLing;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
+	// deepseek 模型经中转（opencode zen 等）时 baseUrl 不含 deepseek.com：按模型 id 兜底识别，
+	// 否则 thinkingFormat 判不成 "deepseek"，发不出 thinking:{type:"disabled"}，
+	// 端点默认推理常开 → 思考档 off/low 全部失效（2026-08-02 实测：精修调用 4096 tokens 全烧在隐形推理里）
+	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com") || /deepseek/i.test(model.id);
 	const isOpenRouterDeveloperRoleModel =
 		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;

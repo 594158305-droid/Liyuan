@@ -84,3 +84,18 @@ test("注入格式化", () => {
 	assert.ok(text.includes("药茶"));
 	assert.ok(formatState(defaultState()).includes("尚无记录"));
 });
+
+test("inventory/plot_threads：非字符串元素不静默丢弃——warnings 说明期望形态", () => {
+	// 实弹里模型传 [{name,数量}] 被 filter 掉后仍回报「成功」，只能反复试错（M-B S5）
+	const r = applyPatch(defaultState(), { inventory: [{ name: "补气丹", 数量: 1 }, "草药"] } as never);
+	assert.deepEqual(r.state.inventory, ["草药"], "字符串元素照常保留");
+	assert.equal(r.warnings.length, 1);
+	assert.match(r.warnings[0], /1 项不是字符串已丢弃/);
+	assert.match(r.warnings[0], /补气丹/, "回显被丢的原值");
+	assert.match(r.warnings[0], /字符串数组/, "说明期望形态");
+});
+
+test("inventory：全字符串数组不产生警告（不误报）", () => {
+	const r = applyPatch(defaultState(), { inventory: ["猎刀", "草药"] });
+	assert.deepEqual(r.warnings, []);
+});

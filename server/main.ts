@@ -40,8 +40,11 @@ import {
 	type AccessData,
 } from "../src/access.ts";
 import { loadAgentConfig, normalizeAgentConfig, syncAgentConfigToRuntime } from "../src/agent-config.ts";
+import { streamSimple } from "@liyuan/ai/compat";
 import { loadCardFile } from "../src/card.ts";
-import { buildGreeting } from "../src/director.ts";
+import { buildGreeting } from "../src/greeting.ts";
+import { StageEngine, type StageStreamFn } from "../src/stage/engine.ts";
+import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
 import {
 	activePanels,
 	closePanel as closePanelInMap,
@@ -58,7 +61,7 @@ import {
 	takeAgentMergeLog,
 } from "../src/paths.ts";
 import { applyPatch, loadState, saveState } from "../src/state.ts";
-import { DEFAULT_CONFIG, type RpConfig } from "../src/types.ts";
+import { DEFAULT_CONFIG, type RpConfig, type WorldState } from "../src/types.ts";
 import {
 	loadTtsConfig,
 	saveAudioBuffer,
@@ -82,7 +85,14 @@ import {
 	swipeMetaForUser,
 	type SwipeEntry,
 } from "../src/swipe.ts";
-import { onNarrativeTurnEnd } from "../src/memory/index.ts";
+import {
+	memoryArchiveCompacted,
+	memoryDeleteChunk,
+	memoryListChunks,
+	memoryManualAdd,
+	memorySearch,
+	onNarrativeTurnEnd,
+} from "../src/memory/index.ts";
 import { handleApiRequest, loadCardFrontSnapshot, type CurrentModelInfo, type RestHost } from "./rest.ts";
 
 // 用户级 agent 目录 → ~/.liyuan/agent（须在 getAgentDir / 建会话之前）
@@ -104,6 +114,7 @@ import {
 import { createAssistantHost, type AssistantHost, type StoryBridge } from "./assistant.ts";
 import { registerAssistantRunner } from "../src/assistant-gateway.ts";
 import { sameCardPath } from "../src/paths.ts";
+import { toggleDisabledLore } from "../src/lorebook.ts";
 import { syncStoryPanelsFromDisk, syncStoryStateFromDisk } from "../src/story-sync.ts";
 import { toolStartDetail } from "../src/activity-format.ts";
 import {
@@ -330,7 +341,22 @@ const safeStats = (): WireStats | null => {
 
 const stateDir = dir(cwd, "state");
 mkdirSync(stateDir, { recursive: true });
-const currentState = () => loadState(join(stateDir, `${session.sessionId}.json`));
+/**
+ * 展示用账本。权威是会话树（R4：世界 = f(分支)）——swipe/rewind/切世界线后
+ * 磁盘缓存仍是旧分支的账本，只有树快照能给出当前分支的正确值。
+ * 树上无快照（未记账的新会话）时回落磁盘缓存：旧会话与导入建账都只有文件。
+ */
+const currentState = (): WorldState => {
+	try {
+		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+		if (branch.some((e) => e.type === "custom" && e.customType === "rp-state")) {
+			return stateFromBranch(branch);
+		}
+	} catch {
+		// 树不可读（极早期生命周期）→ 磁盘缓存
+	}
+	return loadState(join(stateDir, `${session.sessionId}.json`));
+};
 
 // 场记记账落盘即推送（PLAN-PHASE3 §4：fs.watch 目录级监听，零扩展改动；
 // Windows 下同一次写可能触发多次事件，200ms 去抖）
@@ -465,6 +491,26 @@ const currentDisplaySkin = () => {
 	}
 };
 
+/**
+ * 会话树当前分支 → 显示层消息列表。
+ * 台上引擎直接写树（R1 循环自持），AgentSession 的内存副本不再是权威——
+ * 显示层一律以 SessionManager 分支为准（含 rp-greeting/rp-draft-op 等 custom_message）。
+ */
+const branchMessages = (): unknown[] => {
+	try {
+		const out: unknown[] = [];
+		for (const e of session.sessionManager.getBranch() as Array<Record<string, unknown>>) {
+			if (e.type === "message" && e.message) out.push(e.message);
+			else if (e.type === "custom_message") {
+				out.push({ role: "custom", customType: e.customType, content: e.content, display: e.display });
+			}
+		}
+		return out;
+	} catch {
+		return session.messages;
+	}
+};
+
 const helloFrame = (): ServerFrame => {
 	const cardfront = loadCardFrontSnapshot(cwd);
 	const skin =
@@ -480,7 +526,7 @@ const helloFrame = (): ServerFrame => {
 		sessionId: session.sessionId,
 		charName: names.charName,
 		userName: names.userName,
-		messages: annotateSwipes(toWireHistory(session.messages, names, { skin })),
+		messages: annotateSwipes(toWireHistory(branchMessages(), names, { skin })),
 		state: currentState(),
 		stats: safeStats(),
 		panels: currentPanels(),
@@ -635,32 +681,15 @@ const regenerateSwipe = async (): Promise<void> => {
 		return;
 	}
 	const sm = session.sessionManager;
-	const oldLeafId = sm.getLeafId();
-	// 先导航到当前变体叶（或 user 子树内节点）触发 session_tree，再把叶钉到 user
-	if (oldLeafId && oldLeafId !== userId) {
-		const entry = sm.getEntry(oldLeafId) as { parentId?: string | null } | undefined;
-		// 若当前叶已是 user 的后裔，navigateTree 到该叶只为发 session_tree；否则导航到 user 的直接子（若有）
-		const r = await session.navigateTree(oldLeafId, { summarize: false });
-		if (r.cancelled) return;
-		void entry;
-	}
-	// 叶 = user：上下文以用户消息结尾，continue 会在 user 下挂新的 assistant sibling
+	// 叶钉回 user：引擎在 user 下挂新的 assistant sibling（swipe 语义）。
+	// 世界状态/历史均为 f(分支)（R3/R4），无需旧的 navigateTree 恢复舞蹈——
+	// 废弃分支上的场记快照天然不在新分支上，账本不会泄漏（8/02 A 雷的结构性解法）。
 	if (sm.getLeafId() !== userId) {
 		sm.branch(userId);
-		const ctx = sm.buildSessionContext();
-		session.agent.state.messages = ctx.messages;
 	}
 	// 展示层立刻去掉旧回复（只显示到 user）
 	resyncAll();
-	try {
-		await session.agent.continue();
-	} catch (err) {
-		broadcast({
-			type: "notify",
-			level: "error",
-			text: err instanceof Error ? err.message : String(err),
-		});
-	}
+	await stage.regenerate();
 };
 
 /**
@@ -845,7 +874,7 @@ const bindSession = async () => {
 					// 内置向量记忆：按策略把本轮助手正文入库（异步，失败不影响叙事）
 					void (async () => {
 						try {
-							const msgs = session.messages as Array<{ role?: string; content?: unknown }>;
+							const msgs = branchMessages() as Array<{ role?: string; content?: unknown }>;
 							let lastText = "";
 							for (let i = msgs.length - 1; i >= 0; i--) {
 								const m = msgs[i];
@@ -1120,7 +1149,7 @@ const restHost: RestHost = {
 	},
 	promptCommand: (text) => handlePrompt(text),
 	queueCommand(text) {
-		const queued = session.isStreaming;
+		const queued = storyStreaming();
 		// 不等待执行完成（流式中排队到本轮结束；/import 等长操作进度经 notify 推送）
 		void handlePrompt(text).catch((err) => {
 			broadcast({ type: "error", text: err instanceof Error ? err.message : String(err) });
@@ -1475,6 +1504,34 @@ const storyBridge: StoryBridge = {
 		};
 	},
 	cardName: () => names.charName,
+	// 向量记忆作用域（M-D3 助手侧工具用）：与 restHost.memoryScope / 台上注入同一口径——
+	// 当前剧情会话 + 当前卡**路径**（scopeId 按路径 hash，只给卡名会落到另一个空作用域）。
+	memoryScope: () => ({ sessionId: session.sessionId, card: cardPath || undefined }),
+	// 世界线视图（M-D5 助手侧 worldline_list 工具用）：从剧情会话树拉存档点
+	worldlineView: () => restHost.worldlineView(),
+	// 面板（M-D5 助手侧 panel_* 工具用）：当前剧情会话的面板读写
+	storyPanels: () => ({
+		load() {
+			const p = loadPanels(join(artifactsDir, `${session.sessionId}.json`));
+			const out: Record<string, { name: string; kind: "markdown" | "svg" | "html"; content: string; archived?: boolean }> = {};
+			for (const [k, v] of Object.entries(p)) out[k] = { name: v.name, kind: v.kind, content: v.content, archived: v.archived };
+			return out;
+		},
+		write(input) {
+			const file = join(artifactsDir, `${session.sessionId}.json`);
+			const panels = loadPanels(file);
+			const r = writePanel(panels, input);
+			if (r.ok) { savePanels(file, r.panels); syncStoryPanelsFromDisk(); }
+			return r;
+		},
+		close(name) {
+			const file = join(artifactsDir, `${session.sessionId}.json`);
+			const panels = loadPanels(file);
+			const r = closePanelInMap(panels, name);
+			if (r.ok) { savePanels(file, r.panels); syncStoryPanelsFromDisk(); }
+			return r;
+		},
+	}),
 	writePanels: (list) => restHost.importPanels(list),
 	deliverMedia: (absPath) => {
 		try {
@@ -1950,22 +2007,208 @@ const httpServer = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
+// ---------- 台上引擎（PLAN-RP-HARNESS R1：叙事回合走自建循环，pi 只留幕后） ----------
+
+const stage = new StageEngine({
+	cwd,
+	getSessionManager: () => session.sessionManager as never,
+	getModel: () => session.model as never,
+	getAuth: async (m) => session.modelRegistry.getApiKeyAndHeaders(m as never),
+	getThinking: () => session.thinkingLevel,
+	// 场记落盘 → fs.watch 自动广播 state 帧（与扩展/REST 写路径同一条）
+	getStateFile: (sessionId) => join(stateDir, `${sessionId}.json`),
+	// memory_search 工具：剧情库 + 外部资料库合并取前 6（与扩展侧同一套语义）
+	searchMemory: async (sessionId, query) => {
+		const scope = { sessionId, card: cardPath || undefined };
+		const [narrative, external] = await Promise.all([
+			memorySearch(cwd, scope, "narrative", query).catch(() => []),
+			memorySearch(cwd, scope, "external", query).catch(() => []),
+		]);
+		return [...narrative, ...external].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 6);
+	},
+	// 向量库写侧三件（M-D3）：MemoryScope 一律在此绑定（当前对话 + 当前卡），**不经模型**。
+	// 写侧恒落 external——服务层 assertExtraStore 禁止手写剧情库，故工具不给 store 参数。
+	addMemory: (sessionId, input) =>
+		memoryManualAdd(cwd, { sessionId, card: cardPath || undefined }, input.text, {
+			...(input.title ? { title: input.title } : {}),
+		}),
+	listMemory: (sessionId, storeId) =>
+		memoryListChunks(cwd, { sessionId, card: cardPath || undefined }, storeId),
+	deleteMemory: (sessionId, storeId, id) =>
+		memoryDeleteChunk(cwd, { sessionId, card: cardPath || undefined }, storeId, id),
+	// 面板读写（M-D5）：按 session 绑定 artifacts 文件，注入后台上可通过 panel_write/read/close 操控面板
+	loadPanels: (sessionId) => {
+		const panels = loadPanels(join(artifactsDir, `${sessionId}.json`));
+		const result: Record<string, { name: string; kind: "markdown" | "svg" | "html"; content: string; archived?: boolean }> = {};
+		for (const [k, v] of Object.entries(panels)) result[k] = { name: v.name, kind: v.kind, content: v.content, archived: v.archived };
+		return result;
+	},
+	writePanel: (sessionId, input) => {
+		const file = join(artifactsDir, `${sessionId}.json`);
+		const panels = loadPanels(file);
+		const r = writePanel(panels, input);
+		if (r.ok) { savePanels(file, r.panels); syncStoryPanelsFromDisk(); }
+		return r;
+	},
+	closePanel: (sessionId, name) => {
+		const file = join(artifactsDir, `${sessionId}.json`);
+		const panels = loadPanels(file);
+		const r = closePanelInMap(panels, name);
+		if (r.ok) { savePanels(file, r.panels); syncStoryPanelsFromDisk(); }
+		return r;
+	},
+	// M4 压缩归档：被摘要覆盖的早期正文完整入剧情库——摘要管连续性，归档管细节召回
+	archiveCompacted: async (sessionId, text) => {
+		const r = await memoryArchiveCompacted(cwd, { sessionId, card: cardPath || undefined }, text);
+		if (r.archived) {
+			broadcast({ type: "notify", level: "info", text: `向量记忆：早期剧情已归档（${r.chunks} 段，可 memory_search 召回）` });
+		}
+	},
+	// lorebook_toggle 工具（M-D2）：写 config.disabledLore 并软刷新素材。
+	// 复用 M-C2 协议禁用的同一条指纹通道（PLAN-RP-TOOLING M-D2 明示不得另起一套）。
+	setDisabledLore: (fingerprints, enabled) => {
+		const disk = existsSync(configPath)
+			? (JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>)
+			: {};
+		const prev = Array.isArray(disk.disabledLore)
+			? disk.disabledLore.filter((f): f is string => typeof f === "string")
+			: [];
+		const next = toggleDisabledLore(prev, fingerprints, enabled);
+		if (next.length > 0) disk.disabledLore = next;
+		else delete disk.disabledLore;
+		writeFileSync(configPath, `${JSON.stringify(disk, null, "\t")}\n`, "utf8");
+		cfg = { ...cfg, disabledLore: next };
+		// constant 条目影响 system prompt，素材需重装（与 REST /api/lorebook/toggle 同）
+		void restHost.softRefreshConfig();
+		return fingerprints.length;
+	},
+	streamFn: streamSimple as unknown as StageStreamFn,
+	events: {
+		onTurnStart: () => broadcast({ type: "agent", state: "start" }),
+		onDelta: (kind, delta) => broadcast({ type: "delta", kind, delta }),
+		onNotify: (level, text) => broadcast({ type: "notify", level, text }),
+		onActivity: (detail) => broadcast({ type: "activity", activity: { kind: "note", name: "stage", detail } }),
+		onTurnEnd: (info) => {
+			broadcast({ type: "agent", state: "end" });
+			// 传统命令路径（/compact /rewind 等）仍读 AgentSession 内存副本：引擎写树后对齐一次
+			try {
+				session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
+			} catch {
+				// 对齐失败不影响本拍；下次树导航会重建
+			}
+			resyncAll();
+			// 向量记忆入库：只在真落了新正文时（中断/错误拍不入）
+			if (!info.entryId || info.error || info.aborted) return;
+			void (async () => {
+				try {
+					const msgs = branchMessages() as Array<{ role?: string; content?: unknown }>;
+					let lastText = "";
+					for (let i = msgs.length - 1; i >= 0; i--) {
+						const m = msgs[i];
+						if (m?.role !== "assistant") continue;
+						const c = m.content;
+						if (typeof c === "string") lastText = c;
+						else if (Array.isArray(c)) {
+							lastText = c
+								.map((p) =>
+									p && typeof p === "object" && (p as { type?: string }).type === "text"
+										? String((p as { text?: string }).text ?? "")
+										: "",
+								)
+								.join("");
+						}
+						if (lastText.trim()) break;
+					}
+					const mem = await onNarrativeTurnEnd(
+						cwd,
+						{ sessionId: session.sessionId, card: cardPath || undefined },
+						lastText,
+					);
+					if (mem.error) {
+						broadcast({ type: "notify", level: "warning", text: `向量记忆：入库失败 · ${mem.error}` });
+					} else if (mem.stored) {
+						const how = mem.merged ? "合并入已有条目" : "新开条目";
+						broadcast({ type: "notify", level: "info", text: `向量记忆：剧情库${how}（第 ${mem.counter} 轮 · 当前对话）` });
+					}
+				} catch (e) {
+					console.warn("[memory] auto ingest failed", e);
+				}
+			})();
+		},
+	},
+});
+
+/** 台上或旧循环任一在流式中（守卫共用） */
+const storyStreaming = (): boolean => session.isStreaming || stage.isStreaming;
+
+/**
+ * 手动压缩（/compact 与 WS compact 帧共用）：走台上引擎自管压缩（M4）。
+ * 摘要落 rp-summary 后 resyncAll——重放时被覆盖的楼层照旧全在（树只追加），
+ * 变的只是**送模上下文**：装配时那段改由【前情提要】代替。
+ */
+const hostCompact = async (): Promise<void> => {
+	broadcast({ type: "compaction", state: "start" });
+	const r = await stage.compactNow();
+	broadcast({ type: "compaction", state: "end", ok: r.kind === "compacted" });
+	if (r.kind === "compacted") {
+		broadcast({
+			type: "notify",
+			level: "info",
+			text: `前情已压缩：${r.turns} 拍 ${r.chars} 字 → 摘要 ${r.summary.length} 字`,
+		});
+		resyncAll();
+	} else if (r.kind === "failed") {
+		broadcast({ type: "notify", level: "error", text: `压缩失败：${r.error}` });
+	} else if (r.kind === "stale") {
+		broadcast({ type: "notify", level: "warning", text: "压缩已丢弃（期间切换了分支）" });
+	} else {
+		broadcast({
+			type: "notify",
+			level: "info",
+			text: r.reason === "busy" ? "正在演出中，稍后再压缩" : "早期剧情还不够长，暂不需要压缩",
+		});
+	}
+};
+
 /** 发送用户输入（含斜杠命令；命令后全量对齐所有端） */
 const handlePrompt = async (text: string) => {
 	const trimmed = text.trim();
-	// ST 式变体：无参 /reroll 与 /swipe 由宿主处理（需 agent.continue，扩展命令上下文无此能力）
+	// ST 式变体：无参 /reroll 与 /swipe 由宿主处理（需重开一拍，扩展命令上下文无此能力）
 	if (/^\/reroll\s*$/i.test(trimmed)) {
-		if (session.isStreaming) {
+		if (storyStreaming()) {
 			broadcast({ type: "notify", level: "warning", text: "请等当前回复完成（或先停止），再重新生成" });
 			return;
 		}
 		await regenerateSwipe();
 		return;
 	}
+	// M-D6 R1：有参 /reroll（前端编辑用户消息）同样在宿主拦截，走 StageEngine——
+	// 之前漏到 pi 跑无台上装配的裸 LLM 回合（无预设拆层/无工作区/无验收器）。
+	const rerollArgMatch = /^\/reroll\s+(.+)/i.exec(trimmed);
+	if (rerollArgMatch) {
+		if (storyStreaming()) {
+			broadcast({ type: "notify", level: "warning", text: "请等当前回复完成（或先停止），再重新生成" });
+			return;
+		}
+		const userId = lastStoryUserId();
+		if (!userId) {
+			broadcast({ type: "notify", level: "error", text: "没有可重新生成的剧情轮（需要先有一条用户输入）" });
+			return;
+		}
+		const sm = session.sessionManager;
+		// 叶钉回 user，旧 user + 回复进旁支（与无参 reroll 同款 branch 语义）
+		if (sm.getLeafId() !== userId) sm.branch(userId);
+		// 追加编辑后的用户消息
+		sm.appendMessage({ role: "user", content: [{ type: "text", text: rerollArgMatch[1].trim() }], timestamp: Date.now() });
+		sm.flush();
+		resyncAll();
+		await stage.regenerate();
+		return;
+	}
 	// 开场白切换：宿主层处理，保证「同一条替换」而非叠楼
 	const greetingMatch = /^\/greeting(?:\s+(.*))?$/i.exec(trimmed);
 	if (greetingMatch) {
-		if (session.isStreaming) {
+		if (storyStreaming()) {
 			broadcast({ type: "notify", level: "warning", text: "请等当前回复完成（或先停止），再切换开场白" });
 			return;
 		}
@@ -1974,7 +2217,7 @@ const handlePrompt = async (text: string) => {
 	}
 	const swipeMatch = /^\/swipe(?:\s+(prev|next|new))?\s*$/i.exec(trimmed);
 	if (swipeMatch) {
-		if (session.isStreaming) {
+		if (storyStreaming()) {
 			broadcast({ type: "notify", level: "warning", text: "请等当前回复完成（或先停止），再切换变体" });
 			return;
 		}
@@ -1982,31 +2225,21 @@ const handlePrompt = async (text: string) => {
 		await handleSwipe(dir);
 		return;
 	}
-	// /compact：pi 在 TUI 层拦截，SDK prompt 不会当命令执行。Web/API/补全统一在此走 session.compact。
-	// compaction_end 事件会 resyncAll；失败时用 notify 回传（session too small / Already compacted 等）。
+	// /compact：台上引擎自管压缩（PLAN-RP-HARNESS M4）。
+	// 旧路径 session.compact() 压的是 pi 的消息副本，看不全引擎写进树的东西
+	// （rp-draft-op 补丁 / rp-state 快照 / 引擎直落的 assistant）——长局压不动，故整体让位。
 	const compactMatch = /^\/compact(?:\s+(.*))?$/i.exec(trimmed);
 	if (compactMatch) {
-		if (session.isStreaming) {
+		if (storyStreaming()) {
 			broadcast({ type: "notify", level: "warning", text: "请等当前回复完成（或先停止），再压缩上下文" });
 			return;
 		}
-		if (session.isCompacting) return;
-		const custom = compactMatch[1]?.trim();
-		try {
-			await session.compact(custom || undefined);
-		} catch (err) {
-			broadcast({
-				type: "notify",
-				level: "error",
-				text: err instanceof Error ? err.message : String(err),
-			});
-		}
+		await hostCompact();
 		return;
 	}
 
-	// 2026-07-18 合流：主框一律进剧情 agent；// 与整段括号不再硬改道。
-	// 系统事务由剧情侧 assistant_run 工具委托右栏助手（语义判断，非标记路由）。
-	// isBackstageText 仍用于：旧会话历史折叠、楼层、场记跳过。
+	// 2026-07-18 合流：主框一律进剧情侧；// 与整段括号不再硬改道。
+	// 2026-08-02 起叙事回合走台上引擎（PLAN-RP-HARNESS R1）；斜杠命令仍经 pi 会话执行。
 
 	const isCommand = trimmed.startsWith("/");
 	if (!isCommand) {
@@ -2014,11 +2247,13 @@ const handlePrompt = async (text: string) => {
 			type: "message",
 			message: { channel: "user", name: names.userName, text: trimmed },
 		});
+		// 流式中送达的输入由引擎排队到本拍结束（RP 语境：不打断正在进行的叙事）
+		await stage.performTurn(trimmed);
+		return;
 	}
-	// 流式中送达的用户输入排队到本轮结束（RP 语境：不打断正在进行的叙事）
 	await session.prompt(trimmed, session.isStreaming ? { streamingBehavior: "followUp" } : undefined);
 	// 斜杠命令可能改写历史（/rewind /reroll /import）或注入消息：全量对齐
-	if (isCommand) {
+	{
 		// /import：前情块是 custom 消息，SessionManager 在「尚无 assistant 回复」的
 		// 新会话里默认不落盘（防空会话刷屏）——导入的会话没有回复也必须持久化，
 		// 否则重启/切会话后整段前情蒸发、会话列表里也找不到（用户实测踩中）。
@@ -2031,7 +2266,7 @@ const handlePrompt = async (text: string) => {
 
 /** 流式中禁止的操作统一挡下 */
 const refuseWhileStreaming = (ws: WebSocket, what: string): boolean => {
-	if (!session.isStreaming) return false;
+	if (!storyStreaming()) return false;
 	ws.send(JSON.stringify({ type: "notify", level: "warning", text: `请等当前回复完成（或先停止），再${what}` } satisfies ServerFrame));
 	return true;
 };
@@ -2288,7 +2523,7 @@ wss.on("connection", (ws, req) => {
 	}
 	clients.add(ws);
 	ws.send(JSON.stringify(helloFrame()));
-	if (session.isStreaming) ws.send(JSON.stringify({ type: "agent", state: "start" } satisfies ServerFrame));
+	if (storyStreaming()) ws.send(JSON.stringify({ type: "agent", state: "start" } satisfies ServerFrame));
 	// 助手面板：连接即对齐（busy 随帧携带，断线重连恢复生成中状态）
 	ws.send(JSON.stringify(assistantHelloFrame()));
 	// 在线更新状态：新连接即对齐（有新版/就绪时主页 chip 才能亮）
@@ -2313,11 +2548,12 @@ wss.on("connection", (ws, req) => {
 						break;
 					}
 					case "abort": {
-						// 强制停止：按下即收敛 UI/选择卡，再撕掉本轮（剧情 + 委托中的助手）
+						// 强制停止：按下即收敛 UI/选择卡，再撕掉本拍（台上引擎 + 旧循环 + 委托中的助手）
 						for (const id of [...pendingChoices.keys()]) settleChoice(id, { stop: true });
-						const wasStreaming = session.isStreaming || (assistantHost?.isStreaming() ?? false);
+						const wasStreaming = storyStreaming() || (assistantHost?.isStreaming() ?? false);
 						if (session.isStreaming) broadcast({ type: "agent", state: "end" });
 						if (assistantHost?.isStreaming()) broadcast({ type: "assistant_state", state: "end" });
+						stage.abort(); // 引擎自会以 aborted 谢幕（半拍正文保留）
 						void session.abort().catch((err) => {
 							console.error(`[liyuan] abort 失败：${err instanceof Error ? err.message : String(err)}`);
 						});
@@ -2344,8 +2580,7 @@ wss.on("connection", (ws, req) => {
 					}
 					case "compact":
 						if (refuseWhileStreaming(ws, "压缩上下文")) return;
-						if (session.isCompacting) return;
-						await session.compact();
+						await hostCompact();
 						break;
 					case "sessions":
 						ws.send(JSON.stringify(await listSessions()));

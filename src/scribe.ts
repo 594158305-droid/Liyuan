@@ -64,25 +64,61 @@ ${charName}：${assistantText}`;
 	return { systemPrompt, userText: user };
 }
 
-/** 宽容解析场记输出：剥代码围栏、截取首个 JSON 对象；解析失败返回 null（调用方静默跳过本轮） */
+/**
+ * 宽容解析场记输出：剥代码围栏后，从头逐个候选尝试解析 JSON 对象
+ * （模型常在最前写一句「以下是账本更新：」之类的前言——若前言里恰好有
+ * 「{」，旧逻辑按首个 { 切分会从错位开始 → 整个解析失败。2026-08-03 实测）。
+ * 解析失败返回 null（调用方静默跳过本轮）。
+ */
 export function parseScribeResult(text: string): ScribeResult | null {
 	let t = text.trim();
 	const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
 	if (fence) t = fence[1].trim();
-	const start = t.indexOf("{");
-	const end = t.lastIndexOf("}");
-	if (start === -1 || end <= start) return null;
-	try {
-		const obj = JSON.parse(t.slice(start, end + 1)) as Record<string, unknown>;
-		const patch =
-			obj.patch && typeof obj.patch === "object" && !Array.isArray(obj.patch)
-				? (obj.patch as Record<string, unknown>)
-				: {};
-		// 审查字段一律丢弃（即使旧模型仍返回）
-		return { patch, warnings: [], unaskedTurn: null };
-	} catch {
-		return null;
+	// 逐个「{」为起点试切：首个能完整解析出 patch 的对象即命中
+	let idx = 0;
+	while (true) {
+		const start = t.indexOf("{", idx);
+		if (start === -1) break;
+		// 从候选起点向后找平衡的右括号（跳过字符串里的「}」）
+		let depth = 0;
+		let inStr = false;
+		let esc = false;
+		let end = -1;
+		for (let i = start; i < t.length; i++) {
+			const ch = t[i];
+			if (inStr) {
+				if (esc) esc = false;
+				else if (ch === "\\") esc = true;
+				else if (ch === '"') inStr = false;
+				continue;
+			}
+			if (ch === '"') inStr = true;
+			else if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) {
+					end = i;
+					break;
+				}
+			}
+		}
+		if (end === -1) break;
+		try {
+			const obj = JSON.parse(t.slice(start, end + 1)) as Record<string, unknown>;
+			if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+				const patch =
+					obj.patch && typeof obj.patch === "object" && !Array.isArray(obj.patch)
+						? (obj.patch as Record<string, unknown>)
+						: {};
+				// 审查字段一律丢弃（即使旧模型仍返回）
+				return { patch, warnings: [], unaskedTurn: null };
+			}
+		} catch {
+			// 本候选不成（前言里的孤 {），试下一个
+		}
+		idx = start + 1;
 	}
+	return null;
 }
 
 // ---------- 世界书中文别名（修复：专有名词中译后英文关键词地板失效） ----------
@@ -130,4 +166,58 @@ export function parseLoreAliases(text: string): Map<number, string[]> | null {
 	} catch {
 		return null;
 	}
+}
+
+// ---------- 前情接力摘要（原 src/compaction.ts，2026-08-02 随 harness 重做移入） ----------
+
+export interface RpSummaryPromptInput {
+	/** 被裁早期剧情的对话原文（序列化后） */
+	conversationText: string;
+	/** 工具账本快照（辅助参考，可能滞后于正文） */
+	stateSnapshot: string;
+	/** 更早剧情的既有摘要（二次压缩时传入，合并进本次摘要） */
+	previousSummary?: string;
+	language: string;
+	userName: string;
+}
+
+export interface RpSummaryPrompt {
+	systemPrompt: string;
+	userText: string;
+}
+
+export function buildRpSummaryPrompt(input: RpSummaryPromptInput): RpSummaryPrompt {
+	const { conversationText, stateSnapshot, previousSummary, language, userName } = input;
+
+	const systemPrompt = `你是一场长篇角色扮演的场记。你的任务是为即将从上下文中裁掉的早期剧情写一份接力摘要——它将成为主演模型唯一能看到的「前情」，后续剧情将基于「本摘要 + 保留的最近对话」继续演出。
+
+用${language}输出，按以下结构：
+
+## 前情提要
+按时间顺序概述关键事件（谁做了什么、结果如何）。保留剧内时间刻度（如「第一天黄昏」「第三天清晨」）。
+
+## 人物
+每位出场人物：性格要点、说话习惯、对${userName}的称呼、与${userName}的关系温度及演变轨迹。
+
+## 承诺与伏笔
+逐条列出所有未兑现的约定、只被提过一次的线索、悬而未决的问题。这一节宁多勿漏——漏掉一条，后续剧情就永远丢失它。
+
+## 事实账
+物品归属（谁持有什么）、伤势与身体状态、重要数值、时间线（现在是剧内第几天）。
+
+## 当前场景
+剧内此刻：第几天、什么时段、什么地点、谁在场、正在进行什么动作。必须以对话记录中**最新**的场景为准——这是续演点，写成更早的场景会导致剧情倒退。
+
+规则：只记录对话中实际发生的事；不虚构、不评论、不续写剧情；人名地名保持剧中写法。`;
+
+	const parts: string[] = [`<conversation>\n${conversationText}\n</conversation>`];
+	if (previousSummary) {
+		parts.push(
+			`<previous-summary>\n${previousSummary}\n</previous-summary>\n\n（上面是更早剧情的既有摘要：把它的内容合并进本次摘要，不要丢弃其中的承诺、伏笔与事实。）`,
+		);
+	}
+	parts.push(`【工具账本快照】（辅助参考；记账可能滞后于正文，与对话记录冲突时以对话记录为准）\n${stateSnapshot}`);
+	parts.push("请按系统指令输出接力摘要。");
+
+	return { systemPrompt, userText: parts.join("\n\n") };
 }

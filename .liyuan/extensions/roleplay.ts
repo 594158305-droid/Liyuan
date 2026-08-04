@@ -27,9 +27,9 @@ import {
 	listCodexes,
 	loadCodexEntries,
 } from "../../src/codex.ts";
-import { buildRpSummaryPrompt, serializeForSummary, shouldProactiveCompact } from "../../src/compaction.ts";
-import { buildGreeting, buildSystemPrompt, buildTurnInjection, detectsLanguageMismatch, formatLoreIndex } from "../../src/director.ts";
+import { buildGreeting } from "../../src/greeting.ts";
 import { memoryArchiveCompacted, memoryRecallForTurn, memorySearch } from "../../src/memory/index.ts";
+import { GATED_TOOLS, WRITE_REQUEST_RE } from "../../src/tools/gate.ts";
 import { createMacroEnv, evalPresetMacros } from "../../src/preset-macro.ts";
 import {
 	constantEntries,
@@ -66,8 +66,7 @@ import { enabledBlocks, normalizeRpPreset, type RpPreset } from "../../src/prese
 import { applyProjectedSamplers } from "../../src/samplers.ts";
 import { registerStoryPanelSync, registerStoryStateSync } from "../../src/story-sync.ts";
 import { formatPruneStats, pruneClosedTurns } from "../../src/retention.ts";
-import { buildLoreAliasPrompt, buildScribeTurnPrompt, parseLoreAliases, parseScribeResult } from "../../src/scribe.ts";
-import { shouldApplyStoryPreset } from "../../src/turn-intent.ts";
+import { buildLoreAliasPrompt, buildRpSummaryPrompt, buildScribeTurnPrompt, parseLoreAliases, parseScribeResult } from "../../src/scribe.ts";
 import { listSkills } from "../../src/skills.ts";
 import { formatUploadIndex, listUploads } from "../../src/uploads.ts";
 import { isBackstageText } from "../../src/stance.ts";
@@ -154,10 +153,6 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	let config: RpConfig = { ...DEFAULT_CONFIG };
 	let card: CharacterCard | null = null;
 	let entries: LorebookEntry[] = [];
-	/** 剧情 system（含预设 system 块）；缺省与 ops 相同 */
-	let systemPromptStory = "";
-	/** 非剧情 system（不含预设块）——纯办事回合用 */
-	let systemPromptOps = "";
 	/** 卡作者状态栏格式（StatusBlock / state1…）；空=卡未设计，勿硬造 */
 	let statusBarFormats: string[] = [];
 	let state: WorldState = defaultState();
@@ -1416,8 +1411,6 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			if (process.env.RP_DEBUG) {
 				console.error(`[rp-debug] session_start 装载失败：`, err);
 			}
-			systemPromptStory = `你在进行角色扮演，但素材装载失败（${err instanceof Error ? err.message : String(err)}）。请向用户说明该错误。`;
-			systemPromptOps = systemPromptStory;
 			notify(ctx, `RP 素材装载失败：${err instanceof Error ? err.message : String(err)}`, "error");
 		}
 	});
@@ -1441,6 +1434,9 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	/** system 块求值后的变量表快照：postHistory 每轮求值时以此为初值（前块 setvar、后块 getvar） */
 	let presetVarSnapshot = new Map<string, string>();
 
+	/** system 块按序求值后的文本（新流水线装配时取用；旧 buildSystemPrompt 已删） */
+	let presetSystemBlocksEvaled: Array<{ content: string }> = [];
+
 	/** postHistory 块每轮求值：变量继承 system 块，lastusermessage 用本轮原文；全空块过滤 */
 	const evalPostHistoryBlocks = (userText: string) => {
 		if (!preset || !card) return undefined;
@@ -1453,19 +1449,16 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		return out.filter((b) => b.content.trim().length > 0);
 	};
 
-	/** 重装剧情/非剧情两套 system（预设 system 块只进 story） */
-	const rebuildSystemPrompts = (cwd: string) => {
+	/**
+	 * 预设宏求值 + 变量表快照。
+	 *
+	 * 原先还负责拼两套 system prompt（buildSystemPrompt）——那部分随 director.ts
+	 * 整体删除（harness 重做 2026-08-02）。这里只保留预设侧能力：按序求值 system 块、
+	 * 留下 setvar 变量表、预演 postHistory 的宏支持度告警。
+	 */
+	const rebuildSystemPrompts = (_cwd: string) => {
 		if (!card) return;
 		refreshDisplayTagExtras();
-		const base = {
-			card,
-			config,
-			constantLore: constantEntries(entries),
-			skills: listSkills(cwd),
-			mcpIndex: mcpIndexCache,
-			statusBarFormats,
-		};
-		systemPromptOps = buildSystemPrompt({ ...base, presetSystemBlocks: undefined });
 		// 预设宏求值：system 块按序求值并留下变量表；顺带预演 postHistory 汇总清单外宏（显式降级告警）
 		const macroEnv = createMacroEnv({ charName: card.name, userName: config.userName });
 		const unsupported = new Set<string>();
@@ -1488,382 +1481,36 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			);
 		}
 		const nonEmptySystemBlocks = evaledSystemBlocks.filter((b) => b.content.trim().length > 0);
-		systemPromptStory = buildSystemPrompt({
-			...base,
-			presetSystemBlocks: nonEmptySystemBlocks.length > 0 ? nonEmptySystemBlocks : undefined,
-			presetActive: presetHasEnabledBlocks(),
-		});
+		// 求值后的 system 块留给新流水线取用（旧的 buildSystemPrompt 装配已删）
+		presetSystemBlocksEvaled = nonEmptySystemBlocks;
 	};
 
-	pi.on("before_agent_start", async (event) => {
-		// 助手/REST 可能已改磁盘；进剧情回合前先对齐，避免回档
-		if (rpMode) {
-			syncPanelsFromDisk();
-			syncStateFromDisk();
-		}
-		if (!rpMode) return undefined;
-		// 预设只服务剧情生成：按本轮用户原文判定，整段 agent 循环（含 tool 轮）沿用
-		const prompt = typeof event?.prompt === "string" ? event.prompt : "";
-		applyStoryPresetThisTurn = shouldApplyStoryPreset(prompt);
-		const sp = applyStoryPresetThisTurn ? systemPromptStory : systemPromptOps;
-		if (!sp) return undefined;
-		return { systemPrompt: sp };
-	});
+	// ============================================================
+	// harness 生成流程已整体移除（2026-08-02 重做）：
+	//   before_agent_start / context / before_provider_request /
+	//   agent_end×2（场记记账·固定楼层压缩）/ session_before_compact
+	// 新的固定流水线将在此处重建。
+	// ============================================================
 
-	// 每轮 LLM 调用前：D9 减法裁剪 → 清理助手历史文本 → 末端注入世界状态与触发设定
-	pi.on("context", async (event, ctx) => {
-		if (!rpMode || !card) return undefined;
 
-		// 工具轮之间也会再进 context：助手在本轮 assistant_run 里改的面板/账本必须立刻可见
-		syncPanelsFromDisk();
-		syncStateFromDisk();
-
-		// 世界书中文别名懒初始化（首次会话一次旁侧调用，此后走磁盘缓存）
-		await ensureAliases(ctx);
-
-		// D9：裁剪已闭合轮次的工具残渣与思考块（只影响本次 LLM 调用，会话文件完整保留）
-		const pruned = pruneClosedTurns(event.messages as Array<Record<string, unknown>>);
-		const messages = pruned.messages;
-		if (process.env.RP_DEBUG && pruned.stats.charsBefore > 0) {
-			console.error(`[rp-prune] ${formatPruneStats(pruned.stats)}`);
-		}
-
-		// 用户手改的角色回复：custom → assistant，避免 convertToLlm 把它当成 user
-		for (let i = 0; i < messages.length; i++) {
-			const m = messages[i] as Record<string, unknown>;
-			if (m.role === "custom" && m.customType === "rp-edited-reply") {
-				const raw = m.content;
-				const content = typeof raw === "string" ? [{ type: "text", text: raw }] : raw;
-				messages[i] = {
-					role: "assistant",
-					content,
-					api: "openai-completions",
-					provider: "edited",
-					model: "edited",
-					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-					stopReason: "stop",
-					timestamp: typeof m.timestamp === "number" ? m.timestamp : Date.now(),
-				};
-			}
-		}
-
-		for (const m of messages) {
-			if (m.role === "assistant" && Array.isArray(m.content)) {
-				for (const part of m.content as Array<Record<string, unknown>>) {
-					if (part.type === "text" && typeof part.text === "string") {
-						part.text = cleanAssistantText(part.text);
+	/** 取本拍最后一条用户原文（写入门禁判定用）。从会话 entries 倒序找第一条 user 消息。 */
+	const lastUserText = (ctx: { sessionManager?: { getEntries?: () => Array<Record<string, unknown>> } }): string => {
+		const entries = ctx.sessionManager?.getEntries?.() ?? [];
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const e = entries[i];
+			if (e.type === "message") {
+				const msg = e.message as { role?: string; content?: unknown } | undefined;
+				if (msg?.role === "user") {
+					if (typeof msg.content === "string") return msg.content;
+					if (Array.isArray(msg.content)) {
+						const texts = (msg.content as Array<{ type?: string; text?: string }>)
+							.filter((b) => b?.type === "text")
+							.map((b) => b.text ?? "");
+						return texts.join("");
 					}
+					return "";
 				}
 			}
-		}
-
-		const windowText = messages
-			.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "custom")
-			.slice(-config.scanDepth)
-			.map(extractText)
-			.join("\n");
-		const activated = scanEntries(allEntries(), windowText, config.maxLoreInjections);
-
-		// 语言自愈：上一条**台上**叙事文本（助手正文，首轮回退到开场白）语言与配置不符时注入显式纠正。
-		// 首轮盲区实证（smoke 多次复现）：英文开场白锚定第一轮输出英文，必须把开场白纳入检测源。
-		// 幕后轮的助手回复不是叙事，不作为检测源（英文命令输出会误报）。
-		const lastNarrative = (() => {
-			let inBackstageTurn = false;
-			let found: unknown;
-			for (const m of messages) {
-				if (m.role === "user") {
-					inBackstageTurn = isBackstageText(extractText(m));
-				} else if (
-					(m.role === "assistant" || (m.role === "custom" && (m as { customType?: string }).customType === "rp-greeting")) &&
-					!inBackstageTurn
-				) {
-					found = m;
-				}
-			}
-			return found;
-		})();
-		const languageMismatch = lastNarrative
-			? detectsLanguageMismatch(extractText(lastNarrative), config.language)
-			: false;
-
-		// 本轮用户原文（求方向检测用）。场外标记消息已在 server 层改道助手会话，
-		// 正常不会出现在这里；旧会话续接时若最后一条恰是遗留戏外轮，不做求方向升格即可。
-		const lastUser = [...messages].reverse().find((m) => m.role === "user");
-		const lastUserText = lastUser ? extractText(lastUser) : "";
-		const legacyBackstage = !!lastUserText && isBackstageText(lastUserText);
-
-		// 向量记忆：仅检索「当前角色卡 + 当前对话」的库，注入【剧情记忆】（失败则跳过，不挡剧情）
-		let memoryHits: Array<{ text: string; score?: number; source?: string }> | undefined;
-		if (!legacyBackstage && lastUserText.trim().length >= 2) {
-			try {
-				const sessionId =
-					typeof ctx.sessionManager?.getSessionId === "function"
-						? ctx.sessionManager.getSessionId()
-						: "_default";
-				const hits = await memoryRecallForTurn(
-					appCwd,
-					{ sessionId, card: config.card || undefined },
-					lastUserText,
-				);
-				if (hits.length) {
-					memoryHits = hits.map((h) => ({
-						text: h.text.slice(0, 500),
-						score: h.score,
-						source: h.meta.title || h.meta.fileName || h.meta.source,
-					}));
-				}
-			} catch (e) {
-				console.warn("[memory] recall failed", e);
-			}
-		}
-
-		// 工具轮 context 复用 before_agent_start 的判定；若本轮尚未跑过 start（极少），再按 last user 估一次
-		const applyPreset = applyStoryPresetThisTurn;
-		// 工具续轮判定：最后一条是 toolResult ⇒ 本次请求是同一回合的继续。
-		// 续轮不得重注预设 postHistory / 「工具前短旁白」——否则每个工具回执后模板重现于末端，
-		// 模型当成新回合重新起笔 → 旁白→world_state_update→旁白 死循环（2026-07-24 实测）。
-		const isToolContinuation = messages.length > 0 && messages[messages.length - 1]?.role === "toolResult";
-		messages.push({
-			role: "custom",
-			customType: "rp-inject",
-			content: buildTurnInjection({
-				state,
-				activatedLore: activated,
-				card,
-				config,
-				languageMismatch,
-				applyStoryPreset: applyPreset,
-				// 剧情预设 postHistory（字数/思维链等）仅剧情回合首次请求注入；宏已求值
-				presetPostHistoryBlocks:
-					applyPreset && !isToolContinuation && preset
-						? evalPostHistoryBlocks(legacyBackstage ? "" : lastUserText)
-						: undefined,
-				toolContinuation: isToolContinuation,
-				presetActive: applyPreset && presetHasEnabledBlocks(),
-				// 全文快照（sync 之后）：用户手改后模型续写可见；超长截断仍可用 panel_read
-				panelIndex: formatPanelSnapshot(panels) ?? formatPanelIndex(panels) ?? undefined,
-				codexIndex: codexIndexCache ?? undefined,
-				uploadIndex: formatUploadIndex(listUploads(appCwd)) ?? undefined,
-				userText: legacyBackstage ? undefined : lastUserText,
-				memoryHits,
-				// 设定集索引（常驻,只出标题）：codex 条目已有【挂载知识库】速览,这里只列世界书本体
-				loreIndex: formatLoreIndex(entries),
-				// 登场名录（常驻索引）：已不在当前状态的人物/物品/剧情线,细节靠 memory_search
-				rosterIndex: formatRosterIndex(state),
-				statusBarFormats,
-			}),
-			display: false,
-			timestamp: Date.now(),
-		});
-
-		return { messages };
-	});
-
-	// 预设采样参数：UI/预设常驻全套，发送时按渠道/模型投影（ST + Kimi 官方固定采样约束）。
-	// 自定义中转默认只发核心 4 键；kimi-k3/k2.5+ 等固定采样模型 profile=none 全剥。
-	pi.on("before_provider_request", async (event, ctx) => {
-		if (!rpMode || !preset || Object.keys(preset.samplers).length === 0) return undefined;
-		const payload = event.payload;
-		if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
-		const model = ctx.model;
-		return applyProjectedSamplers(payload as Record<string, unknown>, preset.samplers, {
-			provider: model?.provider,
-			modelId: model?.id,
-			baseUrl: model?.baseUrl,
-			api: typeof model?.api === "string" ? model.api : undefined,
-		});
-	});
-
-	// 场记记账（每用户轮结束后一次旁侧调用；只写状态补丁，不做连续性/先斩后奏审查）
-	// 注意：不 await 长调用——agent_end 监听器会卡住 waitForIdle / 停止按钮收尾。
-	pi.on("agent_end", (event, ctx) => {
-		if (!rpMode || !card || scribeBusy) return;
-		const msgs = event.messages as Array<{
-			role?: string;
-			content?: unknown;
-			customType?: string;
-			stopReason?: string;
-		}>;
-		// 用户强制停止的回合：不记账（半截正文、中止噪声）
-		const lastAsst = [...msgs].reverse().find((m) => m.role === "assistant");
-		if (lastAsst?.stopReason === "aborted") return;
-
-		let lastUserIdx = -1;
-		for (let i = msgs.length - 1; i >= 0; i--) {
-			if (msgs[i].role === "user") {
-				lastUserIdx = i;
-				break;
-			}
-		}
-		if (lastUserIdx === -1) return;
-		const userText = extractText(msgs[lastUserIdx]);
-		// 戏外轮不是剧情：不记账
-		if (isBackstageText(userText)) return;
-		const assistantText = msgs
-			.slice(lastUserIdx + 1)
-			.filter((m) => m.role === "assistant")
-			.map(extractText)
-			.filter(Boolean)
-			.join("\n");
-		if (!assistantText.trim()) return;
-
-		scribeBusy = true;
-		void (async () => {
-			try {
-				const prompt = buildScribeTurnPrompt({
-					state,
-					userText,
-					assistantText,
-					charName: card.name,
-					userName: config.userName,
-				});
-				// 只抽 patch，输出短，token 上限收紧
-				const text = await sideComplete(ctx, prompt.systemPrompt, prompt.userText, 1024);
-				if (!text) return;
-				const result = parseScribeResult(text);
-				if (!result) {
-					if (process.env.RP_DEBUG) console.error(`[rp-scribe] 输出不可解析，本轮跳过`);
-					return;
-				}
-				if (Object.keys(result.patch).length > 0) {
-					const knownNames = [card.name, config.userName, ...Object.keys(state.characters)];
-					const applied = applyPatch(state, canonicalizeCharacterKeys(result.patch, knownNames));
-					state = applied.state;
-					if (stateFile) saveState(stateFile, state);
-					snapshotState();
-					if (process.env.RP_DEBUG) {
-						console.error(`[rp-scribe] ${applied.applied.join("；") || "（无变更）"}`);
-					}
-				}
-			} catch (err) {
-				if (process.env.RP_DEBUG) {
-					console.error(`[rp-scribe] 失败（本轮跳过）：${err instanceof Error ? err.message : String(err)}`);
-				}
-			} finally {
-				scribeBusy = false;
-			}
-		})();
-	});
-
-	// 固定楼层压缩：每 N 个叙事轮主动触发一次压缩（不等上下文吃紧才被动压）。
-	// 独立于场记监听器——scribeBusy 时场记跳过本轮，但楼层计数不能漏。
-	// 计数归零在 session_before_compact（主动/被动压缩共用同一归零点）。
-	pi.on("agent_end", (event, ctx) => {
-		if (!rpMode || !card) return;
-		const msgs = event.messages as Array<{ role?: string; content?: unknown; stopReason?: string }>;
-		const lastAsst = [...msgs].reverse().find((m) => m.role === "assistant");
-		if (!lastAsst || lastAsst.stopReason === "aborted") return;
-		const lastUser = [...msgs].reverse().find((m) => m.role === "user");
-		if (!lastUser || isBackstageText(extractText(lastUser))) return;
-		if (!extractText(lastAsst).trim()) return;
-
-		narrativeTurnsSinceCompact++;
-		const everyN = config.compactEveryNTurns ?? 30;
-		const fire = shouldProactiveCompact({
-			narrativeTurnsSinceCompact,
-			everyNTurns: everyN,
-			contextTokens: ctx.getContextUsage()?.tokens ?? null,
-			compactInFlight: proactiveCompactInFlight,
-		});
-		if (!fire) return;
-		proactiveCompactInFlight = true;
-		if (process.env.RP_DEBUG) {
-			console.error(`[rp-compact] 固定楼层压缩触发：${narrativeTurnsSinceCompact} 个叙事轮（周期 ${everyN}）`);
-		}
-		ctx.compact({
-			onComplete: () => {
-				proactiveCompactInFlight = false;
-			},
-			onError: (err) => {
-				proactiveCompactInFlight = false;
-				if (process.env.RP_DEBUG) console.error(`[rp-compact] 主动压缩失败（下轮再试）：${err.message}`);
-			},
-		});
-	});
-
-	// 剧情向压缩接管：用场记提示词替代 pi 默认的 coding 摘要模板
-	// （agent-run-02 P9：默认模板把陈旧场景写成 Critical Context，压缩后剧情倒退）。
-	// 注意：completeSimple 来自本项目自装的 pi-ai 副本，与 pi 内部实例的 provider
-	// 注册表相互独立——内置渠道（deepseek 等）两边都有，运行期注册的自定义 provider
-	// 则只在 pi 侧可见；本项目不使用运行期注册，风险可控。
-	pi.on("session_before_compact", async (event, ctx) => {
-		// 压缩正在发生（无论主动/被动、接管成败）：楼层计数归零，在途标志清掉
-		narrativeTurnsSinceCompact = 0;
-		proactiveCompactInFlight = false;
-		if (!rpMode || !card || !ctx.model) return undefined;
-		try {
-			const prep = event.preparation;
-			const msgs = [...prep.messagesToSummarize, ...(prep.isSplitTurn ? prep.turnPrefixMessages : [])];
-			if (msgs.length === 0) return undefined;
-
-			// 压缩前归档：被裁正文**完整**进剧情库（摘要管连续性,归档管细节召回）。
-			// fire-and-forget——embedding 可能要几秒,不挡压缩;失败只丢召回能力,正文仍在会话文件里。
-			const archiveText = serializeForSummary(msgs, config.userName, card.name);
-			const archiveScope = {
-				sessionId:
-					typeof ctx.sessionManager?.getSessionId === "function" ? ctx.sessionManager.getSessionId() : "_default",
-				card: config.card || undefined,
-			};
-			void memoryArchiveCompacted(appCwd, archiveScope, archiveText)
-				.then((r) => {
-					if (process.env.RP_DEBUG && r.archived) {
-						console.error(`[rp-compact] 被裁正文已归档剧情库：${r.added}/${r.chunks} 块`);
-					}
-				})
-				.catch((err: unknown) => {
-					if (process.env.RP_DEBUG) {
-						console.error(`[rp-compact] 归档失败（不影响压缩）：${err instanceof Error ? err.message : String(err)}`);
-					}
-				});
-
-			const { systemPrompt, userText } = buildRpSummaryPrompt({
-				conversationText: archiveText,
-				stateSnapshot: formatState(state),
-				previousSummary: prep.previousSummary,
-				language: config.language,
-				userName: config.userName,
-			});
-			const summary = await sideComplete(ctx, systemPrompt, userText, 4096, event.signal);
-			if (!summary) return undefined;
-			return {
-				compaction: {
-					summary,
-					firstKeptEntryId: prep.firstKeptEntryId,
-					tokensBefore: prep.tokensBefore,
-				},
-			};
-		} catch (err) {
-			// 接管失败回落 pi 默认压缩：coding 模板的摘要也比压缩失败强
-			if (process.env.RP_DEBUG) {
-				console.error(`[rp-compaction] 接管失败，回落默认摘要：${err instanceof Error ? err.message : String(err)}`);
-			}
-			return undefined;
-		}
-	});
-
-	// ---------- 正典落盘门禁（PLAN-PHASE4 柱 1 第一层，harness 级） ----------
-	//
-	// 写入设定集/知识库是「用户主动要求才执行」的动作：提示词层已把 lorebook_write/codex_write
-	// 定义为用户明确要求才调用的工具（见 director.ts）。这里是真门禁：tool_call 钩子是 pi 的
-	// 工具执行咽喉点，凡未经用户本轮明确要求的写入一律静默拦截——**不弹卡**（用户没让写就不该
-	// 被打断），只把原因回给模型；用户明确要求时直接放行。world_state_update 是每轮记账（有场记
-	// 兜底），不在门禁清单。
-	const GATED_TOOLS = ["lorebook_write", "codex_write"]; // 柱 3 的 card_write 出生即入列
-
-	// 用户主动要求记录的信号（宽松匹配：宁可放行用户明确要求的写入，也不拦错）
-	const WRITE_REQUEST_RE =
-		/(写入|写进|写一下|记下|记入|记录|登记|存进|存到|保存|收藏|归档|收进|收录|固化|入典|沉淀|备注|补充设定|世界书|设定集|知识库|图鉴|物志|record|save|store|lorebook|codex)/i;
-
-	/** 取最近一条用户消息纯文本（写入门禁判定用；会话不可读时按未要求处理，宁拦勿写） */
-	const lastUserText = (c: { sessionManager?: { getBranch?: () => unknown } }): string => {
-		try {
-			const branch = (c.sessionManager?.getBranch?.() as BranchEntry[] | undefined) ?? [];
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const e = branch[i];
-				if (e.type === "message" && e.message?.role === "user") return extractText(e.message);
-			}
-		} catch {
-			// 会话不可读的极早期生命周期：按未要求处理
 		}
 		return "";
 	};

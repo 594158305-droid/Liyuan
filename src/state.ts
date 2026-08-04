@@ -143,8 +143,21 @@ export function applyPatch(state: WorldState, patch: Record<string, unknown>): P
 			case "inventory":
 			case "plot_threads": {
 				if (Array.isArray(value)) {
-					next[key] = value.filter((x): x is string => typeof x === "string");
-					applied.push(`${key} → [${next[key].join("、")}]`);
+					// 非字符串元素**不静默丢弃**：模型常传 [{name,数量}] 这类对象，
+					// 旧实现 filter 掉后仍回报「成功」（applied 里是空数组），模型只能反复试错。
+					const kept = value.filter((x): x is string => typeof x === "string");
+					const dropped = value.filter((x) => typeof x !== "string");
+					if (dropped.length > 0) {
+						warnings.push(
+							`${key} 有 ${dropped.length} 项不是字符串已丢弃（${dropped
+								.slice(0, 2)
+								.map((d) => JSON.stringify(d))
+								.join("、")}${dropped.length > 2 ? "…" : ""}）——` +
+								`本字段是字符串数组，请写成 ["补气丹（已服用）"] 这样的一句话条目。`,
+						);
+					}
+					next[key] = kept;
+					applied.push(`${key} → [${kept.join("、")}]`);
 				} else warnings.push(`${key} 需要完整数组（整体替换语义），已忽略`);
 				break;
 			}

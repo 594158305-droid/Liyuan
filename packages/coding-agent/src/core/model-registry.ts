@@ -639,7 +639,11 @@ export class ModelRegistry {
 					api: api as Api,
 					provider: providerName,
 					baseUrl,
-					reasoning: modelDef.reasoning ?? false,
+					// Liyuan 约定：models.json 自定义条目写了 thinkingLevel（含 "off"）即视为
+					// 具备推理能力——reasoning:false 会让 streamSimple 静默丢弃思考档，
+					// 连「发送 disabled 关掉端点默认推理」都做不到（2026-08-02 实测）
+					reasoning:
+						modelDef.reasoning ?? (modelDef as { thinkingLevel?: unknown }).thinkingLevel !== undefined,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,

@@ -14,7 +14,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readSync, closeSync, statSync, unlinkSync, writeFileSync, readFileSync } from "node:fs";
-import { isAbsolute, join, normalize, resolve } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -28,6 +28,14 @@ import {
 } from "@liyuan/agent-runtime";
 import { Type } from "typebox";
 
+import { loreTools, type LoreDeps } from "../src/tools/lore.ts";
+import { memoryTools, type MemoryDeps } from "../src/tools/memory.ts";
+import { memoryDeleteChunk, memoryListChunks, memoryManualAdd, memorySearch } from "../src/memory/index.ts";
+import { cardTools, type CardDeps } from "../src/tools/card.ts";
+import { worldlineTools, type WorldlineDeps, type WorldlineViewLite } from "../src/tools/worldline.ts";
+import { panelTools, type PanelDeps } from "../src/tools/panels.ts";
+import type { PanelWriteOutput } from "../src/tools/panels.ts";
+import { assistantToolDefs } from "./tool-adapter.ts";
 import { loadCardFile } from "../src/card.ts";
 import {
 	appendCodexEntry,
@@ -36,7 +44,7 @@ import {
 	listCodexes,
 	validateCodexName,
 } from "../src/codex.ts";
-import { appendOverlayEntry, overlayPathFor, searchEntries } from "../src/lorebook.ts";
+import { appendOverlayEntry, loreFingerprint, overlayPathFor, searchEntries, toggleDisabledLore } from "../src/lorebook.ts";
 import { PANEL_KINDS } from "../src/panels.ts";
 import { dir, sameCardPath } from "../src/paths.ts";
 import { listSkills, saveSkill } from "../src/skills.ts";
@@ -86,6 +94,16 @@ export interface StoryBridge {
 	// ---- 作者权限：写文件 + 收编进剧情会话（内存/树/前端）——与剧情 agent 落点一致 ----
 	/** 当前角色卡名（补充设定集按卡分文件、卡库落点用） */
 	cardName(): string;
+	/**
+	 * 向量记忆作用域（M-D3）：当前剧情会话 + 当前卡**路径**。
+	 * 助手的记忆工具查的是**剧情那边**的库——用户问「你记得什么」问的不是助手自己的会话。
+	 * 必须给路径而非卡名：scopeId 按路径 hash（src/memory/config.ts:36）。
+	 */
+	memoryScope(): { sessionId: string; card?: string };
+		/** 世界线视图（M-D5）：从当前剧情会话树抽存档点并组装视图 */
+		worldlineView(): unknown;
+		/** 面板读写（M-D5）：当前剧情会话的面板，读/写/关经盘 sync 与前端双工 */
+		storyPanels(): { load(): Record<string, { name: string; kind: "markdown" | "svg" | "html"; content: string; archived?: boolean }>; write(input: { name: string; kind: string; content: string }): { ok: true; created: boolean; reopened: boolean; activeCount: number; overLimit: boolean } | { ok: false; error: string }; close(name: string): { ok: boolean; error?: string }; };
 	/** 写面板（落盘 + await panelsync 收编剧情扩展内存） */
 	writePanels(list: Array<{ name: string; kind: string; content: string }>): Promise<{
 		imported: number;
@@ -516,25 +534,6 @@ function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: Stagehand
 			},
 		}),
 		defineTool({
-			name: "lorebook_search",
-			label: "检索世界书",
-			description: "Search the mounted lorebooks + supplementary canon for setting details.",
-			parameters: Type.Object({
-				query: Type.String({ description: "检索词（用世界书原文语言）" }),
-				limit: Type.Optional(Type.Number({ description: "命中上限（默认 5）" })),
-			}),
-			async execute(_id, params) {
-				const entries = loadMergedLore(cwd, loadConfig(cwd));
-				const hits = searchEntries(entries, params.query, Math.max(1, Math.min(20, params.limit ?? 5)));
-				if (hits.length === 0) return text(`（世界书共 ${entries.length} 条，未命中「${params.query}」）`);
-				return text(
-					hits
-						.map((h) => `### ${h.entry.comment || h.entry.keys[0] || "entry"}（keys: ${h.entry.keys.join(", ")}）\n${h.entry.content}`)
-						.join("\n\n"),
-				);
-			},
-		}),
-		defineTool({
 			name: "models_list",
 			label: "列可用模型",
 			description: "List available models and the current story model. Useful when diagnosing model-specific quirks or advising a model switch.",
@@ -575,29 +574,6 @@ function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: Stagehand
 	// 落点与剧情 agent 完全一致，写完经 bridge 收编进剧情会话（内存/树/前端 fs.watch）。
 	tools.push(
 		defineTool({
-			name: "panel_write",
-			label: "写入面板",
-			description:
-				"Create or update a panel in the STORY UI (map, inventory, clue board, relationship chart…). Same name overwrites. For a spatial/layout map prefer kind='svg' with viewBox (e.g. viewBox='0 0 400 300'); the side panel is narrow (~280–360px)—design content to fit, not a full desktop canvas. Prefer svg over a large raster image. Writes to the story session panels (same as the story agent), NOT into chat transcript. kind: markdown | svg | html.",
-			parameters: Type.Object({
-				name: Type.String({ description: "面板名（页签标题，同名覆盖）" }),
-				kind: Type.String({ description: `${PANEL_KINDS.join(" | ")}（地图/示意图用 svg，务必写 viewBox）` }),
-				content: Type.String({ description: "面板内容：markdown 文本 / 完整 SVG / HTML 片段" }),
-			}),
-			async execute(_id, params) {
-				if (!PANEL_KINDS.includes(params.kind as (typeof PANEL_KINDS)[number])) {
-					return text(`kind 必须是 ${PANEL_KINDS.join(" / ")} 之一，收到「${params.kind}」`, true);
-				}
-				const r = await bridge.writePanels([{ name: params.name, kind: params.kind, content: params.content }]);
-				if (r.imported === 0) {
-					return text(`面板写入失败：${r.errors.join("；") || "未知错误"}`, true);
-				}
-				return text(
-					`面板「${params.name}」已写入剧情侧（${params.kind}）并已同步；剧情继续时不会回档，无需用户再保存。`,
-				);
-			},
-		}),
-		defineTool({
 			name: "show_media",
 			label: "展示素材",
 			description:
@@ -637,32 +613,6 @@ function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: Stagehand
 					],
 					details: { asstMedia: { src: r.src, kind: r.kind, ...(params.caption ? { caption: params.caption } : {}) } },
 				};
-			},
-		}),
-		defineTool({
-			name: "lorebook_write",
-			label: "写入世界书",
-			description:
-				"Record a NEW piece of world canon into the supplementary lorebook (persists across sessions, becomes searchable by the story agent). Worldbuilding facts only — plot progress belongs to world_write. Confirm with the user before writing canon.",
-			parameters: Type.Object({
-				title: Type.String({ description: "条目标题，如「北境骨誓风俗」" }),
-				keys: Type.Array(Type.String(), { description: "检索关键词（中文与任何原文名都放进来）" }),
-				content: Type.String({ description: "正典正文（简洁、陈述性、用剧情语言）" }),
-				constant: Type.Optional(Type.Boolean({ description: "true = 常驻注入（仅全局关键事实）" })),
-			}),
-			async execute(_id, params) {
-				const overlay = overlayPathFor(cwd, bridge.cardName());
-				const entry = appendOverlayEntry(overlay, {
-					title: params.title,
-					keys: params.keys,
-					content: params.content,
-					constant: params.constant,
-				});
-				if (!entry) return text("内容与已有条目重复，未写入。");
-				await bridge.refreshStoryMaterials();
-				return text(
-					`已固化为正典：【${entry.comment}】关键词 ${entry.keys.join("、") || "（无）"}${entry.constant ? "（常驻）" : ""}。剧情侧检索即可命中。`,
-				);
 			},
 		}),
 		defineTool({
@@ -725,64 +675,168 @@ function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: Stagehand
 				return text(`知识库「${meta.name}」已${on ? "挂载到" : "从"}剧情对话${on ? "" : "卸载"}（${meta.entryCount} 条）。`);
 			},
 		}),
-		defineTool({
-			name: "card_create",
-			label: "创建角色卡",
-			description:
-				"Create a new character card as a JSON file in assets/cards/ (chara_card_v3). Use when the user asks you to make/build a character card. Does NOT switch the story to it — tell the user to open it from the card library. Confirm the character details with the user first.",
-			parameters: Type.Object({
-				name: Type.String({ description: "角色名（也用作文件名）" }),
-				description: Type.String({ description: "角色描述（外貌、背景、身份）" }),
-				personality: Type.Optional(Type.String({ description: "性格" })),
-				scenario: Type.Optional(Type.String({ description: "开场场景设定" })),
-				first_mes: Type.String({ description: "开场白（第一条消息）" }),
-				mes_example: Type.Optional(Type.String({ description: "对白示例（文风参考）" })),
-				alternate_greetings: Type.Optional(Type.Array(Type.String(), { description: "备选开场白" })),
-			}),
-			async execute(_id, params) {
-				const safe = params.name.trim().replace(/[\\/:*?"<>|]/g, "-");
-				if (!safe) return text("角色名不能为空。", true);
-				const cardsDir = join(cwd, "assets", "cards");
-				mkdirSync(cardsDir, { recursive: true });
-				const dest = join(cardsDir, `${safe}.json`);
-				if (existsSync(dest)) return text(`同名卡已存在：${safe}.json（换个名字，或让用户先删旧卡）。`, true);
-				const data = {
+
+	// 统一工具层（PLAN-RP-TOOLING M-D1/M-D2）：与台上共用同一份实现，语料与能力按面注入。
+	// 助手是**诊断面**——注入原始世界书，不做外部插件协议剥离（台上剥离是为了生成时
+	// 不与 draft_write 互斥；用户问「我的卡为什么带 UpdateVariable」时助手必须看得见）。
+	// 助手无写入门禁（gate 不注入）：助手侧本就是「改前与用户确认」的工作模式，
+	// 且它的每次调用都由用户当面驱动，不存在台上那种「模型演着演着自作主张写」的场景。
+	tools.push(
+		...assistantToolDefs<LoreDeps>(
+			loreTools,
+			{
+				searchLore: (query, limit) => searchEntries(loadMergedLore(cwd, loadConfig(cwd)), query, limit),
+				loreSize: () => loadMergedLore(cwd, loadConfig(cwd)).length,
+				writeLore: (input) => {
+					const entry = appendOverlayEntry(overlayPathFor(cwd, bridge.cardName()), input);
+					if (entry) void bridge.refreshStoryMaterials();
+					return entry;
+				},
+				listLore: () => loadMergedLore(cwd, loadConfig(cwd)),
+				fingerprint: loreFingerprint,
+				toggleLore: (fps, enabled) => {
+					const config = loadConfig(cwd);
+					const next = toggleDisabledLore(config.disabledLore, fps, enabled);
+					const disk = { ...config, disabledLore: next } as Record<string, unknown>;
+					if (next.length === 0) delete disk.disabledLore;
+					writeJsonWithBackup(configPath(cwd), disk);
+					void bridge.softRefreshConfig(); // constant 条目影响 system prompt，须重装
+					return fps.length;
+				},
+			},
+			loadConfig(cwd).language,
+		),
+	);
+
+	// 向量库族（M-D3）。作用域取**当前剧情会话**（bridge.snapshot().sessionId + 当前卡）——
+	// 助手是诊断面，用户问「你记得什么/把那条记忆删了」时，问的是剧情那边的库，不是助手自己的会话。
+	// 与世界书族同样不挂门禁（助手每次调用都由用户当面驱动）。
+	const memoryScopeOf = (): { sessionId: string; card?: string } => bridge.memoryScope();
+	tools.push(
+		...assistantToolDefs<MemoryDeps>(
+			memoryTools,
+			{
+				searchMemory: async (query) => {
+					const sc = memoryScopeOf();
+					const [narrative, external] = await Promise.all([
+						memorySearch(cwd, sc, "narrative", query).catch(() => []),
+						memorySearch(cwd, sc, "external", query).catch(() => []),
+					]);
+					return [...narrative, ...external].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 6);
+				},
+				addMemory: (input) =>
+					memoryManualAdd(cwd, memoryScopeOf(), input.text, { ...(input.title ? { title: input.title } : {}) }),
+				listMemory: (storeId) => memoryListChunks(cwd, memoryScopeOf(), storeId),
+				deleteMemory: (storeId, id) => memoryDeleteChunk(cwd, memoryScopeOf(), storeId, id),
+			},
+			loadConfig(cwd).language,
+		),
+	);
+
+// 角色库族（M-D4）：创卡/读卡
+tools.push(
+	...assistantToolDefs<CardDeps>(
+		cardTools,
+		{
+			readCard: () => {
+				const { path } = currentCard();
+				if (!path) return null;
+				const c = loadCardFile(path);
+				return {
+					name: c.name, description: c.description, personality: c.personality,
+					scenario: c.scenario, firstMes: c.firstMes, mesExample: c.mesExample,
+					systemPrompt: c.systemPrompt, creatorNotes: c.creatorNotes,
+					tags: c.tags, alternateGreetings: c.alternateGreetings,
+				};
+			},
+			createCard: (input) => {
+				const safe = input.name.replace(/[\\/<>:"|?*]/g, "_").slice(0, 120).trim();
+				if (!safe) throw new Error("卡名无效");
+				const dest = join(cwd, "assets/cards", `${safe}.json`);
+				if (existsSync(dest)) return null;
+				const card: Record<string, unknown> = {
 					spec: "chara_card_v3",
 					spec_version: "3.0",
 					data: {
-						name: params.name.trim(),
-						description: params.description,
-						personality: params.personality ?? "",
-						scenario: params.scenario ?? "",
-						first_mes: params.first_mes,
-						mes_example: params.mes_example ?? "",
-						alternate_greetings: params.alternate_greetings ?? [],
-						creator_notes: "由助手创建",
+						name: safe,
+						description: input.description ?? "",
+						personality: input.personality ?? "",
+						scenario: input.scenario ?? "",
+						first_mes: input.firstMes,
+						mes_example: input.mesExample ?? "",
+						alternate_greetings: input.alternateGreetings ?? [],
 						tags: [],
-						character_book: undefined,
+						creator: "",
+						character_version: "",
 					},
 				};
-				writeFileSync(dest, `${JSON.stringify(data, null, "\t")}\n`, "utf8");
-				try {
-					const card = loadCardFile(dest);
-					if (!card.name.trim()) throw new Error("卡名解析为空");
-				} catch (e) {
-					try {
-						if (existsSync(dest)) unlinkSync(dest);
-					} catch {
-						// 清理失败不影响报错返回
-					}
-					return text(`生成的卡无法解析（已删除）：${e instanceof Error ? e.message : String(e)}`, true);
+				mkdirSync(dirname(dest), { recursive: true });
+				writeFileSync(dest, JSON.stringify(card, null, 2), "utf8");
+				const c = loadCardFile(dest);
+				if (!c.name) {
+					try { unlinkSync(dest); } catch { /* best-effort */ }
+					throw new Error("角色卡解析失败，已回滚");
 				}
-				return text(`角色卡「${params.name}」已创建：assets/cards/${safe}.json。让用户到角色卡库里打开它开始扮演。`);
+				return { name: safe, path: dest };
 			},
-		}),
-	);
+		},
+		loadConfig(cwd).language,
+	),
+);
+
+// 世界线族（M-D5）：agent 可操控存档点
+tools.push(
+	...assistantToolDefs<WorldlineDeps>(
+		worldlineTools,
+		{
+			loadWorldline: () => {
+				const raw = bridge.worldlineView() as Record<string, unknown>;
+				const saves = Array.isArray(raw.saves) ? raw.saves as Array<Record<string, unknown>> : [];
+				return {
+					saves: saves.map((s) => ({
+						id: String(s.id ?? ""),
+						name: String(s.name ?? ""),
+						worldlineId: String(s.worldlineId ?? ""),
+						worldlineName: String(s.worldlineName ?? ""),
+						createdAt: typeof s.createdAt === "number" ? s.createdAt : 0,
+						onCurrentBranch: s.onCurrentBranch === true,
+						entryId: String(s.entryId ?? ""),
+					})),
+					currentSaveId: typeof raw.currentSaveId === "string" ? raw.currentSaveId : null,
+				} satisfies WorldlineViewLite;
+			},
+			storeSave: (name) => {
+				const cmd = name.trim() ? `/store ${name.trim()}` : "/store";
+				const queued = bridge.queueStoryCommand(cmd);
+				return queued ? { id: "", name: name.trim() || "自动命名", worldlineName: "当前线" } : null;
+			},
+			navigateToSave: (saveId) => {
+				const queued = bridge.queueStoryCommand(`/back ${saveId}`);
+				if (!queued) return { ok: false, error: "无法排队命令" };
+				return { ok: true };
+			},
+		},
+		loadConfig(cwd).language,
+	),
+);
+
+// 面板族（M-D5）：三件合一
+tools.push(
+	...assistantToolDefs<PanelDeps>(
+		panelTools,
+		{
+			loadPanels: () => bridge.storyPanels().load(),
+			writePanel: (input) => bridge.storyPanels().write(input) as PanelWriteOutput,
+			closePanel: (name) => bridge.storyPanels().close(name),
+		},
+		loadConfig(cwd).language,
+	),
+);
 
 	return tools;
 }
 
-// ---------- 内联扩展工厂：system prompt 覆盖 + 每轮剧情快照注入 ----------
+// ---------- 内联扩展工厂（角色库/世界线/面板族工具注入在上方 createStagehandTools 内） ----------
 
 function stagehandExtension(
 	cwd: string,

@@ -82,7 +82,12 @@ function evalToken(token: string, env: MacroEnv, unsupported: Set<string>): stri
 			return env.vars.get(rest.split("::")[0]?.trim() ?? "") ?? "";
 		case "random": {
 			const args = rest.includes("::") ? rest.split("::") : rest.split(",");
-			const picked = args[Math.floor(Math.random() * args.length)] ?? "";
+			// 内容寻址钉死（M-C，TAXONOMY §4.5）：同参数恒选同项。破限信件体的几十个
+			// {{random}} 若每拍重摇，system 头部字节每拍不同 → R3 前缀缓存全砸。
+			// 变体性对本架构无价值（防缓存是 ST 场景的意图），缓存稳定是硬收益。
+			let h = 0;
+			for (let i = 0; i < rest.length; i++) h = (h * 31 + rest.charCodeAt(i)) | 0;
+			const picked = args[Math.abs(h) % args.length] ?? "";
 			return picked;
 		}
 		default:
