@@ -525,6 +525,19 @@ svg {
 	padding: 0 4px;
 	flex: none;
 }
+/* 系统内置面板行（登场名录）：常驻在 agent 自建面板之上，与其视觉区隔。
+   不随会话有无记录出现消失，故不参与「还没有面板」空态。 */
+.dock-list-system {
+	padding-bottom: 8px;
+	margin-bottom: 2px;
+	border-bottom: 1px solid var(--hairline);
+}
+.dock-row-system .dock-name {
+	color: var(--text-soft);
+}
+.dock-row-system .dock-kind {
+	border-style: dashed;
+}
 .dock-act {
 	display: grid;
 	place-items: center;
@@ -2245,6 +2258,33 @@ html[data-theme="dark"] .msg-md-code {
 	padding-top: 6px;
 	border-top: 1px dashed var(--hairline);
 }
+/* 面板形态：独占一栏，不再是状态卡里的附属区块——去掉分隔线与滚动窗，
+   三表随内容自然铺开，由面板自身滚动（剧情长了名录会很长，正是搬迁的动因）。 */
+.roster-panel {
+	margin-top: 0;
+	padding-top: 0;
+	border-top: none;
+}
+.roster-panel .roster-table {
+	margin-top: 12px;
+}
+.roster-panel .roster-table-label {
+	font-size: 12.5px;
+	color: var(--text-soft);
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+.roster-panel .roster-rows {
+	max-height: none;
+	overflow-y: visible;
+}
+.roster-panel .roster-row {
+	font-size: 13px;
+	padding: 2px 0;
+}
+.roster-panel .roster-name {
+	max-width: 12em;
+}
 .roster-table {
 	margin-top: 4px;
 }
@@ -2277,8 +2317,14 @@ html[data-theme="dark"] .msg-md-code {
 .roster-blurb {
 	flex: 1;
 	min-width: 0;
+	overflow: hidden;
 	color: var(--text-soft);
 	word-break: break-word;
+}
+/* editable 在名录内须撑满父宽，否则 inline-flex 跟随内容宽度导致文字被截 */
+.roster-blurb .editable {
+	display: flex;
+	width: 100%;
 }
 .roster-mark {
 	flex: none;

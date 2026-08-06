@@ -153,6 +153,18 @@ export const IconWorldline = (p: IconProps) => (
 	</Icon>
 );
 
+/** 登场名录：索引表（三行条目 + 左侧标记） */
+export const IconRoster = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M4 6h2" />
+		<path d="M9 6h11" />
+		<path d="M4 12h2" />
+		<path d="M9 12h11" />
+		<path d="M4 18h2" />
+		<path d="M9 18h11" />
+	</Icon>
+);
+
 /* ── 功能图标 ── */
 
 export const IconClose = (p: IconProps) => (

@@ -595,19 +595,31 @@ interface LiveConnection {
 	error?: string;
 }
 
-let hubSingleton: McpHub | null = null;
+// jiti 二象性红线：扩展（roleplay.ts 经 jiti 加载）与 server/rest.ts（node ESM 加载）
+// 各持一份本模块实例，模块级单例会分叉——/mcpset 更新了扩展侧 hub，REST 读另一份，
+// 前端开关永远不刷新（8/06 实锤）。单例必须挂在 globalThis 槽上跨加载器共享。
+const HUB_SLOT = "__liyuanMcpHub";
+type HubSlot = { hub: McpHub; cwd: string };
+
+function hubSlotOf(): HubSlot | null {
+	const g = globalThis as Record<string, unknown>;
+	const v = g[HUB_SLOT];
+	return v && typeof v === "object" ? (v as HubSlot) : null;
+}
 
 export function getMcpHub(cwd: string): McpHub {
-	if (!hubSingleton || hubSingleton.cwd !== cwd) {
-		if (hubSingleton) void hubSingleton.closeAll();
-		hubSingleton = new McpHub(cwd);
-	}
-	return hubSingleton;
+	const slot = hubSlotOf();
+	if (slot && slot.cwd === cwd) return slot.hub;
+	if (slot) void slot.hub.closeAll();
+	const hub = new McpHub(cwd);
+	(globalThis as Record<string, unknown>)[HUB_SLOT] = { hub, cwd };
+	return hub;
 }
 
 export function resetMcpHubForTests(): void {
-	if (hubSingleton) void hubSingleton.closeAll();
-	hubSingleton = null;
+	const slot = hubSlotOf();
+	if (slot) void slot.hub.closeAll();
+	(globalThis as Record<string, unknown>)[HUB_SLOT] = undefined;
 }
 
 export class McpHub {

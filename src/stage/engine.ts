@@ -72,10 +72,25 @@ import {
 	type StageToolDeps,
 } from "./tools.ts";
 import { unifiedStageToolNames } from "../tools/adapters/stage.ts";
+import {
+	mcpStageTools,
+	mcpStageToolNames,
+	runMcpStageTool,
+	type McpStageDeps,
+} from "./mcp-stage.ts";
+import {
+	mediaStageToolNames,
+	mediaStageTools,
+	runMediaStageTool,
+	type MediaStageResult,
+} from "./media-stage.ts";
+import { assistantStageTool, runAssistantStageTool } from "./assistant-stage.ts";
 import type { MemoryChunkLike } from "../tools/memory.ts";
 import {
 	createWorkspace,
+	finalTimeline,
 	projectedState,
+	recordSegment,
 	runWriteTool,
 	type TurnWorkspace,
 	type WorkspaceDeps,
@@ -144,7 +159,12 @@ export interface StageTurnEndInfo {
 export interface StageEvents {
 	onTurnStart?: () => void;
 	/** 流式增量（转 WS delta 帧；kind 对应正文/思考通道） */
-	onDelta?: (kind: "text" | "thinking", delta: string) => void;
+	/**
+	 * 流式增量。draft=true 表示该增量是 draft_write 参数的转发
+	 * （稿件流 = 替换语义：多稿重交原地更新，前端不得叠加）；
+	 * reset=true 表示本次调用的首个分片（前端据此清掉旧稿）。
+	 */
+	onDelta?: (kind: "text" | "thinking", delta: string, draft?: boolean, reset?: boolean) => void;
 	onTurnEnd?: (info: StageTurnEndInfo) => void;
 	/** 面向用户的告警（宏降级等）；每种只发一次 */
 	onNotify?: (level: "info" | "warning" | "error", text: string) => void;
@@ -189,6 +209,20 @@ export interface StageEngineDeps {
 	 * 未注入 = 台上无 lorebook_toggle 工具。
 	 */
 	setDisabledLore?: (fingerprints: string[], enabled: boolean) => number;
+	/**
+	 * MCP 外设（8/06 重新接线）：宿主注入 hub 的两个能力，台上据此挂 mcp__ 工具。
+	 * 未注入 = 台上无 MCP 工具（依赖缺失的工具不上清单）。
+	 * hub 单例由宿主持有——引擎不自建，避免第二个实例（见 src/mcp.ts 的 globalThis 槽）。
+	 */
+	mcp?: McpStageDeps;
+	/**
+	 * 媒体交付工具（8/06 重接）：show_image/audio/video/html + tts。
+	 * 与 MCP 同源的断链——消费端（wire.ts）一直健在，缺的是台上生产端。
+	 * false/省略 = 不挂（tts 另需服务端 TTS 环境，由 ttsAvailable 决定）。
+	 */
+	media?: boolean;
+	/** TTS 环境是否就绪（未就绪则 tts 不上清单——依赖缺失的工具不上清单） */
+	ttsAvailable?: () => boolean;
 	streamFn: StageStreamFn;
 	events?: StageEvents;
 }
@@ -208,6 +242,50 @@ const textOfAssistant = (m: AssistantMsgLike | null): string => {
 		.map((c) => c.text ?? "")
 		.join("")
 		.trim();
+};
+
+/**
+ * 定稿合并：稿件为主体；text 通道里**格式特征**的尾巴（状态栏占位 / catsay / w2g…）
+ * 拼回，纯文本增量（闲聊收笔）丢弃——树上正文 = 用户最终该看到的全部内容。
+ *
+ * 模型常把 draft_write 理解成「交正文」，把格式栈尾巴走普通 text 通道输出。
+ * 旧逻辑 `ws.draft.trim() ? ws.draft : text` 是二选一，尾巴连同 token 一起被丢弃
+ * （8/05 实锤：模型思考里宣告「body, status bar, and cat commentary」，
+ * draft_write 只交了 679 字正文，状态栏与咪咪点评凭空蒸发）。
+ * 但也不能无脑全拼——纯文本尾巴（"就这样吧。"）是收笔闲聊，不该进正文。
+ */
+const FORMAT_TAIL_RE = /<(?:[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff.\-]*)(?:\s[^>]*)?\/?\s*>/;
+const looksLikeFormatTail = (tail: string): boolean =>
+	FORMAT_TAIL_RE.test(tail) || /^```/m.test(tail);
+
+const mergeFinalText = (draft: string, text: string): string => {
+	const d = draft.trim();
+	const t = text.trim();
+	if (!d) return t;
+	if (!t || d === t) return d;
+	// 稿件已包含 text（模型边写边交，text 是半截）：稿件已是全量
+	if (d.includes(t)) return d;
+	// text 含稿件：取稿件之后的增量（尾巴在后）；不含：整段视作尾巴
+	const idx = t.indexOf(d);
+	const tail = idx >= 0 ? t.slice(idx + d.length) : t;
+	if (!looksLikeFormatTail(tail)) return d;
+	return [d, tail].filter(Boolean).join("\n\n");
+};
+
+/**
+ * 收尾放行门控：上一轮（或首轮）思考宣告了「还要写格式栈尾巴」才多给一轮。
+ * 无条件放行会多拉一轮 LLM，把场记兜底响应当叙事轮消费（8/05 测试实证）；
+ * 而 8/05 实弹里模型确实在思考里宣告过 status bar / cat commentary。
+ */
+const TAIL_INTENT_RE =
+	/(状态栏|点评|选择框|选项|摘要|咪咪|猫猫|吐槽|catsay|w2g|status|summary|choice|comment)/i;
+const hasTailIntent = (m: AssistantMsgLike | null): boolean => {
+	if (!m || !Array.isArray(m.content)) return false;
+	const think = m.content
+		.filter((c): c is { type: string; thinking?: string } => c.type === "thinking")
+		.map((c) => c.thinking ?? "")
+		.join("");
+	return TAIL_INTENT_RE.test(think);
 };
 
 export class StageEngine {
@@ -371,10 +449,21 @@ export class StageEngine {
 		// 读侧依赖先建：统一层按注入情况决定哪些世界书工具上清单（M-D2）。
 		const skillTopics = [...materials.skillPacks.keys()];
 		const readDeps = this.#toolDeps(lastUserText);
+		// MCP 外设（8/06 重接）：hub 里本会话已连接的工具并入清单。
+		// 空数组＝没启用/没连上，与「未注入 mcp 依赖」同效——都不上清单。
+		const mcpTools = mcpStageTools(this.#deps.mcp);
+		// 媒体交付（8/06 重接）：tts 另需服务端环境，未就绪不上清单
+		const mediaOpts = { tts: this.#deps.ttsAvailable?.() === true };
+		const mediaTools = this.#deps.media ? mediaStageTools(config.language, mediaOpts) : [];
+		// 助手委托（8/06 重接）：runner 未注册时不上清单
+		const assistantTool = assistantStageTool();
 		const tools = [
 			...stageTools(config.language, readDeps),
 			...(skillTopics.length > 0 ? [writingGuideTool(config.language, skillTopics)] : []),
 			...writeTools(config.language),
+			...mediaTools,
+			...(assistantTool ? [assistantTool] : []),
+			...mcpTools,
 		];
 		const ws = createWorkspace();
 		const wsDeps: WorkspaceDeps = {
@@ -401,6 +490,9 @@ export class StageEngine {
 			presetActive: materials.presetActive,
 			statusBarFormats: materials.statusBarFormats,
 			tools: tools.length > 0,
+			// MCP 外设索引进 system（不进每拍注入）：会话内字节稳定，不破前缀缓存。
+			// 与旧 director.ts 同一位置——工具清单里有 mcp__ 工具，这里说明它们是什么。
+			mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description })),
 		});
 		const injection = buildStageInjection({
 			state,
@@ -498,6 +590,7 @@ export class StageEngine {
 				text += e.delta;
 				ev.onDelta?.("text", e.delta);
 			} else if (e.type === "thinking_delta" && e.delta) {
+				recordSegment(ws, { kind: "thinking", text: e.delta });
 				ev.onDelta?.("thinking", e.delta);
 			} else {
 				fwd(e);
@@ -529,13 +622,47 @@ export class StageEngine {
 		if (!text) text = textOfAssistant(final);
 
 		// 定稿 = 工作区稿（工件）；工作区空（中断半拍/循环认栽）退回直出正文
-		const finalText = ws.draft.trim() ? ws.draft : text;
+		// **但**模型常把格式栈尾巴（状态栏/catsay 等）走 text 通道而非 draft_write 参数：
+		// 二选一会把那部分连内容一起扔掉（8/05 实锤：模型宣告要出「正文+状态栏+咪咪点评」，
+		// draft_write 只交了正文，屏上流式见过三样、落树只剩一样）。故此处**合并**：
+		// 稿件为主体，text 里**格式特征**的尾巴补回（纯文本闲聊不进正文）。
+		const finalText = mergeFinalText(ws.draft, text);
 
 		// 落树：正文以定稿为准（保留思考块，剥离工具调用轨迹）；纯错误/空拍不落
 		let entryId: string | undefined;
 		if (final && finalText) {
 			const keep = (final.content ?? []).filter((c) => c.type === "thinking");
-			entryId = sm.appendMessage({ ...final, content: [...keep, { type: "text", text: finalText }] });
+			// 时间线随 details 持久化：定稿只留最后一稿正文，但用户要看的
+			// 「思考→工具→正文」全链在此保住——resyncAll 全量重放与刷新后仍在。
+			// 稿段以定稿为准（工作区空时退回直出正文，时间线里也可能没有稿段）。
+			const timeline = finalTimeline(ws, finalText);
+			const prevDetails =
+				final.details && typeof final.details === "object" && !Array.isArray(final.details)
+					? (final.details as Record<string, unknown>)
+					: undefined;
+			const details = timeline.length ? { ...prevDetails, rpTimeline: timeline } : prevDetails;
+			entryId = sm.appendMessage({
+				...final,
+				content: [...keep, { type: "text", text: finalText }],
+				...(details ? { details } : {}),
+			});
+			sm.flush();
+		}
+
+		// 媒体交付落树（8/06 重接）：wire 只认树上的 toolResult 出 image/audio/video/html 帧。
+		// 落在正文**之后**——屏上顺序与演出顺序一致（先看正文，再看图）。
+		// 正文空拍时也要落：用户可能只让「把刚才那张图再给我看看」，没有正文照样得交付。
+		if (!aborted && ws.mediaDeliveries?.length) {
+			for (const d of ws.mediaDeliveries) {
+				sm.appendMessage({
+					role: "toolResult",
+					toolName: d.toolName,
+					content: [{ type: "text", text: d.text }],
+					details: d.details,
+					isError: false,
+					timestamp: Date.now(),
+				});
+			}
 			sm.flush();
 		}
 
@@ -696,20 +823,54 @@ export class StageEngine {
 			"world_state_get",
 			"writing_guide",
 		]);
+		// MCP 外设（8/06 重接）：只认**本会话已连接**的限定名——不能只看 mcp__ 前缀，
+		// 否则模型幻觉出的服务器名会被当成 MCP 调用，错过「未知工具」的正常报错路径。
+		const MCP_TOOLS = mcpStageToolNames(this.#deps.mcp);
+		// 媒体交付（8/06 重接）：结果带 details.rp*，收尾时落成 toolResult 条目供 wire 出帧
+		const MEDIA_TOOLS = this.#deps.media
+			? mediaStageToolNames({ tts: this.#deps.ttsAvailable?.() === true })
+			: new Set<string>();
 		const convo = [...o.messages];
 		let last: AssistantMsgLike = o.first;
 		let text = "";
 		let nudged = false; // 逼稿/报告喂回各只给一轮机会，防空转
+		let tailPass = false; // 收尾放行（模型停手且有稿时，给一轮机会写格式栈尾巴）
+		let lastConsumed = 0; // 本轮开始时 text 长度——判定「本轮新产出文本」用
 
 		for (let round = 0; round < MAX_ROUNDS; round++) {
+			lastConsumed = text.length; // 本轮之前的累计文本
 			const calls = (last.content ?? []).filter(
 				(c): c is { type: string; id?: string; name?: string; arguments?: Record<string, unknown> } =>
 					c.type === "toolCall",
 			);
 
 			if (calls.length === 0) {
-				// 模型停手：有稿即谢幕
-				if (o.ws.draft.trim()) break;
+				// 模型停手：有稿即谢幕——但先确认它不是「还打算写尾巴」。
+				//
+				// 预设格式栈（状态栏 / catsay 等）常被模型放在 draft_write **之后**的
+				// 一轮里输出。旧逻辑在此直接 break，那一轮流式从未发起，模型思考里
+				// 「Now the status bar and cat commentary」的意图永远兑现不了——
+				// 同一输入 roll 三次，写在同轮的两次有、留到下轮的那次没有（8/05 实锤）。
+				// 故：有稿、本轮零产出、且上一轮思考宣告过写尾巴的意图时，
+				// 放行一轮收尾（tailPass 只给一次，防空转）。
+				if (o.ws.draft.trim()) {
+					if (text.trim()) break; // 本轮已有产出（可能正是尾巴）→ 正常谢幕
+					if (tailPass || (!hasTailIntent(last) && !hasTailIntent(o.first))) break;
+					tailPass = true;
+					convo.push(last);
+					convo.push({
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text:
+									`正文已收稿。若本拍还有正文之外的收尾内容（状态栏、点评等预设格式块），` +
+									`现在直接输出；没有则回空，本拍就此收束。`,
+							},
+						],
+						timestamp: Date.now(),
+					});
+				} else {
 				const direct = `${o.directText}${text}`.trim();
 				if (direct) {
 					// 宽进严出：直出正文代收为 draft_write（已流式外发过，不重复上屏）
@@ -743,20 +904,50 @@ export class StageEngine {
 						timestamp: Date.now(),
 					});
 				}
+				}
 			} else {
 				convo.push(last);
 				for (const call of calls) {
 					const name = call.name ?? "";
-					const r = READ_TOOLS.has(name)
-						? await runStageTool(readDeps, name, call.arguments ?? {}, o.language)
-						: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
+					// 三态路由 +MCP：统一层/台上读侧 → tools.ts；MCP 外设 → hub；其余 → 工作区。
+					// MCP 走网络/子进程，可能很慢——把本拍 abort 信号透传下去，用户点停止能立刻中断。
+					const r = name === "assistant_run"
+						? ((await runAssistantStageTool(name, call.arguments ?? {}, this.#abort?.signal)) ?? {
+								text: `未知工具「${name}」。`,
+								isError: true,
+							})
+						: MCP_TOOLS.has(name)
+							? ((await runMcpStageTool(
+									this.#deps.mcp!,
+									name,
+									call.arguments ?? {},
+									this.#abort?.signal,
+								)) ?? { text: `未知工具「${name}」。`, isError: true })
+							: MEDIA_TOOLS.has(name)
+								? ((await runMediaStageTool(this.#deps.cwd, name, call.arguments ?? {})) ?? {
+										text: `未知工具「${name}」。`,
+										isError: true,
+									})
+								: READ_TOOLS.has(name)
+									? await runStageTool(readDeps, name, call.arguments ?? {}, o.language)
+									: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
+					// 媒体交付要落成 toolResult 条目（wire 只认树上的 toolResult 出媒体帧）——
+					// 台上引擎默认剥离工具轨迹，故在此单独收集，谢幕后随正文一起落树。
+					const mediaDetails = (r as MediaStageResult).details;
+					if (MEDIA_TOOLS.has(name) && mediaDetails && (r as MediaStageResult).isError !== true) {
+						o.ws.mediaDeliveries = o.ws.mediaDeliveries ?? [];
+						o.ws.mediaDeliveries.push({ toolName: name, details: mediaDetails, text: r.text });
+					}
+					// 时间线：工具按调用位置入档（draft_write/edit 的正文另由 #recordDraft 记）
+					recordSegment(o.ws, { kind: "tool", activity: { kind: "tool_start", name, detail: r.activity ?? "" } });
 					if (r.activity) ev.onActivity?.(r.activity);
 					convo.push({
 						role: "toolResult",
 						toolCallId: call.id,
 						toolName: name,
 						content: [{ type: "text", text: r.text }],
-						isError: false,
+						// MCP 失败必须如实标记：模型据此改道或如实告知用户，而不是当成功往下演
+						isError: (r as { isError?: boolean }).isError === true,
 						timestamp: Date.now(),
 					});
 				}
@@ -776,8 +967,12 @@ export class StageEngine {
 					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text };
 				} else if (e.type === "text_delta" && e.delta) {
 					text += e.delta;
+					// 稿已存在后的正文外产出（状态栏/catsay 等格式尾巴）入时间线按序记档；
+					// 定稿时由 finalTimeline 吸收进稿段（内容以 mergeFinalText 为准）。
+					if (o.ws.draft.trim()) recordSegment(o.ws, { kind: "text", text: e.delta });
 					ev.onDelta?.("text", e.delta);
 				} else if (e.type === "thinking_delta" && e.delta) {
+					recordSegment(o.ws, { kind: "thinking", text: e.delta });
 					ev.onDelta?.("thinking", e.delta);
 				} else {
 					fwd(e);
@@ -803,7 +998,11 @@ export class StageEngine {
 			if (typeof content !== "string") return;
 			const prev = sent.get(idx) ?? 0;
 			if (content.length <= prev) return;
-			ev.onDelta?.("text", content.slice(prev));
+			// draft=true：稿件流是替换语义（重交不叠加）——与 runWriteTool 的
+			// replaceDraftSegment 同语义，wire 层透传给前端时间线。
+			// reset=true：本次 draft_write 调用的首个分片——前端用它清掉旧稿。
+			const isFirst = !sent.has(idx);
+			ev.onDelta?.("text", content.slice(prev), true, isFirst);
 			sent.set(idx, content.length);
 		};
 		return (e) => {

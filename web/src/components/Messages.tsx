@@ -21,6 +21,7 @@ import {
 	stripYamlFence,
 } from "../statusBlocks.ts";
 import type { WireActivity, WireChoice, WireMsg } from "../wire.ts";
+import { estimateTokens, formatTokenCount, type TurnSegment } from "../timeline.ts";
 import { HtmlFrame } from "./HtmlFrame.tsx";
 
 /** 一档卡皮肤：显示向规则 + 宏名（Task 7 由 App 注入） */
@@ -63,6 +64,12 @@ export function ZoomImg({ src, alt, title }: { src: string; alt: string; title?:
 /** 本地消息：wire 消息 + 客户端挂载的当轮过程活动（v0 不持久化，刷新即失） */
 export interface ChatMsg extends WireMsg {
 	activities?: WireActivity[];
+	/**
+	 * 回合时间线（思考/工具/正文按发生顺序）。存在时取代 thinking+activities+text
+	 * 的三分区渲染；历史重放/旧消息无此字段，走 segmentsFromLegacy 兜底。
+	 * 与 activities 同样是客户端态，不持久化。
+	 */
+	segments?: TurnSegment[];
 }
 
 export const TOOL_LABELS: Record<string, string> = {
@@ -250,15 +257,77 @@ export function RichContent({ text, skin }: { text: string; skin?: SkinProp | nu
 	);
 }
 
-/** 模型思维链：折叠呈现（模型原始输出，与正文明确区隔） */
+/**
+ * 模型思维链：**默认折叠**，摘要只给「思考中…／已思考 · 12K tokens」。
+ *
+ * 思考是过程不是成品——展开态会把正文挤到屏外，最终态该干净。
+ * 生成中也不自动展开（旧行为 live=true 强制 open）：想看的人点开，
+ * 折叠态的 token 数已经说明它在动。defaultOpen 只留给中断残稿
+ * （正文未流出时思维链是唯一线索）。
+ */
 export function ThinkingBlock({ text, live, defaultOpen }: { text: string; live?: boolean; defaultOpen?: boolean }) {
+	const tokens = formatTokenCount(estimateTokens(text));
 	return (
-		<details className="thinking" open={live || defaultOpen ? true : undefined}>
-			<summary className={live ? "pulse" : undefined}>思维链{live ? "…" : ""}</summary>
+		<details className="thinking" open={defaultOpen ? true : undefined}>
+			<summary className={live ? "pulse" : undefined}>
+				<span className="thinking-label">{live ? "思考中" : "已思考"}</span>
+				{text.trim() && <span className="thinking-count">{tokens} tokens</span>}
+			</summary>
 			<div className="thinking-body">
 				<Paragraphs text={text} />
 			</div>
 		</details>
+	);
+}
+
+/**
+ * 一段工具步骤（时间线内联）：连续调用聚成一组，默认折叠成一行摘要。
+ * 与 ActivityBar 的差别是它按发生位置**内联**在思考与正文之间，
+ * 而不是整轮收尾时挂在末端。
+ */
+export function ToolSegment({ activities, live }: { activities: WireActivity[]; live?: boolean }) {
+	const calls = activities.filter((a) => a.kind === "tool_start");
+	const names = [...new Set(calls.map((a) => toolLabel(a.name)))];
+	const summary = names.length === 0 ? "过程" : names.length <= 3 ? names.join("、") : `${names.slice(0, 3).join("、")} 等 ${names.length} 项`;
+	return (
+		<details className="turn-activity turn-activity-inline">
+			<summary className={live ? "pulse" : undefined}>
+				{summary}
+				{calls.length > 1 && ` · ${calls.length} 步`}
+			</summary>
+			<ul>
+				{activities.map((a, i) => (
+					<ActivityItem key={i} a={a} />
+				))}
+			</ul>
+		</details>
+	);
+}
+
+/**
+ * 回合时间线渲染：思考 / 工具 / 正文按**发生顺序**从上到下依次排列。
+ *
+ * 这是本组件与旧结构的根本差别——旧版是三个固定分区各自累加（思考恒在顶、
+ * 正文恒在底），时序信息在拼接时就丢了。live=true 时末段加光标。
+ */
+export function TurnTimeline({
+	segments,
+	skin,
+	live,
+}: {
+	segments: TurnSegment[];
+	skin?: SkinProp | null;
+	live?: boolean;
+}) {
+	return (
+		<>
+			{segments.map((seg, i) => {
+				const isLast = i === segments.length - 1;
+				if (seg.kind === "thinking") return <ThinkingBlock key={i} text={seg.text} live={live && isLast} />;
+				if (seg.kind === "tool") return <ToolSegment key={i} activities={seg.activities} live={live && isLast} />;
+				return <RichContent key={i} text={seg.text} skin={skin} />;
+			})}
+		</>
 	);
 }
 
@@ -615,6 +684,11 @@ export function Bubble({
 	const { body, attachments } = isUser ? splitAttachments(msg.text) : { body: msg.text, attachments: [] };
 	const name = msg.name || fallbackName;
 	const editing = !!edit;
+	/**
+	 * 回合时间线：agent 回复才有（用户消息无过程），编辑态退回纯文本框。
+	 * 有多于一段时才按时间线渲染——单段正文走旧路径可保留整楼界面判定。
+	 */
+	const timeline = !isUser && !editing && msg.segments && msg.segments.length > 1 ? msg.segments : null;
 	// 整楼界面：皮肤应用后整条消息即界面（spec §4 落位 1）
 	const skinnedBody = !isUser && skin && skin.rules.length > 0 ? applyCardSkin(body, skin.rules, skin) : body;
 	const stage = !isUser && !editing && isFullInterface(skinnedBody);
@@ -636,7 +710,10 @@ export function Bubble({
 					{floor !== undefined && <span className="floor">#{floor}</span>}
 				</div>
 			)}
-			{msg.thinking && !editing && <ThinkingBlock text={msg.thinking} defaultOpen={msg.unfinished === true} />}
+			{/* 有时间线时思考内联在时间线里（按发生顺序）；旧消息才走顶部固定块 */}
+			{!timeline && msg.thinking && !editing && (
+				<ThinkingBlock text={msg.thinking} defaultOpen={msg.unfinished === true} />
+			)}
 			{editing ? (
 				<div className="msg-edit-box">
 					<textarea
@@ -669,7 +746,13 @@ export function Bubble({
 				</div>
 			) : (
 				<>
-					{body && (isUser ? <Paragraphs text={body} /> : <RichContent text={body} skin={skin} />)}
+					{/* 时间线态：思考/工具/正文按发生顺序依次上屏（codex 式）。
+					    附件仍取自正文尾行，故正文用时间线渲染、附件另挂。 */}
+					{timeline ? (
+						<TurnTimeline segments={timeline} skin={skin} />
+					) : (
+						body && (isUser ? <Paragraphs text={body} /> : <RichContent text={body} skin={skin} />)
+					)}
 					{attachments.length > 0 && (
 						<div className="msg-attach">
 							{attachments.map((a) =>
@@ -686,7 +769,8 @@ export function Bubble({
 							)}
 						</div>
 					)}
-					{msg.activities && msg.activities.length > 0 && <ActivityBar activities={msg.activities} />}
+					{/* 时间线态的工具步骤已内联在各自发生位置，不再末端重挂一份 */}
+					{!timeline && msg.activities && msg.activities.length > 0 && <ActivityBar activities={msg.activities} />}
 					{(onReroll || onEdit || onRewind || onDelete || onCopy || onStore || onTts || greetingSwitch || swipe) && (
 						<div className="msg-actions">
 							{/* 开场白快速切换：不进详情页 */}

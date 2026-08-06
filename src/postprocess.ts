@@ -48,10 +48,26 @@ const STRIP_NAME_RE = /^(?:haurki|haurki准则|jailbreak|system_?prompt|oai_?sys
 const extraFold = new Set<string>();
 /** 运行时额外 panel（小写） */
 const extraPanel = new Set<string>();
+/**
+ * 「只在送模历史整块剥、显示层照常」的标签（小写）。
+ *
+ * 预设格式栈（w2g/catsay/UpdateVariable…）是**用户要看的产出**，
+ * 但留在历史里会成为往拍模仿源。两个需求方向相反，故与 extraFold 分开：
+ * extraFold 影响显示（折进思维链），本 Set 只影响 cleanAssistantText。
+ * 曾经混用一个 Set，导致模型写出的咪咪点评被显示层连内容删掉（8/05 实锤）。
+ *
+ * 内置基线 + 运行时追加：内置项不随 resetDisplayTagExtras 清空——
+ * 扩展与 server 各持一份模块实例（jiti 二象性），靠注册会漏在其中一侧。
+ */
+const HISTORY_STRIP_BUILTIN = ["w2g", "catsay", "updatevariable", "jsonpatch", "analysis", "draftnotes", "wfeeling"];
+const historyOnlyStrip = new Set<string>(HISTORY_STRIP_BUILTIN);
 
 export function resetDisplayTagExtras(): void {
 	extraFold.clear();
 	extraPanel.clear();
+	// 内置格式栈保底，只清运行时追加项
+	historyOnlyStrip.clear();
+	for (const t of HISTORY_STRIP_BUILTIN) historyOnlyStrip.add(t);
 }
 
 export function addFoldTags(tags: Iterable<string>): void {
@@ -59,6 +75,21 @@ export function addFoldTags(tags: Iterable<string>): void {
 		const n = normalizeTagName(t);
 		if (n) extraFold.add(n);
 	}
+}
+
+/** 注册「历史剥、显示留」标签——不进 extraFold，不影响 classifyTag 的显示判定 */
+export function addHistoryStripTags(tags: Iterable<string>): void {
+	for (const t of tags) {
+		const n = normalizeTagName(t);
+		if (n) historyOnlyStrip.add(n);
+	}
+}
+
+/** 该标签是否「只在历史剥」 */
+export function isHistoryStripTag(tag: string): boolean {
+	const raw = tag.trim();
+	const norm = normalizeTagName(raw);
+	return historyOnlyStrip.has(norm) || historyOnlyStrip.has(raw.toLowerCase());
 }
 
 export function addPanelTags(tags: Iterable<string>): void {
@@ -204,7 +235,7 @@ function tidyWhitespace(text: string): string {
  */
 function applyPolicies(
 	text: string,
-	opts: { keepPanel: boolean; collectFold: boolean },
+	opts: { keepPanel: boolean; collectFold: boolean; stripHistoryOnly?: boolean },
 ): { text: string; foldParts: string[] } {
 	const foldParts: string[] = [];
 	let t = text;
@@ -219,7 +250,8 @@ function applyPolicies(
 		let changed = false;
 		for (const b of blocks) {
 			if (b.start > cursor) out += t.slice(cursor, b.start);
-			const policy = b.policy;
+			// 「历史剥、显示留」：只在历史路径整块扔，显示路径按原策略走
+			const policy = opts.stripHistoryOnly && isHistoryStripTag(b.tag) ? "strip" : b.policy;
 			if (policy === "fold") {
 				const body = b.body.trim();
 				if (opts.collectFold && body) foldParts.push(body);
@@ -243,9 +275,9 @@ function applyPolicies(
 	return { text: t, foldParts };
 }
 
-/** 历史送模：fold/panel/strip 整块扔；unwrap 拆包留内容 */
+/** 历史送模：fold/panel/strip 整块扔；unwrap 拆包留内容；格式栈标签（catsay 等）另行整块剥 */
 export function cleanAssistantText(text: string): string {
-	let t = applyPolicies(text, { keepPanel: false, collectFold: false }).text;
+	let t = applyPolicies(text, { keepPanel: false, collectFold: false, stripHistoryOnly: true }).text;
 	// HTML 注释（导演旁注）
 	t = t.replace(/<!--[\s\S]*?-->/g, "");
 	return tidyWhitespace(t);
@@ -355,9 +387,10 @@ function protectSkinDivs(text: string): { text: string; stash: string[] } {
 /**
  * 上屏正文唯一入口（wire narrative/greeting/import）：
  * 1) **先** apply 卡显示正则（标记仍在）
- * 2) **整页** HTML 载荷 → 原样交出（前端 HtmlFrame）
- * 3) 皮肤 div 与叙事混排 → div 占位保护后照常过滤（thinking/注释不得因皮肤漏网），再还原
- * 4) 其余 displayAssistantText（fold/panel/unwrap）
+ * 2) **纯**整页 HTML 载荷（前后无叙事）→ 原样交出（前端 HtmlFrame）
+ * 3) 整页 HTML 与叙事混排 → HTML 段占位保护后照常过滤，再还原
+ * 4) 皮肤 div 与叙事混排 → div 占位保护后照常过滤（thinking/注释不得因皮肤漏网），再还原
+ * 5) 其余 displayAssistantText（fold/panel/unwrap）
  */
 export function prepareDisplayText(text: string, skin?: DisplaySkin | null): string {
 	if (!text) return "";
@@ -365,8 +398,20 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 	if (skin?.rules?.length) {
 		t = applyCardSkin(t, skin.rules, { charName: skin.charName, userName: skin.userName });
 	}
-	if (isFullPageHtmlPayload(t)) {
+	// 整段就是界面（前后无叙事）：原样交出，不拆
+	if (isFullPageHtmlPayload(t) && isBareFullPagePayload(t)) {
 		return t;
+	}
+	// 整页 HTML 与叙事混排（卡状态栏占位替换成 ```html 整页 + 正文 + catsay 尾巴）：
+	// 旧逻辑在此整段 return，导致 <catsay> 等标签的 unwrap 从未执行——
+	// 「状态栏出现」反而成了「catsay 标签暴露」的原因（8/05 实锤）。故占位保护后照常过滤。
+	if (isFullPageHtmlPayload(t)) {
+		const { text: protectedText, stash } = protectFullPageBlocks(t);
+		let cleaned = displayAssistantText(protectedText);
+		for (let i = 0; i < stash.length; i++) {
+			cleaned = cleaned.split(skinDivToken(i)).join(stash[i]);
+		}
+		return cleaned;
 	}
 	if (/<div\b[^>]*\bstyle\s*=/i.test(t) && /<\/div>/i.test(t)) {
 		const { text: protectedText, stash } = protectSkinDivs(t);
@@ -377,6 +422,43 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 		return cleaned;
 	}
 	return displayAssistantText(t);
+}
+
+/** 整段（trim 后）恰好就是整页 HTML / 围栏整页，前后无叙事——才允许跳过全部策略 */
+function isBareFullPagePayload(text: string): boolean {
+	const t = text.trim();
+	const head = t.slice(0, 80).toLowerCase();
+	// 裸整页：doctype/html 开头且 </html> 收尾
+	if ((head.startsWith("<!doctype html") || head.startsWith("<html")) && /<\/html\s*>\s*$/i.test(t)) return true;
+	// 围栏整页：``` 开头 ``` 收尾，且中间只有一份文档
+	if (/^```/.test(t) && /```$/.test(t)) {
+		const fences = t.match(/^```/gm);
+		if (fences && fences.length === 2) return true;
+	}
+	return false;
+}
+
+/**
+ * 把「围栏整页 HTML」块换成占位符暂存，避免被标签策略撕碎；过滤后按占位符还原。
+ * 与 protectSkinDivs 同机制，保护对象是 ```html…``` / doctype 整页段。
+ */
+function protectFullPageBlocks(text: string): { text: string; stash: string[] } {
+	const stash: string[] = [];
+	let out = text;
+	// 围栏块（含 doctype/html 的）整段占位
+	out = out.replace(/```[^\n`]*\r?\n[\s\S]*?\r?\n```/g, (m) => {
+		if (!/<!doctype\s+html|<html[\s>]/i.test(m)) return m;
+		const token = skinDivToken(stash.length);
+		stash.push(m);
+		return token;
+	});
+	// 裸整页段（无围栏）：<!doctype …</html>
+	out = out.replace(/<!doctype\s+html[\s\S]*?<\/html\s*>/gi, (m) => {
+		const token = skinDivToken(stash.length);
+		stash.push(m);
+		return token;
+	});
+	return { text: out, stash };
 }
 
 /**

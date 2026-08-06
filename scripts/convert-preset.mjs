@@ -1,4 +1,4 @@
-// ST 预设转换�?CLI：node scripts/convert-preset.mjs <ST预设.json> [输出=liyuan-preset.json]
+// ST 预设转换�?CLI：node scripts/convert-preset.mjs <ST预设.json> [输出=liyuan-preset.json]
 // 输出：我们自己的 liyuan-preset.json + 结构化分诊报告（只列块名/去向/长度，内容不外显——内容中立协议）
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -21,7 +21,7 @@ const { preset, report } = convertStPreset(raw, presetName);
 
 writeFileSync(outputPath, JSON.stringify(preset, null, "\t"), "utf8");
 
-console.log(`\n预设转换报告�?{presetName}`);
+console.log(`\n预设转换报告�?{presetName}`);
 console.log("─".repeat(72));
 for (const r of report) {
 	const chars = r.contentChars > 0 ? `${r.contentChars} 字符` : "";
@@ -30,9 +30,9 @@ for (const r of report) {
 console.log("─".repeat(72));
 const count = (a) => report.filter((r) => r.action === a).length;
 console.log(
-	`system 区块 ${count("system")} · 末端区块 ${count("postHistory")} · marker �?${count("marker（槽位，弃）")} · 禁用保留 ${count("禁用（保留可开启）")} · 缺失 ${count("缺失定义")}`,
+	`system 区块 ${count("system")} · 末端区块 ${count("postHistory")} · marker �?${count("marker（槽位，弃）")} · 禁用保留 ${count("禁用（保留可开启）")} · 缺失 ${count("缺失定义")}`,
 );
-console.log(`采样参数�?{JSON.stringify(preset.samplers)}`);
-console.log(`已写�?${outputPath}`);
-console.log("\n提示：在 liyuan.config.json �?\"preset\": \"liyuan-preset.json\" 启用；不需要的块把 enabled 改为 false�?);
-console.log("分诊建议：机制补偿类块（状态栏指令/防复�?CoT 模板）建议禁用——其意图已由场记/审计/思考通道实现�?);
+console.log(`采样参数�?{JSON.stringify(preset.samplers)}`);
+console.log(`已写�?${outputPath}`);
+console.log("\n提示：在 liyuan.config.json �?\"preset\": \"liyuan-preset.json\" 启用；不需要的块把 enabled 改为 false�?);
+console.log("分诊建议：机制补偿类块（状态栏指令/防复�?CoT 模板）建议禁用——其意图已由场记/审计/思考通道实现�?);

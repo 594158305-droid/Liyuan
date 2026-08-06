@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { SessionManager } from "@liyuan/agent-runtime";
-import { fauxAssistantMessage, fauxToolCall } from "@liyuan/ai/providers/faux";
+import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@liyuan/ai/providers/faux";
 import { registerFauxProvider, streamSimple } from "@liyuan/ai/compat";
 
 import { StageEngine, type StageStreamFn } from "../src/stage/engine.ts";
@@ -498,10 +498,14 @@ test("引擎循环：draft_write 工具交稿 → 收稿即验回喂 → 收笔�
 		]);
 		const activities: string[] = [];
 		let streamed = "";
+		const draftFlags: boolean[] = [];
 		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {
 			onActivity: (d) => activities.push(d),
-			onDelta: (kind, d) => {
-				if (kind === "text") streamed += d;
+			onDelta: (kind, d, draft) => {
+				if (kind === "text") {
+					streamed += d;
+					if (draft) draftFlags.push(true);
+				}
 			},
 		});
 		await engine.performTurn("此事你应是不应？");
@@ -509,8 +513,71 @@ test("引擎循环：draft_write 工具交稿 → 收稿即验回喂 → 收笔�
 		const { history } = rebuildHistory(sm.getBranch() as BranchEntryLike[]);
 		assert.equal(history[history.length - 1].text, "她点头应下此事。", "定稿 = 工具提交的稿");
 		assert.equal(streamed, "她点头应下此事。", "D1：draft_write 的 content 走 text 通道上屏");
+		assert.ok(draftFlags.length > 0, "draft_write 转发带 draft 标记（前端替换语义）");
 		assert.ok(JSON.stringify(ctxs[1].messages).includes("已收稿"), "收稿+验收报告以 toolResult 回喂");
 		assert.ok(activities.some((a) => a.includes("交稿")), "过程条报告交稿");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎循环：格式尾巴（状态栏占位+catsay）走 text 通道 → 并入定稿正文与持久化时间线", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([
+			// 8/05 实锤形态：draft_write 只交正文，思考里宣告还要写状态栏与点评
+			fauxAssistantMessage(
+				[
+					fauxThinking("The user decides. Now the status bar and cat commentary."),
+					fauxToolCall("draft_write", { content: "暮色四合，两人到了溪桥。" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			// 尾巴轮：状态栏占位 + 咪咪点评（预设格式栈，不走 draft_write）
+			fauxAssistantMessage(
+				"<StatusPlaceHolderImpl/>\n\n<catsay>\n<details><summary>😼咪咪点评</summary>\n选天赋磨叽半天喵呜。\n</details>\n</catsay>",
+			),
+			fauxScribeEmpty(),
+		]);
+		const activities: string[] = [];
+		let streamed = "";
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {
+			onActivity: (d) => activities.push(d),
+			onDelta: (kind, d) => {
+				if (kind === "text") streamed += d;
+			},
+		});
+		await engine.performTurn("往溪桥去。");
+
+		const { history } = rebuildHistory(sm.getBranch() as BranchEntryLike[]);
+		// 树上正文 = 用户面定稿：正文 + 状态栏占位 + 咪咪点评都在
+		const branch = sm.getBranch() as Array<{
+			type: string;
+			message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
+		}>;
+		const lastMsg = [...branch].reverse().find((e) => e.type === "message" && e.message?.role === "assistant");
+		const treeText = (lastMsg?.message?.content ?? [])
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("");
+		assert.ok(treeText.includes("暮色四合"), "正文在树上");
+		assert.ok(treeText.includes("StatusPlaceHolderImpl"), "状态栏占位并入定稿——不再被过滤");
+		assert.ok(treeText.includes("咪咪点评"), "咪咪点评并入定稿——不再被过滤");
+		assert.ok(streamed.includes("咪咪点评"), "尾巴也流式上屏过");
+		// 模型面历史仍整块剥 catsay（防往拍模仿）——「历史剥、树留」双语义各就位
+		assert.ok(history[history.length - 1].text.includes("暮色四合"), "历史含正文");
+		assert.ok(!history[history.length - 1].text.includes("咪咪点评"), "历史剥掉格式栈（往拍模仿源）");
+
+		// 时间线随 details 持久化：resync/刷新后尾巴仍在
+		const entry = branch.filter((e) => e.type === "message" && e.message?.content).pop();
+		const timeline = entry?.message?.details?.rpTimeline as Array<{ kind: string; text?: string }> | undefined;
+		assert.ok(Array.isArray(timeline), "rpTimeline 落树持久化");
+		const tlText = (timeline ?? []).filter((s) => s.kind === "text").map((s) => s.text ?? "").join("");
+		assert.ok(tlText.includes("咪咪点评"), "持久化时间线的正文段含尾巴（吸收不重复）");
+		assert.ok((timeline ?? []).filter((s) => s.kind === "text").length <= 1, "尾巴段被吸收，不重复上屏");
+		assert.ok(activities.some((a) => a.includes("交稿")), "过程条照常");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

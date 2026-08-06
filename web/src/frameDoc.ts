@@ -1,6 +1,6 @@
 /** srcdoc 组装(纯函数,供 HtmlFrame 与测试):seamless 模式样式主权让位给卡(spec §4) */
 
-import { IFRAME_TAVERN_BRIDGE_SNIPPET } from "./tavernShim.ts";
+import { IFRAME_TAVERN_BRIDGE_SNIPPET, IFRAME_TAVERN_GLOBALS_SNIPPET } from "./tavernShim.ts";
 
 /** 程序卡默认高度：约 78vh，夹在 480–2400（fixed 全屏 UI 不能靠内容盒量高） */
 export function programViewportHeight(win?: { innerHeight: number } | null): number {
@@ -38,7 +38,9 @@ export function looksLikeProgramApp(html: string, scripts: boolean): boolean {
 	if (!scripts || !html) return false;
 	if (!/<script[\s>]/i.test(html)) return false;
 	if (hasRootViewportCss(html)) return true;
-	if (/position\s*:\s*fixed/i.test(html) && /100[dsl]?vh/i.test(html)) return true;
+	// fixed 铺满判定：要求 fixed 与 100vh 在同一样式块内（真全屏 UI），
+	// 而非文档任意两处各出现一次（道渊欢迎卡有 fixed 装饰 + 某处 100vh，但整体是内容流）
+	if (/\bposition\s*:\s*fixed[^}]*100[dsl]?vh|\b100[dsl]?vh[^}]*position\s*:\s*fixed/i.test(html)) return true;
 	return false;
 }
 
@@ -288,8 +290,8 @@ export function buildSrcDoc(html: string, scripts: boolean, seamless: boolean): 
 		? `default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: http: data: blob:; style-src 'unsafe-inline' https: http: data:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; connect-src https: http: ws: wss: data: blob:; worker-src blob: data:; frame-src 'none'`
 		: `default-src 'none'; style-src 'unsafe-inline' https: http: data:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:`;
 	const seamlessCss = isFull ? (takeover ? TAKEOVER_DOC_CSS : SEAMLESS_DOC_CSS) : SEAMLESS_FRAGMENT_CSS;
-	// 脚本帧：垫片桥必须先于卡脚本，保证 eventOn / TavernHelper 在初始化时已存在
-	const bridge = scripts ? IFRAME_TAVERN_BRIDGE_SNIPPET : "";
+	// 脚本帧：垫片桥必须先于卡脚本，保证 eventOn / TavernHelper / jQuery / 变量系统在初始化时已存在
+	const bridge = scripts ? IFRAME_TAVERN_BRIDGE_SNIPPET + IFRAME_TAVERN_GLOBALS_SNIPPET : "";
 	const head =
 		`<meta charset="utf-8">` +
 		`<meta http-equiv="Content-Security-Policy" content="${csp}">` +

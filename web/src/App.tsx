@@ -53,6 +53,7 @@ import {
 	IconPreset,
 	IconPuzzle,
 	IconRefresh,
+	IconRoster,
 	IconSend,
 	IconSessions,
 	IconSettings,
@@ -69,15 +70,30 @@ import {
 	MsgAvatar,
 	RichContent,
 	ThinkingBlock,
+	TurnTimeline,
 	toolLabel,
 	type ChatMsg,
 	type SkinProp,
 } from "./components/Messages.tsx";
+import {
+	activitiesOf,
+	appendActivity,
+	appendDelta,
+	concatSegments,
+	dropTrailingText,
+	pruneEmpty,
+	segmentsFromLegacy,
+	textOf,
+	thinkingOf,
+	trailingText,
+	type TurnSegment,
+} from "./timeline.ts";
 import type { DisplayRule } from "../../src/cardfront.ts";
 import { PanelDock } from "./components/PanelDock.tsx";
 import { PersonaPanel } from "./components/PersonaPanel.tsx";
 import { PowersPanel } from "./components/PowersPanel.tsx";
 import { PresetPanel } from "./components/PresetPanel.tsx";
+import { RosterPanel } from "./components/RosterPanel.tsx";
 import { SessionsPanel } from "./components/SessionsPanel.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { SessionStatsBar, StatusStrip } from "./components/StatusStrip.tsx";
@@ -134,6 +150,7 @@ type PanelId =
 	| "lorebook"
 	| "codex"
 	| "persona"
+	| "roster"
 	| "uploads"
 	| "assistant";
 
@@ -167,6 +184,7 @@ const PANEL_LABEL: Record<PanelId, string> = {
 	lorebook: "世界书",
 	codex: "知识库",
 	persona: "用户角色",
+	roster: "登场名录",
 	uploads: "上传区",
 	assistant: "助手",
 };
@@ -183,14 +201,15 @@ const PANEL_ICON: Record<PanelId, (p: { size?: number }) => React.JSX.Element> =
 	lorebook: IconLorebook,
 	codex: IconCodex,
 	persona: IconPersona,
+	roster: IconRoster,
 	uploads: IconUploads,
 	assistant: IconAssistant,
 };
 
 type CenterMenu = "settings" | "panels" | null;
 
-/** 左栏：顶栏左组 + 底栏会话/世界线 + agent 面板 */
-const LEFT_OPENABLE: PanelId[] = [...LEFT_PANELS, "sessions", "worldline"];
+/** 左栏：顶栏左组 + 底栏会话/世界线/名录 + agent 面板 */
+const LEFT_OPENABLE: PanelId[] = [...LEFT_PANELS, "sessions", "worldline", "roster"];
 
 function loadPanelPrefs(): { left: PanelId | null; right: PanelId | null } {
 	try {
@@ -214,6 +233,8 @@ export default function App() {
 	const [messages, setMessages] = useState<ChatMsg[]>([]);
 	const [streamText, setStreamText] = useState("");
 	const [streamThinking, setStreamThinking] = useState("");
+	/** 本轮时间线的实时渲染态（与 turnSegsRef 同内容） */
+	const [liveSegs, setLiveSegs] = useState<TurnSegment[]>([]);
 	const [thinkingLive, setThinkingLive] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [toolNote, setToolNote] = useState<string | null>(null);
@@ -350,6 +371,11 @@ export default function App() {
 	const streamRef = useRef("");
 	const streamThinkingRef = useRef("");
 	const turnActsRef = useRef<WireActivity[]>([]);
+	/**
+	 * 本轮时间线（思考/工具/正文按发生顺序）：取代「三条并行通道各占固定分区」的旧结构。
+	 * ref 供定稿时附着到消息，state 供生成中的实时渲染。
+	 */
+	const turnSegsRef = useRef<TurnSegment[]>([]);
 	const sessionIdRef = useRef("");
 	/** 用户已按停止：忽略迟到 delta，避免 UI 解锁后还在刷字 */
 	const abortingRef = useRef(false);
@@ -451,6 +477,23 @@ export default function App() {
 		setStreamThinking("");
 	};
 
+	/** 时间线写入的唯一入口（ref + state 同步，避免两者漂移） */
+	const setSegs = (next: TurnSegment[]) => {
+		turnSegsRef.current = next;
+		setLiveSegs(next);
+	};
+	/** 流式增量进时间线：稿件流（draft=true，reset=本次调用首块）替换末尾正文段，其余同类并入末段 */
+	const pushSegDelta = (kind: "text" | "thinking", delta: string, draft?: boolean, reset?: boolean) => {
+		setSegs(appendDelta(turnSegsRef.current, kind, delta, draft, reset));
+	};
+	/** 丢弃末尾中间态正文段（stream:clear）：思考段与工具段是过程记录，保留 */
+	const dropSegDraft = () => {
+		setSegs(dropTrailingText(turnSegsRef.current));
+	};
+	const resetSegs = () => {
+		setSegs([]);
+	};
+
 	const clearAsstStream = () => {
 		asstStreamRef.current = "";
 		asstStreamThinkingRef.current = "";
@@ -462,14 +505,18 @@ export default function App() {
 	const pushAct = (a: WireActivity) => {
 		turnActsRef.current = [...turnActsRef.current, a];
 		setLiveActs(turnActsRef.current);
+		setSegs(appendActivity(turnSegsRef.current, a));
 	};
 	const resetActs = () => {
 		turnActsRef.current = [];
 		setLiveActs([]);
 	};
-	/** 中间旁白留档：模型在调工具前吐出的计划文字被服务端从叙事流过滤时，客户端把它收进过程清单 */
+	/**
+	 * 中间旁白留档：模型在调工具前吐出的计划文字被服务端从叙事流过滤时，客户端把它收进过程清单。
+	 * 时间线侧只取**末尾**中间态正文（前面轮次已定稿的正文不算旁白）。
+	 */
 	const captureStreamNote = () => {
-		const t = streamRef.current.trim();
+		const t = (trailingText(turnSegsRef.current) || streamRef.current).trim();
 		if (!t) return;
 		turnActsRef.current = [
 			...turnActsRef.current,
@@ -499,6 +546,13 @@ export default function App() {
 			const text = [prev.text, incoming.text].map((s) => (s ?? "").trim()).filter(Boolean).join("\n\n");
 			const thinking = [prev.thinking, incoming.thinking].map((s) => (s ?? "").trim()).filter(Boolean).join("\n\n");
 			const activities = [...(prev.activities ?? []), ...(incoming.activities ?? [])];
+			// 时间线首尾相接（缺席方由旧字段合成），整体时序 = 先前轮在前
+			const segments = pruneEmpty(
+				concatSegments(
+					prev.segments ?? segmentsFromLegacy(prev),
+					incoming.segments ?? segmentsFromLegacy(incoming),
+				),
+			);
 			const unfinished = prev.unfinished === true || incoming.unfinished === true;
 			const merged: ChatMsg = {
 				...prev,
@@ -506,6 +560,7 @@ export default function App() {
 				text,
 				...(thinking ? { thinking } : {}),
 				...(activities.length ? { activities } : {}),
+				...(segments.length ? { segments } : {}),
 				...(unfinished ? { unfinished: true } : {}),
 			};
 			if (!unfinished) delete merged.unfinished;
@@ -566,7 +621,13 @@ export default function App() {
 				case "hello": {
 					setCharName(frame.charName);
 					setUserName(frame.userName);
-					setMessages(frame.messages);
+					// wire timeline → 本地 segments：持久化的时间线在刷新后仍按时序渲染
+					setMessages(
+						frame.messages.map((m) => {
+							if (!m.timeline || m.timeline.length === 0) return m;
+							return { ...m, segments: m.timeline as unknown as TurnSegment[] };
+						}),
+					);
 					setMsgEdit(null); // 会话对齐后关闭内联编辑
 					setWorldState(frame.state);
 					setStats(frame.stats);
@@ -589,6 +650,7 @@ export default function App() {
 						setLeftPanel(null);
 					}
 					clearStream();
+					resetSegs();
 					// 切到别的会话：清空会话内数据（同会话的命令后重放则保留）
 					if (sessionIdRef.current !== frame.sessionId) {
 						sessionIdRef.current = frame.sessionId;
@@ -615,8 +677,20 @@ export default function App() {
 						setToolNote(null);
 						// 过程条：把本轮积累的步骤（工具+旁白）收进定稿消息的单个折叠（不持久化，刷新即失）
 						const acts = turnActsRef.current;
+						// 时间线：**优先 wire 持久化的**（定稿 = finalText，尾巴已并入、多稿已替换、
+						// 皮肤已应用——权威版）；实时构建的只做兜底（旧服务端无 rpTimeline 时）。
+						const segs = frame.message.timeline?.length
+							? (frame.message.timeline as unknown as TurnSegment[])
+							: turnSegsRef.current.length > 0
+								? turnSegsRef.current
+								: undefined;
 						resetActs();
-						const incoming: ChatMsg = acts.length ? { ...frame.message, activities: acts } : frame.message;
+						resetSegs();
+						const incoming: ChatMsg = {
+							...frame.message,
+							...(acts.length ? { activities: acts } : {}),
+							...(segs?.length ? { segments: segs } : {}),
+						};
 						setMessages((ms) => upsertTurnReply(ms, incoming));
 					} else if (frame.message.channel === "greeting") {
 						// 未开聊时切换开场白：替换已有开场白气泡，禁止往下叠楼
@@ -641,11 +715,13 @@ export default function App() {
 						streamThinkingRef.current += frame.delta;
 						setStreamThinking(streamThinkingRef.current);
 					}
+					pushSegDelta(frame.kind, frame.delta, frame.draft, frame.reset);
 					break;
 				case "stream":
 					// 中间 tool 轮被 server 过滤：计划旁白留档进过程清单，再清流式半成品
 					if (frame.state === "clear") {
 						captureStreamNote();
+						dropSegDraft();
 						clearStream();
 						setThinkingLive(false);
 					}
@@ -656,6 +732,7 @@ export default function App() {
 						abortingRef.current = false;
 						setBusy(true);
 						resetActs();
+						resetSegs();
 					} else {
 						// 服务端 abort 会立刻广播 end，但 provider 流可能仍在吐 delta。
 						// 若用户已按停止：保持 abortingRef，继续丢弃迟到 delta，直到下一次 start。
@@ -670,8 +747,10 @@ export default function App() {
 						const text = streamRef.current;
 						const thinking = streamThinkingRef.current.trim();
 						const acts = turnActsRef.current;
+						const segs = turnSegsRef.current;
 						if (text.trim() || thinking || wasAborting) {
 							resetActs();
+							resetSegs();
 							clearStream();
 							if (text.trim() || thinking) {
 								const leftover: ChatMsg = {
@@ -680,6 +759,7 @@ export default function App() {
 									text: text.trim() ? text : "（正文未流出，见思维链）",
 									...(thinking ? { thinking } : {}),
 									...(acts.length ? { activities: acts } : {}),
+									...(segs.length ? { segments: segs } : {}),
 									...(wasAborting ? { unfinished: true } : {}),
 								};
 								setMessages((ms) => upsertTurnReply(ms, leftover));
@@ -688,6 +768,7 @@ export default function App() {
 							}
 						} else {
 							clearStream();
+							resetSegs();
 							setLiveActs([]);
 						}
 					}
@@ -1007,7 +1088,7 @@ export default function App() {
 	useEffect(() => {
 		const el = listRef.current;
 		if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
-	}, [messages, streamText, streamThinking, thinkingLive, toolNote, liveActs]);
+	}, [messages, streamText, streamThinking, thinkingLive, toolNote, liveActs, liveSegs]);
 
 	const onScroll = () => {
 		const el = listRef.current;
@@ -1378,6 +1459,8 @@ export default function App() {
 				return <PersonaPanel toast={pushToast} />;
 			case "codex":
 				return <CodexPanel toast={pushToast} />;
+			case "roster":
+				return <RosterPanel state={worldState} toast={pushToast} />;
 			case "uploads":
 				return (
 					<UploadsPanel
@@ -1592,7 +1675,7 @@ export default function App() {
 					</button>
 					<button
 						type="button"
-						className={`tb-btn ${centerMenu === "panels" || activeAgentName ? "active" : ""}`}
+						className={`tb-btn ${centerMenu === "panels" || activeAgentName || leftPanel === "roster" ? "active" : ""}`}
 						onClick={() => toggleCenter("panels")}
 						aria-label="面板"
 						data-tip="面板"
@@ -1738,6 +1821,11 @@ export default function App() {
 										panels={agentPanels}
 										charName={charName}
 										activeAgent={activeAgentName}
+										rosterActive={leftPanel === "roster"}
+										onOpenRoster={() => {
+											openLeft("roster");
+											setCenterMenu(null);
+										}}
 										onOpen={(name) => {
 											openLeft(agentId(name));
 											setCenterMenu(null);
@@ -1935,25 +2023,24 @@ export default function App() {
 									)}
 								</>
 							)}
-							{/* 整轮生成共用一个实时角色泡：过程步骤实时追加平铺（codex 式），定稿后随消息收进单个折叠 */}
-							{busy && (!turnHasCommittedReply || streamText || streamThinking || toolNote || liveActs.length > 0) && (
+							{/* 整轮生成共用一个实时角色泡：时间线按发生顺序依次上屏（codex 式），定稿后随消息收进折叠 */}
+							{busy && (!turnHasCommittedReply || streamText || streamThinking || toolNote || liveSegs.length > 0) && (
 								<div className="msg msg-char msg-live">
 									<div className="msg-head">
 										<MsgAvatar src={charAvatarUrl} name={charName} kind="char" />
 										<span className="msg-name msg-name-char">{charName}</span>
 										<span className="msg-live-tag">生成中</span>
 									</div>
-									{liveActs.length > 0 && <LiveSteps activities={liveActs} />}
-									{streamThinking && <ThinkingBlock text={streamThinking} live={thinkingLive} />}
-									{streamText && <RichContent text={streamText} skin={cardSkin} />}
+									{liveSegs.length > 0 ? (
+										<TurnTimeline segments={liveSegs} skin={cardSkin} live />
+									) : (
+										<div className="info-line pulse" style={{ margin: "0.4rem 0 0" }}>
+											{thinkingLive ? `${charName} 正在思考…` : `${charName} 工作中…`}
+										</div>
+									)}
 									{toolNote && (
 										<div className="info-line pulse" style={{ margin: "0.4rem 0 0" }}>
 											{toolNote}
-										</div>
-									)}
-									{!streamText && !streamThinking && !toolNote && (
-										<div className="info-line pulse" style={{ margin: "0.4rem 0 0" }}>
-											{thinkingLive ? `${charName} 正在思考…` : `${charName} 工作中…`}
 										</div>
 									)}
 									{(streamText || streamThinking) && <span className="caret" />}
@@ -2073,6 +2160,19 @@ export default function App() {
 								</button>
 								<button
 									type="button"
+									className={`dock-btn ${leftPanel === "roster" ? "active" : ""}`}
+									title="登场名录"
+									aria-label="登场名录"
+									onClick={() => {
+										togglePanel("roster");
+										setComposerTools(false);
+									}}
+								>
+									<IconRoster size={18} />
+									<span className="composer-tool-label">名录</span>
+								</button>
+								<button
+									type="button"
 									className="dock-btn"
 									title="上传图片/文件（也可拖入或粘贴）"
 									aria-label="上传图片或文件"
@@ -2162,22 +2262,28 @@ export default function App() {
 										setBusy(false);
 										setThinkingLive(false);
 										setToolNote(null);
-										if (streamRef.current.trim() || streamThinkingRef.current.trim()) {
-											const text = streamRef.current;
-											const thinking = streamThinkingRef.current.trim();
-											const acts = turnActsRef.current;
-											resetActs();
-											clearStream();
-											// 仅有思维链也要留痕；标 unfinished，resync 时与 session aborted 对齐
-											const leftover: ChatMsg = {
-												channel: "narrative",
-												text: text.trim() ? text : "（正文未流出，见思维链）",
-												...(thinking ? { thinking } : {}),
-												...(acts.length ? { activities: acts } : {}),
-												unfinished: true,
-											};
-											setMessages((ms) => upsertTurnReply(ms, leftover));
-										}
+										// 无条件留痕：刚开拍就停（无正文无思考）也不许消息凭空消失（8/05）。
+										// 正文没有时给占位——有思考引用思考，都没有明示「已停止」。
+										const text = streamRef.current;
+										const thinking = streamThinkingRef.current.trim();
+										const acts = turnActsRef.current;
+										const segs = turnSegsRef.current;
+										resetActs();
+										resetSegs();
+										clearStream();
+										const leftover: ChatMsg = {
+											channel: "narrative",
+											text: text.trim()
+												? text
+												: thinking
+													? "（正文未流出，见思维链）"
+													: "（已停止）",
+											...(thinking ? { thinking } : {}),
+											...(acts.length ? { activities: acts } : {}),
+											...(segs.length ? { segments: segs } : {}),
+											unfinished: true,
+										};
+										setMessages((ms) => upsertTurnReply(ms, leftover));
 										ws.send({ type: "abort" });
 									}}
 									title="停止"

@@ -179,7 +179,7 @@ function formatValidationPath(error) {
     return path || "root";
 }
 function emptyCustomModelsResult(error) {
-    return { models: [], overrides: new Map(), modelOverrides: new Map(), error };
+    return { models: [], overrides: new Map(), modelOverrides: new Map(), replaceProviders: new Set(), error };
 }
 function mergeCompat(baseCompat, overrideCompat) {
     if (!overrideCompat)
@@ -290,12 +290,14 @@ export class ModelRegistry {
     }
     loadModels() {
         // Load custom models and overrides from models.json
-        const { models: customModels, overrides, modelOverrides, error, } = this.modelsJsonPath ? this.loadCustomModels(this.modelsJsonPath) : emptyCustomModelsResult();
+        const { models: customModels, overrides, modelOverrides, replaceProviders, error, } = this.modelsJsonPath ? this.loadCustomModels(this.modelsJsonPath) : emptyCustomModelsResult();
         if (error) {
             this.loadError = error;
             // Keep built-in models even if custom models failed to load
         }
-        const builtInModels = this.loadBuiltInModels(overrides, modelOverrides);
+        // Self-contained channels: baseUrl + own models means a distinct endpoint that merely
+        // reuses a built-in provider's name — drop the built-in catalog for those providers.
+        const builtInModels = this.loadBuiltInModels(overrides, modelOverrides).filter((m) => !replaceProviders.has(m.provider));
         let combined = this.mergeCustomModels(builtInModels, customModels);
         // Let OAuth providers modify their models (e.g., update baseUrl)
         for (const oauthProvider of this.authStorage.getOAuthProviders()) {
@@ -364,12 +366,17 @@ export class ModelRegistry {
             this.validateConfig(config);
             const overrides = new Map();
             const modelOverrides = new Map();
+            /** 自包含通道：baseUrl + 自带 models 并存 → 内置目录整体剔除（见 loadModels 注释） */
+            const replaceProviders = new Set();
             for (const [providerName, providerConfig] of Object.entries(config.providers)) {
                 if (providerConfig.baseUrl || providerConfig.compat) {
                     overrides.set(providerName, {
                         baseUrl: providerConfig.baseUrl,
                         compat: providerConfig.compat,
                     });
+                }
+                if (providerConfig.baseUrl && (providerConfig.models?.length ?? 0) > 0) {
+                    replaceProviders.add(providerName);
                 }
                 this.storeProviderRequestConfig(providerName, providerConfig);
                 if (providerConfig.modelOverrides) {
@@ -379,7 +386,7 @@ export class ModelRegistry {
                     }
                 }
             }
-            return { models: this.parseModels(config), overrides, modelOverrides, error: undefined };
+            return { models: this.parseModels(config), overrides, modelOverrides, replaceProviders, error: undefined };
         }
         catch (error) {
             if (error instanceof SyntaxError) {

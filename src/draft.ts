@@ -440,7 +440,8 @@ export function rulesAreEmpty(r: DraftRules): boolean {
 	);
 }
 
-const TAG_IN_HINT_RE = /<([A-Za-z_][\w.-]*)>/g;
+	// 兼容三种形态：<tag>（成对）、<tag >、<tag/>（自闭合占位符——界面由卡渲染）
+	const TAG_IN_HINT_RE = /<([A-Za-z_][\w.-]*)\s*\/?\s*>/g;
 
 /**
  * 「成文纪律」块判定（四阶段供料，2026-08-02 用户定案）：禁词表、禁八股、比喻原则、
@@ -641,20 +642,19 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 
 	if (rules.wordRange) {
 		const { min, max } = rules.wordRange;
-		// 差值与段均长由代码算给模型——实弹里模型手工估算「这句能省 ~15 字」共 7 次仍两轮超限，
-		// 字数感本就不可靠，报告直接给量化目标（M-B S3）。
-		const paraCount = body.split(/\n\s*\n|\n/).filter((s) => s.trim().length > 0).length || 1;
-		const avgPara = Math.round(bodyChars / paraCount);
+		// 字数由预设 prompt 引导即可，harness 层不再硬拒——双重执法导致模型把思考
+		// 全浪费在"怎么砍到 800 以内"的算术上。只有极端偏差（>50%）才算 violation；
+		// 正常偏差降为 note（报字数不打回，模型自己决定要不要改）。
 		if (bodyChars < min) {
-			violations.push(
-				`正文 ${bodyChars} 字（不含标签模块），低于预设下限 ${min}——需扩写约 ${min - bodyChars} 字` +
-					`（当前 ${paraCount} 段、段均 ${avgPara} 字）。`,
-			);
+			const ratio = (min - bodyChars) / min;
+			const msg = `正文 ${bodyChars} 字（不含标签模块），预设建议下限 ${min}。`;
+			if (ratio > 0.5) violations.push(msg);
+			else notes.push(msg);
 		} else if (bodyChars > max) {
-			violations.push(
-				`正文 ${bodyChars} 字（不含标签模块），超过预设上限 ${max}——需删减约 ${bodyChars - max} 字` +
-					`（当前 ${paraCount} 段、段均 ${avgPara} 字）。`,
-			);
+			const ratio = (bodyChars - max) / max;
+			const msg = `正文 ${bodyChars} 字（不含标签模块），预设建议上限 ${max}。`;
+			if (ratio > 0.5) violations.push(msg);
+			else notes.push(msg);
 		}
 	}
 
@@ -691,7 +691,8 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 		}
 	}
 	if (rules.statusBarTagGroup.length > 0) {
-		const hit = rules.statusBarTagGroup.some((tag) => new RegExp(`<${escapeReg(tag)}[\\s>]`, "i").test(turnText));
+		// [\s/>] 兼容三种形态：<tag>（成对）、<tag >、<tag/>（自闭合占位符——界面由卡渲染）
+		const hit = rules.statusBarTagGroup.some((tag) => new RegExp(`<${escapeReg(tag)}[\\s/>]`, "i").test(turnText));
 		if (!hit) violations.push(`缺状态栏模块（${rules.statusBarTagGroup.map((t) => `<${t}>`).join(" 或 ")}）。`);
 	}
 

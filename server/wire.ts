@@ -45,6 +45,15 @@ export interface WireSwipe {
 	total: number;
 }
 
+/**
+ * 时间线段（与 src/stage/workspace.ts 的 TurnSegment、web/src/timeline.ts 同构）。
+ * 跨边界只走 JSON，故三处各自声明结构而不共享类型。
+ */
+export type WireSegment =
+	| { kind: "thinking"; text: string }
+	| { kind: "text"; text: string; draft?: boolean }
+	| { kind: "tool"; activities: WireActivity[] };
+
 export interface WireMsg {
 	channel: WireChannel;
 	/** 发言者显示名（narrative/greeting 为角色名，user 为用户名） */
@@ -52,6 +61,11 @@ export interface WireMsg {
 	text: string;
 	/** 模型思维链（原始输出，UI 折叠呈现；无则缺省） */
 	thinking?: string;
+	/**
+	 * 回合时间线：思考 / 工具 / 正文按**发生顺序**排列（引擎经 details.rpTimeline 落树）。
+	 * 有此字段时前端按时序依次渲染，取代「思考恒在顶、正文恒在底」的三分区布局。
+	 */
+	timeline?: WireSegment[];
 	/**
 	 * 用户中断导致的未完成稿（stopReason=aborted）。
 	 * 须上屏并进入 hello 重放，以便「停后可见 / 继续写」。
@@ -223,7 +237,8 @@ export type ServerFrame =
 			};
 	  }
 	| { type: "message"; message: WireMsg }
-	| { type: "delta"; kind: "text" | "thinking"; delta: string }
+	/** draft=true：该 text 增量是 draft_write 参数的转发（替换语义——重交原地更新，不叠加）；reset=true：本次调用的首个分片 */
+	| { type: "delta"; kind: "text" | "thinking"; delta: string; draft?: boolean; reset?: boolean }
 	/** 丢弃当前流式半成品（中间 tool 轮被过滤后，避免计划旁白叠进下一轮 / 误落本地气泡） */
 	| { type: "stream"; state: "clear" }
 	| { type: "agent"; state: "start" | "end" }
@@ -486,11 +501,28 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 		const body =
 			display ||
 			(aborted ? "（正文未流出，见思维链）" : "（脚手架已折叠，见思维链）");
+		// 时间线：从 details.rpTimeline 取出持久化的段序列（引擎在定稿时写入）
+		// text 段必须走 prepareDisplayText——与 msg.text 同管线——否则 <catsay> 等
+		// unwrap 标签会以原文暴露在屏上（时间线优先渲染时绕过了 body 的处理结果）。
+		const rpTimeline =
+			msg.details && typeof msg.details === "object" && !Array.isArray(msg.details)
+				? (msg.details as Record<string, unknown>).rpTimeline
+				: undefined;
+		const tlSkin = channel === "narrative" ? skin : null;
+		const timeline =
+			Array.isArray(rpTimeline) && rpTimeline.length > 0
+				? (rpTimeline as WireSegment[]).map((seg) =>
+						seg.kind === "text"
+							? { ...seg, text: prepareDisplayText(seg.text, tlSkin) }
+							: seg,
+					)
+				: undefined;
 		return {
 			channel,
 			name: names.charName,
 			text: body,
 			...(thinking ? { thinking } : {}),
+			...(timeline ? { timeline } : {}),
 			...(aborted ? { unfinished: true } : {}),
 		};
 	}

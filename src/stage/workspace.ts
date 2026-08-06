@@ -38,10 +38,95 @@ export interface TurnWorkspace {
 	/** 最近一次验收是否全绿（谢幕判定用；未验收过 = false） */
 	lastGreen: boolean;
 	checks: number;
+	/**
+	 * 本拍时间线（思考/工具/正文按**发生顺序**）。
+	 *
+	 * 定稿只落最后一稿正文，中间轮的思考与工具轨迹本会丢失——但用户要看的
+	 * 正是「思考→工具→正文→思考」这条链。故在此按序记档，落树时随 details
+	 * 持久化，刷新与 resync 后仍在。
+	 */
+	timeline: TurnSegment[];
+	/**
+	 * 本拍的媒体交付（show_image/audio/video/html、tts，8/06 重接）。
+	 *
+	 * wire 层只把树上的 `role:"toolResult"` 条目翻成媒体帧，而台上引擎落树时
+	 * 剥离工具轨迹——故媒体结果在此收集，谢幕后随正文一起落成 toolResult 条目，
+	 * 让 live 推送与刷新重放走同一条路径。
+	 */
+	mediaDeliveries?: Array<{ toolName: string; details: Record<string, unknown>; text: string }>;
 }
 
+/** 时间线段：与前端 web/src/timeline.ts 的 TurnSegment 同构（跨边界只走 JSON） */
+export type TurnSegment =
+	| { kind: "thinking"; text: string }
+	/** draft=true 标记「这段是工作区稿件」，重交/改稿时原地替换而非叠加 */
+	| { kind: "text"; text: string; draft?: boolean }
+	| { kind: "tool"; activities: Array<{ kind: string; name: string; detail?: string; isError?: boolean }> };
+
 export function createWorkspace(): TurnWorkspace {
-	return { draft: "", writes: 0, edits: 0, patches: [], lastGreen: false, checks: 0 };
+	return { draft: "", writes: 0, edits: 0, patches: [], lastGreen: false, checks: 0, timeline: [] };
+}
+
+/** 时间线追加：同类并入末段（连续工具聚成一组），异类开新段 */
+export function recordSegment(
+	ws: TurnWorkspace,
+	seg:
+		| { kind: "thinking"; text: string }
+		| { kind: "text"; text: string }
+		| { kind: "tool"; activity: { kind: string; name: string; detail?: string; isError?: boolean } },
+): void {
+	const last = ws.timeline[ws.timeline.length - 1];
+	if (seg.kind === "tool") {
+		if (last && last.kind === "tool") last.activities.push(seg.activity);
+		else ws.timeline.push({ kind: "tool", activities: [seg.activity] });
+		return;
+	}
+	if (!seg.text) return;
+	if (last && last.kind === seg.kind) last.text += seg.text;
+	else ws.timeline.push({ kind: seg.kind, text: seg.text });
+}
+
+/**
+ * 定稿时间线：**所有** text 段统一收拢为一个稿段（内容 = finalText），清掉空壳段。
+ *
+ * 落树的正文是 finalText（工作区空时退回直出正文；稿件 + 格式尾巴由引擎合并），
+ * 时间线里的正文段必须与它一致，否则屏上会出现「时间线里的稿」与「消息正文」
+ * 两份不同的文本。尾巴段（状态栏 / catsay，收尾轮按序记入）已并入 finalText，
+ * 故只保留第一个正文段的位置、内容替换为 finalText，其余 text 段吸收掉不重复上屏。
+ * 工作区从未记过稿段（直出正文路径）时，用 finalText 补在末尾。
+ */
+export function finalTimeline(ws: TurnWorkspace, finalText: string): TurnSegment[] {
+	const out: TurnSegment[] = [];
+	let textPlaced = false;
+	for (const s of ws.timeline) {
+		if (s.kind === "tool") {
+			if (s.activities.length > 0) out.push(s);
+			continue;
+		}
+		if (s.kind === "text") {
+			if (!textPlaced) {
+				textPlaced = true;
+				out.push({ kind: "text", text: finalText, draft: true });
+			}
+			continue;
+		}
+		if (s.text.trim().length > 0) out.push(s);
+	}
+	if (!textPlaced && finalText.trim()) out.push({ kind: "text", text: finalText, draft: true });
+	return out;
+}
+
+/**
+ * 稿件入时间线：**替换**已记的稿，而不是再追加一段。
+ *
+ * 多稿重交（M-B 实弹的 882→849→838）与定点改稿都作用在同一份稿上，
+ * 逐次追加会让同一段正文在屏上叠出几份（EXEC §4.5.4 记的重复上屏欠账）。
+ * 故先摘掉此前记过的稿段，再把最新稿记在当前位置——位置随最后一次动笔走，
+ * 前面的思考与工具轨迹不动。
+ */
+function replaceDraftSegment(ws: TurnWorkspace, content: string): void {
+	ws.timeline = ws.timeline.filter((s) => !(s.kind === "text" && s.draft === true));
+	ws.timeline.push({ kind: "text", text: content, draft: true });
 }
 
 export interface WorkspaceDeps {
@@ -103,6 +188,9 @@ export function runWriteTool(
 		if (!content.trim()) return { text: "content 为空——请提交完整正文。", ok: false };
 		ws.draft = content;
 		ws.writes++;
+		// 时间线：正文按交稿位置入档。重交是**替换**不是追加——
+		// 末段若已是本工作区写过的正文，改写它，避免多稿在屏上叠成几份。
+		replaceDraftSegment(ws, content);
 		// 收稿即验：省一轮往返（提速 KPI），模型仍可随时显式 draft_check 复验
 		const c = runCheck(ws, deps);
 		return {
@@ -132,6 +220,8 @@ export function runWriteTool(
 		}
 		ws.draft = r.text;
 		ws.edits++;
+		// 时间线：定点改稿后正文原地更新（改的是同一份稿，不新开一段）
+		replaceDraftSegment(ws, ws.draft);
 		// 改稿即验（与 draft_write 收稿即验同理）：省一轮往返
 		const c = runCheck(ws, deps);
 		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;

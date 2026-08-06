@@ -23,7 +23,7 @@ import {
 	overlayPathFor,
 	setMountedLorebooks,
 } from "../lorebook.ts";
-import { addFoldTags, discoverFoldTagsFromTexts, resetDisplayTagExtras } from "../postprocess.ts";
+import { addFoldTags, addHistoryStripTags, discoverFoldTagsFromTexts, resetDisplayTagExtras } from "../postprocess.ts";
 import { createMacroEnv, evalPresetMacros } from "../preset-macro.ts";
 import { stripProtocolEntries, type ProtocolDrop } from "../protocol-detect.ts";
 import {
@@ -38,7 +38,10 @@ import { enabledBlocks, normalizeRpPreset, type PresetBlock, type RpPreset } fro
 import { resolveConfigPath } from "../paths.ts";
 import { DEFAULT_CONFIG, type CharacterCard, type LorebookEntry, type RpConfig } from "../types.ts";
 
-/** 预设格式栈的已知标签：历史送模整块剥（往拍模仿源），显示层照旧折叠 */
+/**
+ * 预设格式栈的已知标签：**只在送模历史整块剥**（防往拍模仿），显示层照常渲染。
+ * 这些是用户要看的产出（咪咪点评/选择框/变量面板），不是脚手架。
+ */
 const FORMAT_STACK_TAGS = ["w2g", "catsay", "UpdateVariable", "JSONPatch", "Analysis", "draft_notes", "wfeeling"];
 
 export interface StageMaterials {
@@ -246,12 +249,13 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 	for (const [topic, arr] of skillPieces) skillPacks.set(topic, arr.join("\n\n"));
 
 	// 显示层折叠标签：预设约定的思维链/草稿标签在 UI 折叠（server 侧注册表）；
-	// M-C：格式栈已知标签一并注册——历史送模整块剥（绝往拍模仿源），存量会话去污染
+	// 格式栈标签（catsay/w2g…）只注册到**历史剥**通道——它们是用户要看的产出，
+	// 混进 extraFold 会让显示层连内容一起删（8/05：模型写了咪咪点评，屏上没有）。
 	resetDisplayTagExtras();
 	if (preset) {
 		const discovered = discoverFoldTagsFromTexts(preset.blocks.filter((b) => b.enabled).map((b) => b.content));
 		if (discovered.length) addFoldTags(discovered);
-		addFoldTags(FORMAT_STACK_TAGS);
+		addHistoryStripTags(FORMAT_STACK_TAGS);
 	}
 
 	return {

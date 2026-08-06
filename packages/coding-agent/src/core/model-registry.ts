@@ -273,11 +273,17 @@ interface CustomModelsResult {
 	overrides: Map<string, ProviderOverride>;
 	/** Per-model overrides: provider -> modelId -> override */
 	modelOverrides: Map<string, Map<string, ModelOverride>>;
+	/**
+	 * Providers whose built-in catalog must be dropped: they declare both their own baseUrl
+	 * and their own models, so they are a self-contained channel that only happens to share a
+	 * built-in provider's name.
+	 */
+	replaceProviders: Set<string>;
 	error: string | undefined;
 }
 
 function emptyCustomModelsResult(error?: string): CustomModelsResult {
-	return { models: [], overrides: new Map(), modelOverrides: new Map(), error };
+	return { models: [], overrides: new Map(), modelOverrides: new Map(), replaceProviders: new Set(), error };
 }
 
 function mergeCompat(
@@ -412,6 +418,7 @@ export class ModelRegistry {
 			models: customModels,
 			overrides,
 			modelOverrides,
+			replaceProviders,
 			error,
 		} = this.modelsJsonPath ? this.loadCustomModels(this.modelsJsonPath) : emptyCustomModelsResult();
 
@@ -420,7 +427,16 @@ export class ModelRegistry {
 			// Keep built-in models even if custom models failed to load
 		}
 
-		const builtInModels = this.loadBuiltInModels(overrides, modelOverrides);
+		// Self-contained channels: a provider that declares BOTH its own baseUrl AND its own
+		// models is a distinct endpoint that merely reuses a built-in provider's name (e.g. an
+		// "opencode" go-plan key pointed at .../zen/go/v1 with two models selected). Merging the
+		// built-in catalog in would surface dozens of models that endpoint cannot serve, and the
+		// baseUrl override would silently re-point them at the wrong host. Drop the built-ins for
+		// those providers entirely. Unaffected: baseUrl-only overrides (whole catalog moves to the
+		// new endpoint) and models-only additions (custom models stack onto the built-in list).
+		const builtInModels = this.loadBuiltInModels(overrides, modelOverrides).filter(
+			(m) => !replaceProviders.has(m.provider),
+		);
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
 		// Let OAuth providers modify their models (e.g., update baseUrl)
@@ -506,6 +522,8 @@ export class ModelRegistry {
 
 			const overrides = new Map<string, ProviderOverride>();
 			const modelOverrides = new Map<string, Map<string, ModelOverride>>();
+			/** 自包含通道：baseUrl + 自带 models 并存 → 内置目录整体剔除（见 loadModels 注释） */
+			const replaceProviders = new Set<string>();
 
 			for (const [providerName, providerConfig] of Object.entries(config.providers)) {
 				if (providerConfig.baseUrl || providerConfig.compat) {
@@ -513,6 +531,10 @@ export class ModelRegistry {
 						baseUrl: providerConfig.baseUrl,
 						compat: providerConfig.compat,
 					});
+				}
+
+				if (providerConfig.baseUrl && (providerConfig.models?.length ?? 0) > 0) {
+					replaceProviders.add(providerName);
 				}
 
 				this.storeProviderRequestConfig(providerName, providerConfig);
@@ -525,7 +547,7 @@ export class ModelRegistry {
 				}
 			}
 
-			return { models: this.parseModels(config), overrides, modelOverrides, error: undefined };
+			return { models: this.parseModels(config), overrides, modelOverrides, replaceProviders, error: undefined };
 		} catch (error) {
 			if (error instanceof SyntaxError) {
 				return emptyCustomModelsResult(`Failed to parse models.json: ${error.message}\n\nFile: ${modelsJsonPath}`);

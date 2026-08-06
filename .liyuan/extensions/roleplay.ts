@@ -1699,8 +1699,10 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			}
 			await waitForScribe();
 			if (lastUserIdx >= 0) {
-				const result = await ctx.navigateTree(branch[lastUserIdx].id, { summarize: false });
-				if (result.cancelled) return;
+				// 退到最后一条用户消息本身（不是 parent），丢弃其后的角色回复（旧回复进旁支）
+				// 用 branch() 而非 navigateTree()：后者会退到 user 的 parent 并把 user 本身也丢掉
+				ctx.sessionManager.branch(branch[lastUserIdx].id);
+				// 注入改写后的角色回复（显示为叙事通道）
 				pi.sendMessage({ customType: "rp-edited-reply", content: text, display: true });
 				notify(ctx, "已采用你改写的角色回复（原回复保留在会话树）。");
 				return;

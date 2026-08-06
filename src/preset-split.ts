@@ -132,7 +132,7 @@ const TGBREAK: PresetSplitTable = {
 		{ name: "⚙️转述+扩写", nature: "H", fate: "drop", note: "实质规则经 supplements 转述救出" },
 		{ name: "------粉丝定制--------", nature: "I", fate: "drop" },
 		{ name: "🍭行动选项", nature: "H", fate: "drop", note: "w2g 选择框——M-B 账本渲染补回（D-C3）" },
-		{ name: "🍭TGD咪咪吐槽", nature: "H", fate: "drop", note: "catsay——点评功能精神留给 M-B 渲染" },
+		{ name: "🍭TGD咪咪吐槽", nature: "C", fate: "resident", section: "C", note: "catsay 状态栏——用户预设功能，保留" },
 		{ name: "------预设功能结束--------", nature: "I", fate: "drop" },
 		{ name: "⬇️⬇️COT-开始（中文）⬇️⬇️", nature: "H", fate: "drop" },
 		{ name: "cot-✔️基础思维-必开", nature: "H", fate: "drop", note: "七步 COT＝agent 循环取代；夹带规则经 supplements 救出" },

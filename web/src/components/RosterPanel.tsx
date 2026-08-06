@@ -13,7 +13,7 @@ import { Editable } from "./StatusStrip.tsx";
 const ROSTER_TABLES = [
 	{ key: "characters", label: "人物", activeMark: "在场", goneMark: "已离场" },
 	{ key: "items", label: "物品", activeMark: "持有", goneMark: "已失去" },
-	{ key: "events", label: "剧情线", activeMark: "进行中", goneMark: "已了结" },
+	{ key: "events", label: "事件", activeMark: "进行中", goneMark: "已了结" },
 ] as const;
 
 export function RosterPanel({
@@ -43,9 +43,6 @@ export function RosterPanel({
 
 	return (
 		<div className="panel-body">
-			<div className="field-hint">
-				agent 的索引账本：登场过就在案，细节靠检索召回。活跃条目随剧情自动登记；离场条目可改注可移除，改动随剧情分支走。
-			</div>
 			<div className="roster-section roster-panel">
 				{tables.map((t) => (
 					<div key={t.key} className="roster-table">

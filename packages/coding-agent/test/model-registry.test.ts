@@ -181,7 +181,7 @@ describe("ModelRegistry", () => {
 			writeRawModelsJson({
 				// baseUrl-only for anthropic
 				anthropic: overrideConfig("https://anthropic-proxy.example.com/v1"),
-				// Add custom model for google (merged with built-ins)
+				// google: baseUrl + models → self-contained channel, built-ins dropped
 				google: providerConfig(
 					"https://google-proxy.example.com/v1",
 					[{ id: "gemini-custom" }],
@@ -196,10 +196,11 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			expect(anthropicModels[0].baseUrl).toBe("https://anthropic-proxy.example.com/v1");
 
-			// Google: built-ins plus custom model
+			// Google: self-contained channel (baseUrl + models) — built-in catalog dropped
 			const googleModels = getModelsForProvider(registry, "google");
-			expect(googleModels.length).toBeGreaterThan(1);
-			expect(googleModels.some((m) => m.id === "gemini-custom")).toBe(true);
+			expect(googleModels).toHaveLength(1);
+			expect(googleModels[0].id).toBe("gemini-custom");
+			expect(googleModels[0].baseUrl).toBe("https://google-proxy.example.com/v1");
 		});
 
 		test("refresh() picks up baseUrl override changes", () => {
@@ -265,7 +266,7 @@ describe("ModelRegistry", () => {
 			expect(registry.getError()).toContain("baseUrl");
 		});
 
-		test("custom provider with same name as built-in merges with built-in models", () => {
+		test("custom provider with same name as built-in becomes a self-contained channel", () => {
 			writeModelsJson({
 				anthropic: providerConfig("https://my-proxy.example.com/v1", [{ id: "claude-custom" }]),
 			});
@@ -273,9 +274,10 @@ describe("ModelRegistry", () => {
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 			const anthropicModels = getModelsForProvider(registry, "anthropic");
 
-			expect(anthropicModels.length).toBeGreaterThan(1);
-			expect(anthropicModels.some((m) => m.id === "claude-custom")).toBe(true);
-			expect(anthropicModels.some((m) => m.id.includes("claude"))).toBe(true);
+			// baseUrl + models → self-contained channel: built-in catalog dropped
+			expect(anthropicModels).toHaveLength(1);
+			expect(anthropicModels[0].id).toBe("claude-custom");
+			expect(anthropicModels[0].baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
 		test("custom model with same id replaces built-in model by id", () => {
@@ -573,7 +575,7 @@ describe("ModelRegistry", () => {
 			expect(glm5?.baseUrl).toBe("https://opencode.ai/zen/go/v1");
 		});
 
-		test("modelOverrides still apply when provider also defines models", () => {
+		test("modelOverrides drop out when provider also defines models (self-contained)", () => {
 			writeRawModelsJson({
 				openrouter: {
 					baseUrl: "https://my-proxy.example.com/v1",
@@ -601,10 +603,10 @@ describe("ModelRegistry", () => {
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 			const models = getModelsForProvider(registry, "openrouter");
 
-			expect(models.some((m) => m.id === "custom/openrouter-model")).toBe(true);
-			expect(
-				models.some((m) => m.id === "anthropic/claude-sonnet-4" && m.name === "Overridden Built-in Sonnet"),
-			).toBe(true);
+			// baseUrl + models → self-contained channel: built-in catalog dropped
+			expect(models).toHaveLength(1);
+			expect(models[0].id).toBe("custom/openrouter-model");
+			// modelOverrides have no built-in models to apply to
 		});
 
 		test("refresh() reloads merged custom models from disk", () => {

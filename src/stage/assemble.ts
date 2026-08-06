@@ -242,6 +242,35 @@ export interface StageSystemOptions {
 	statusBarFormats?: string[];
 	/** false = 不声明检索工具（M1 前过渡形态；M3 起默认开） */
 	tools?: boolean;
+	/**
+	 * MCP 外设工具（8/06 重接）：本会话已连接的 mcp__ 工具，空/省略＝只字不提。
+	 * 进 system 而非每拍注入——会话内字节稳定，不破前缀缓存（与旧 director.ts 同位置）。
+	 */
+	mcpTools?: Array<{ name: string; description: string }>;
+}
+
+/** 状态栏格式条目是否占位符型（自闭合 <Tag/>——界面由卡渲染，模型只留占位） */
+export function isPlaceholderStatusFormat(f: string): boolean {
+	return /\/>\s*$/.test(f.trim().replace(/^`|`$/g, ""));
+}
+
+/** 状态栏提示词：占位符型（自闭合）与面板型（成对、模型填内容）语义相反，分开写 */
+export function buildStatusBarPrompt(statusBarFormats: string[]): string {
+	const placeholders = statusBarFormats.filter(isPlaceholderStatusFormat);
+	const panels = statusBarFormats.filter((f) => !isPlaceholderStatusFormat(f));
+	const parts: string[] = [];
+	if (placeholders.length > 0) {
+		parts.push(
+			`本卡用占位符渲染状态栏界面：每拍在正文之后**原样输出** ${placeholders.join("；")}（自闭合标签，` +
+				`不要展开成成对写法、不要往里填内容——界面由卡自动渲染）`,
+		);
+	}
+	if (panels.length > 0) {
+		parts.push(
+			`用该标签包住整块写出，字段随本拍剧情更新（地点/时间/关系/数值等）——格式线索：${panels.join("；")}`,
+		);
+	}
+	return `${parts.join("；")}——这是卡作者设计的一部分，不依赖预设是否开启。`;
 }
 
 export function buildStageSystemPrompt({
@@ -253,6 +282,7 @@ export function buildStageSystemPrompt({
 	presetActive,
 	statusBarFormats,
 	tools,
+	mcpTools,
 }: StageSystemOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const m = (s: string) => applyMacros(s, macro);
@@ -303,7 +333,7 @@ ${
 1. **正文**：纯剧情叙事与对白。不要把正文包进 \`<content>\` 之类的分析标签，不要写 HTML 注释式导演旁注。篇幅：有用户预设则跟预设；无预设时可见正文约 800–1500 字（短打约 400）。
 2. **状态栏**：${
 			statusBarFormats && statusBarFormats.length > 0
-				? `本卡定义了状态栏，格式线索：${statusBarFormats.join("；")}。**每拍在正文之后必须输出状态栏**（字段随剧情更新：地点/时间/关系/数值等），用上述标签包住整块写出——这是卡作者设计的一部分，不依赖预设是否开启。`
+				? `本卡定义了状态栏。${buildStatusBarPrompt(statusBarFormats)}`
 				: `本卡未检测到状态栏格式；**不要硬造**状态栏。若卡作者在说明里另有约定，按卡作者格式执行。`
 		}`,
 	);
@@ -331,6 +361,22 @@ ${
 - \`draft_check\`：额外复验（交稿与改稿时都已自动验过）。
 - \`world_state_update\`：世界状态记账。本拍剧情改变了世界（时间流逝/移动/关系变化/物品得失/剧情推进）就在收笔前提交补丁——你是唯一在现场的人，不提交账本就会漂移。
 全绿且账已记，停止调用工具即完成本拍。`,
+		);
+	}
+
+	// MCP 外设（8/06 重接）：用户在「扩展能力 → MCP」接入的外部服务器。
+	// 工具已在清单里，这里只说明它们是什么、以及 RP 语境下的三条纪律。
+	// 措辞承自旧 director.ts（009e22e 换引擎时随 director 一起失联）。
+	if (mcpTools && mcpTools.length > 0) {
+		const index = mcpTools.map((t) => `- \`${t.name}\`：${t.description}`).join("\n");
+		sections.push(
+			`# MCP 外设（用户接入的外部工具）
+以 \`mcp__\` 开头的工具来自用户接入的外部服务器（识图、搜索、浏览器等），**直接调用**即可。
+- **只在剧情真需要时用**——它们是外部服务，不是演出的一部分；能靠设定和想象写出来的，就不要调。
+- 调用结果**用户看不见**：要让用户知道的内容，必须由你写进正文。
+- 工具报错就如实说，不要假装成功；不可逆或高风险操作（删文件、付款、发帖）先问用户。
+当前可用：
+${index}`,
 		);
 	}
 
@@ -512,9 +558,17 @@ export function buildStageInjection({
 		notes.push(`本拍可见正文约 800–1500 字（短打约 400）。`);
 	}
 	if (statusBarFormats && statusBarFormats.length > 0) {
-		notes.push(
-			`⚠ 状态栏是本卡扮演的一部分：正文之后必须输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本拍剧情更新；漏写状态栏即未完成本拍。`,
-		);
+		const placeholders = statusBarFormats.filter(isPlaceholderStatusFormat);
+		const panels = statusBarFormats.filter((f) => !isPlaceholderStatusFormat(f));
+		if (placeholders.length > 0 && panels.length === 0) {
+			notes.push(
+				`⚠ 状态栏是本卡扮演的一部分：正文之后原样输出 ${placeholders.join(" 或 ")}（自闭合占位符，界面由卡渲染）；漏写即未完成本拍。`,
+			);
+		} else {
+			notes.push(
+				`⚠ 状态栏是本卡扮演的一部分：正文之后必须输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本拍剧情更新；漏写状态栏即未完成本拍。`,
+			);
+		}
 	}
 	if (languageMismatch) {
 		notes.push(

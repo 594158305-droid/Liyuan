@@ -125,6 +125,12 @@ import {
 	type UpdateCheckResult,
 } from "../src/update.ts";
 import type { UpdateWire } from "./wire.ts";
+import {
+	defaultSessionEnabledIds,
+	getMcpHub,
+	RP_MCP_TYPE,
+} from "../src/mcp.ts";
+import { mcpEnabledFromBranch } from "../src/stage/mcp-stage.ts";
 
 const cwd = process.cwd();
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -433,6 +439,13 @@ const extractEntryText = (content: unknown): string => {
 		.join("");
 };
 
+/**
+ * reroll/编辑输入的「回退叶」：branch 前记录旧叶；生成失败或停止无产出时
+ * 回退到它（8/05：reroll 链上停止，当前分支只剩 user、旧回复全部消失）。
+ * onTurnEnd 消费后清空。
+ */
+let rerollFallbackLeaf: string | null = null;
+
 /** 当前分支上最后一条剧情用户消息 entry id（戏外轮不计） */
 const lastStoryUserId = (): string | null => {
 	const branch = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
@@ -502,7 +515,15 @@ const branchMessages = (): unknown[] => {
 		for (const e of session.sessionManager.getBranch() as Array<Record<string, unknown>>) {
 			if (e.type === "message" && e.message) out.push(e.message);
 			else if (e.type === "custom_message") {
-				out.push({ role: "custom", customType: e.customType, content: e.content, display: e.display });
+				// details 必须透传：开场白序号（rpGreeting）等元数据只存在于树条目上，
+				// 丢了就让 resyncAll 后的角标退回 /api/card 轮询（切换开场白时角标卡住不动）
+				out.push({
+					role: "custom",
+					customType: e.customType,
+					content: e.content,
+					display: e.display,
+					details: e.details,
+				});
 			}
 		}
 		return out;
@@ -681,6 +702,8 @@ const regenerateSwipe = async (): Promise<void> => {
 		return;
 	}
 	const sm = session.sessionManager;
+	// 记录 reroll 前的叶：生成失败/停止无产出时回退到旧回复（8/05：reroll 链上停止，前版本全消失）
+	rerollFallbackLeaf = sm.getLeafId();
 	// 叶钉回 user：引擎在 user 下挂新的 assistant sibling（swipe 语义）。
 	// 世界状态/历史均为 f(分支)（R3/R4），无需旧的 navigateTree 恢复舞蹈——
 	// 废弃分支上的场记快照天然不在新分支上，账本不会泄漏（8/02 A 雷的结构性解法）。
@@ -2057,6 +2080,35 @@ const stage = new StageEngine({
 		if (r.ok) { savePanels(file, r.panels); syncStoryPanelsFromDisk(); }
 		return r;
 	},
+	// MCP 外设（8/06 重接）：009e22e 换引擎时 MCP 只留在扩展路径（pi.registerTool）+
+	// 已删除的 director.ts，台上从此看不见——hub 连得上，模型无工具可用。此处补上注入。
+	//
+	// 启用集**自己从会话树读**，不问扩展要（jiti 二象性：扩展的 sessionMcpEnabled 闭包
+	// 变量在 server 侧不可见）。树上的 rp-mcp 快照是唯一可靠信源，且天然随 rewind/fork 走。
+	// 无快照（新会话尚未 /mcpsync，或扩展未装载）→ 回落项目 defaults，自愈不依赖扩展。
+	mcp: {
+		listTools: () => {
+			const hub = getMcpHub(cwd);
+			const fromTree = mcpEnabledFromBranch(session.sessionManager.getBranch() as unknown[], RP_MCP_TYPE);
+			const want = fromTree ?? defaultSessionEnabledIds(cwd);
+			// hub 的启用集与树不一致时对账一次（后台连接，本拍用当前已连上的）。
+			// 不 await：装配不能被 MCP 握手拖慢；连上后的下一拍即可见。
+			const current = hub.getSessionEnabled();
+			if (want.join("|") !== current.join("|")) {
+				void hub.sync(want).catch(() => {
+					// 连不上不该拖垮叙事：本拍就当没有 MCP 工具
+				});
+			}
+			return hub.listActiveTools();
+		},
+		callTool: (serverId, toolName, args, signal) => getMcpHub(cwd).callTool(serverId, toolName, args, signal),
+	},
+	// 媒体交付（8/06 重接）：show_image/audio/video/html + tts。
+	// 与 MCP 同源的断链——wire.ts 的消费端一直健在，缺的只是台上生产端。
+	media: true,
+	// TTS 需要服务端环境（LIYUAN_TTS_API_KEY / OPENAI_API_KEY）：每拍现查，
+	// 用户中途配好 env 重启即生效；没配就不上清单（模型不会去试一个必然失败的工具）。
+	ttsAvailable: () => loadTtsConfig() !== null,
 	// M4 压缩归档：被摘要覆盖的早期正文完整入剧情库——摘要管连续性，归档管细节召回
 	archiveCompacted: async (sessionId, text) => {
 		const r = await memoryArchiveCompacted(cwd, { sessionId, card: cardPath || undefined }, text);
@@ -2085,11 +2137,25 @@ const stage = new StageEngine({
 	streamFn: streamSimple as unknown as StageStreamFn,
 	events: {
 		onTurnStart: () => broadcast({ type: "agent", state: "start" }),
-		onDelta: (kind, delta) => broadcast({ type: "delta", kind, delta }),
+		onDelta: (kind, delta, draft, reset) =>
+			broadcast({ type: "delta", kind, delta, ...(draft ? { draft: true } : {}), ...(reset ? { reset: true } : {}) }),
 		onNotify: (level, text) => broadcast({ type: "notify", level, text }),
 		onActivity: (detail) => broadcast({ type: "activity", activity: { kind: "note", name: "stage", detail } }),
 		onTurnEnd: (info) => {
 			broadcast({ type: "agent", state: "end" });
+			// reroll/编辑输入后无产出（aborted 无落树 / error）：回退到 reroll 前的旧叶——
+			// 不许留下「只有 user 没有回复」的空拍（8/05：reroll 链上停止，前版本全消失）。
+			if (rerollFallbackLeaf && (!info.entryId || info.error)) {
+				const sm = session.sessionManager;
+				if (sm.getLeafId() !== rerollFallbackLeaf) {
+					try {
+						sm.branch(rerollFallbackLeaf);
+					} catch {
+						// 回退失败不致命：保持当前状态
+					}
+				}
+			}
+			rerollFallbackLeaf = null;
 			// 传统命令路径（/compact /rewind 等）仍读 AgentSession 内存副本：引擎写树后对齐一次
 			try {
 				session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
@@ -2196,8 +2262,20 @@ const handlePrompt = async (text: string) => {
 			return;
 		}
 		const sm = session.sessionManager;
-		// 叶钉回 user，旧 user + 回复进旁支（与无参 reroll 同款 branch 语义）
-		if (sm.getLeafId() !== userId) sm.branch(userId);
+		// 记录编辑前的叶：生成失败/停止无产出时回退到旧输入+旧回复
+		rerollFallbackLeaf = sm.getLeafId();
+		// 编辑输入 = **替换**该输入：钉到它的 parent，旧输入连同旧回复进旁支——
+		// 树上不再有「旧输入 + 新输入」两条 user（8/05 实弹：编辑后 reroll，屏上两条输入都在）。
+		// 与无参 reroll（regenerateSwipe，branch(userId) 保留输入重roll回复）语义不同。
+		const branch = sm.getBranch() as Array<{ id?: string; parentId?: string }>;
+		const userEntry = branch.find((e) => e.id === userId);
+		const parentId = userEntry?.parentId;
+		if (parentId && parentId !== userId) {
+			if (sm.getLeafId() !== parentId) sm.branch(parentId);
+		} else if (sm.getLeafId() !== userId) {
+			// 旧输入是根（无 parent）：无法替换，退而保留输入本身
+			sm.branch(userId);
+		}
 		// 追加编辑后的用户消息
 		sm.appendMessage({ role: "user", content: [{ type: "text", text: rerollArgMatch[1].trim() }], timestamp: Date.now() });
 		sm.flush();

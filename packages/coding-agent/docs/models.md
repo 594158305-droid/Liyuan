@@ -270,15 +270,13 @@ Route a built-in provider through a proxy without redefining models:
 
 All built-in Anthropic models remain available. Existing OAuth or API key auth continues to work.
 
-To merge custom models into a built-in provider, include the `models` array:
+To merge custom models into a built-in provider, include the `models` array **without** `baseUrl`:
 
 ```json
 {
   "providers": {
     "anthropic": {
-      "baseUrl": "https://my-proxy.example.com/v1",
       "apiKey": "$ANTHROPIC_API_KEY",
-      "api": "anthropic-messages",
       "models": [...]
     }
   }
@@ -290,6 +288,32 @@ Merge semantics:
 - Custom models are upserted by `id` within the provider.
 - If a custom model `id` matches a built-in model `id`, the custom model replaces that built-in model.
 - If a custom model `id` is new, it is added alongside built-in models.
+
+### Self-contained channels (`baseUrl` + `models`)
+
+Declaring **both** `baseUrl` and `models` marks the provider as a self-contained channel: the
+built-in catalog for that provider is dropped entirely and only your models remain.
+
+```json
+{
+  "providers": {
+    "opencode": {
+      "baseUrl": "https://opencode.ai/zen/go/v1",
+      "api": "openai-completions",
+      "apiKey": "$OPENCODE_API_KEY",
+      "models": [{ "id": "deepseek-v4-pro" }, { "id": "deepseek-v4-flash" }]
+    }
+  }
+}
+```
+
+This is the case where a key for one plan is pointed at that plan's endpoint while reusing a
+built-in provider's name. Merging the built-in catalog in would surface dozens of models the
+endpoint cannot serve, and the `baseUrl` override would silently re-point them at the wrong host.
+
+Note that `modelOverrides` only apply to built-in models, so they have no effect on a
+self-contained channel. Unaffected: `baseUrl`-only overrides (the whole catalog moves to the new
+endpoint) and `models`-only additions (custom models stack onto the built-in list).
 
 ## Per-model Overrides
 

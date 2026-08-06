@@ -294,3 +294,78 @@ try{
   }catch(e){}
 }catch(e){console.error("[liyuan bridge]",e);}
 })();</script>`;
+
+import { JQUERY_MIN } from "./vendor/jquery-min.ts";
+
+/**
+ * 酒馆全局垫片（脚本帧专用，注入在 bridge 之后、卡脚本之前）。
+ *
+ * 酒馆页面内置 jQuery/lodash/变量系统/MVU 插件对象，卡界面脚本直接裸用这些全局
+ * （模拟修仙2 状态栏 UI 30 处 `$`、`_.get`、`getAllVariables()`、`Mvu`/`eventOn`）——
+ * 梨园 srcdoc 沙箱里没有这些，脚本第一行就 ReferenceError，按钮事件永远绑不上
+ * （8/05 实弹：状态栏出来了但页签全点不动）。
+ *
+ * 垫片面（对照酒馆公开调用面）：
+ * - `$`/`jQuery`：完整 jQuery 3.7.1（离线内置，MIT）
+ * - `_`：lodash 常用子集（get/set/has/each/isArray/isObject/escape 等，按需扩充）
+ * - `getAllVariables()`：酒馆变量系统 → 梨园侧变量 JSON（默认空壳 `{stat_data:{}}`，
+ *   父页可 postMessage {liyuanVariables} 注入——后续接梨园账本）
+ * - `Mvu`：MVU 插件对象壳（事件常量 + 空事件总线，数据刷新联动后置）
+ * - `waitGlobalInitialized(name)`：酒馆等待全局就绪 → 目标已存在立即 resolve
+ */
+export const IFRAME_TAVERN_GLOBALS_SNIPPET = `<script>(function(){
+var g=typeof window!=="undefined"?window:null;if(!g)return;
+try{
+  if(typeof g.jQuery!=="function"){
+    ${JQUERY_MIN}
+  }
+  if(!g._||typeof g._!=="object"){
+    function lp(obj,path){if(path==null)return obj;if(!Array.isArray(path))path=String(path).split(".");var o=obj;for(var i=0;i<path.length;i++){if(o==null)return undefined;o=o[path[i]];}return o;}
+    g._={
+      get:function(obj,path,def){var v=lp(obj,path);return v===undefined?def:v;},
+      set:function(obj,path,val){if(path==null)return obj;if(!Array.isArray(path))path=String(path).split(".");var o=obj;for(var i=0;i<path.length-1;i++){if(o[path[i]]==null||typeof o[path[i]]!=="object")o[path[i]]={};o=o[path[i]];}o[path[path.length-1]]=val;return obj;},
+      has:function(obj,path){return lp(obj,path)!==undefined;},
+      each:function(coll,fn){if(Array.isArray(coll)){for(var i=0;i<coll.length;i++){if(fn(coll[i],i)===false)break;}}else{for(var k in coll){if(Object.prototype.hasOwnProperty.call(coll,k)){if(fn(coll[k],k)===false)break;}}}return coll;},
+      forEach:function(coll,fn){return g._.each(coll,fn);},
+      isArray:function(v){return Array.isArray(v);},
+      isObject:function(v){return v!=null&&typeof v==="object"&&!Array.isArray(v);},
+      isString:function(v){return typeof v==="string";},
+      isNumber:function(v){return typeof v==="number"&&isFinite(v);},
+      isBoolean:function(v){return typeof v==="boolean";},
+      isFunction:function(v){return typeof v==="function";},
+      isEmpty:function(v){if(v==null)return true;if(Array.isArray(v)||typeof v==="string")return v.length===0;if(typeof v==="object")return Object.keys(v).length===0;return false;},
+      escape:function(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});},
+      unescape:function(s){return String(s==null?"":s).replace(/&(?:amp|lt|gt|quot|#39);/g,function(m){return {"&amp;":"&","&lt;":"<","&gt;":">","&quot;":'"',"&#39;":"'"}[m];});},
+      clone:function(v){if(v==null||typeof v!=="object")return v;return JSON.parse(JSON.stringify(v));},
+      debounce:function(fn,wait){var t=null;return function(){var a=arguments,c=this;clearTimeout(t);t=setTimeout(function(){fn.apply(c,a);},wait||100);};},
+      now:function(){return Date.now();}
+    };
+  }
+  if(typeof g.getAllVariables!=="function"){
+    g.getAllVariables=function(){var v=g.__liyuanVariables||null;return v&&typeof v==="object"?v:{stat_data:{}};};
+  }
+  if(!g.Mvu){
+    g.Mvu={
+      isMvuEnabled:true,
+      events:{
+        VARIABLE_UPDATE_STARTED:"VARIABLE_UPDATE_STARTED",
+        VARIABLE_UPDATE_ENDED:"VARIABLE_UPDATE_ENDED",
+        VARIABLE_UPDATE_FAILED:"VARIABLE_UPDATE_FAILED"
+      },
+      state:{}
+    };
+  }
+  if(typeof g.waitGlobalInitialized!=="function"){
+    g.waitGlobalInitialized=function(name,timeoutMs){
+      return new Promise(function(res){
+        var t0=Date.now(),lim=timeoutMs||5000;
+        (function poll(){
+          try{if(g[name])return res(true);}catch(e){return res(false);}
+          if(Date.now()-t0>lim)return res(false);
+          setTimeout(poll,50);
+        })();
+      });
+    };
+  }
+}catch(e){console.error("[liyuan globals]",e);}
+})();</script>`;

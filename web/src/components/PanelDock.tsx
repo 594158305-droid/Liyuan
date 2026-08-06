@@ -5,7 +5,7 @@
 import { useRef, useState } from "react";
 import { apiDelete, apiPost } from "../api.ts";
 import type { RpPanel } from "../wire.ts";
-import { IconDownload, IconTrash } from "./icons.tsx";
+import { IconDownload, IconRoster, IconTrash } from "./icons.tsx";
 import { ConfirmButton } from "./kit.tsx";
 
 const KIND_LABEL: Record<string, string> = { markdown: "文档", svg: "图形", html: "网页" };
@@ -17,6 +17,10 @@ export interface PanelDockProps {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
 	variant?: "dropdown" | "composer";
 	activeAgent?: string | null;
+	/** 打开系统内置的登场名录面板（常驻行，与 agent 自建面板并列但不可增删） */
+	onOpenRoster?: () => void;
+	/** 名录面板当前是否展开（常驻行高亮用） */
+	rosterActive?: boolean;
 }
 
 export function PanelDock({
@@ -26,6 +30,8 @@ export function PanelDock({
 	toast,
 	variant = "dropdown",
 	activeAgent = null,
+	onOpenRoster,
+	rosterActive = false,
 }: PanelDockProps) {
 	const fileRef = useRef<HTMLInputElement>(null);
 	const [busy, setBusy] = useState(false);
@@ -72,6 +78,18 @@ export function PanelDock({
 
 	return (
 		<div className={`panel-dock-body panel-dock-${variant}`}>
+			{/* 系统内置面板：常驻，不随会话有无记录出现消失，也不可增删导出 */}
+			{onOpenRoster && (
+				<div className="dock-list dock-list-system">
+					<div className={`dock-row dock-row-system ${rosterActive ? "current" : ""}`}>
+						<button type="button" className="dock-name" onClick={onOpenRoster}>
+							<IconRoster size={14} />
+							登场名录
+							<span className="dock-kind">系统</span>
+						</button>
+					</div>
+				</div>
+			)}
 			<div className="field-hint" style={{ marginBottom: 10 }}>
 				本会话里由 {charName} 搭建的面板。点名称在侧栏打开；可导入 / 导出社区格式。
 			</div>

@@ -675,6 +675,7 @@ function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: Stagehand
 				return text(`知识库「${meta.name}」已${on ? "挂载到" : "从"}剧情对话${on ? "" : "卸载"}（${meta.entryCount} 条）。`);
 			},
 		}),
+	);
 
 	// 统一工具层（PLAN-RP-TOOLING M-D1/M-D2）：与台上共用同一份实现，语料与能力按面注入。
 	// 助手是**诊断面**——注入原始世界书，不做外部插件协议剥离（台上剥离是为了生成时

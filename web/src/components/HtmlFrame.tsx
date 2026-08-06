@@ -118,7 +118,11 @@ export function HtmlFrame({
 				return;
 			}
 			const raw = Math.ceil(d.liyuanFrameHeight);
-			const hardCap = Math.min(2400, typeof window !== "undefined" ? Math.floor(window.innerHeight * 0.92) : 2400);
+			// 内容流帧（seamless 非接管型）高度上限：大方放行，蠕变靠下方 ratchet 防护。
+			// 旧值 min(2400, 92%vh) 在 1080p 只有 ~828px，道渊等长欢迎消息被裁半截。
+			const hardCap = typeof window !== "undefined"
+				? Math.max(2400, Math.floor(window.innerHeight * 4))
+				: 10000;
 			const next = Math.max(minHeight, Math.min(hardCap, raw));
 			setHeight((prev) => {
 				if (Math.abs(prev - next) < 2) return prev;

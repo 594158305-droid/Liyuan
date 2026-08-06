@@ -125,8 +125,37 @@ const card = {
 };
 const config: RpConfig = { ...DEFAULT_CONFIG, userName: "沈舟" };
 
-test("system prompt：字节稳定、宏替换、主权红线随预设让位", () => {
-	const opts = { card, config, constantLore: [], statusBarFormats: ["state1"] };
+test("system prompt：状态栏提示词分型——占位符型不引导展开成对写法", () => {
+	// 占位符型（自闭合 <Tag/>：界面由卡渲染）：模型只该原样输出占位符，不得填内容
+	const placeholder = buildStageSystemPrompt({
+		card,
+		config,
+		constantLore: [],
+		statusBarFormats: ["`<StatusPlaceHolderImpl/>`"],
+	});
+	assert.ok(placeholder.includes("占位符渲染状态栏界面"), "占位符语义说明在场");
+	assert.ok(placeholder.includes("原样输出"), "要求原样输出");
+	assert.ok(placeholder.includes("不要展开成成对写法"), "明确禁止展开成对（8/05：模型写成对标签导致卡正则打空）");
+	assert.ok(placeholder.includes("不要往里填内容"), "明确禁止填内容");
+	assert.ok(!placeholder.includes("包住整块写出"), "占位符型不得沿用面板型措辞");
+
+	// 面板型（成对 <state1>…</state1>）：模型用标签包住内容
+	const panel = buildStageSystemPrompt({ card, config, constantLore: [], statusBarFormats: ["`<state1>…</state1>`"] });
+	assert.ok(panel.includes("包住整块写出"), "面板型保留包住整块的语义");
+	assert.ok(panel.includes("字段随本拍剧情更新"), "面板型保留字段更新语义");
+
+	// 末端导演备注同样分型（buildStageInjection）
+	const inj = buildStageInjection({
+		state: { time: "", location: "", characters: {}, inventory: [], flags: {}, plot_threads: [] },
+		activatedLore: [],
+		card,
+		config,
+		statusBarFormats: ["`<StatusPlaceHolderImpl/>`"],
+	});
+	assert.ok(inj.includes("自闭合占位符"), "导演备注：占位符语义");
+});
+
+test("system prompt：字节稳定、宏替换、主权红线随预设让位", () => {	const opts = { card, config, constantLore: [], statusBarFormats: ["state1"] };
 	const a = buildStageSystemPrompt(opts);
 	const b = buildStageSystemPrompt(opts);
 	assert.equal(a, b, "同素材两次装配必须逐字节一致");

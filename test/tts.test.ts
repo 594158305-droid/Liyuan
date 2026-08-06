@@ -18,7 +18,7 @@ test("loadTtsConfig：OPENAI_API_KEY 可用", () => {
 	assert.ok(c!.baseUrl.includes("openai.com") || c!.baseUrl.endsWith("/v1"));
 });
 
-test("saveAudioBuffer：写�?\.liyuan-audio 并返�?/audio/ 路径", () => {
+test("saveAudioBuffer：写�?\.liyuan-audio 并返�?/audio/ 路径", () => {
 	const dir = mkdtempSync(join(tmpdir(), "liyuan-tts-"));
 	try {
 		const r = saveAudioBuffer(dir, Buffer.from("fake-mp3-bytes"), ".mp3");

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import { buildSrcDoc } from "../web/src/frameDoc.ts";
 import {
@@ -121,4 +122,52 @@ test("buildSrcDoc scripts: 桥在卡内容之前", () => {
 	const iBridge = doc.indexOf("TavernHelper");
 	const iCard = doc.indexOf("__card");
 	assert.ok(iBridge > 0 && iCard > 0 && iBridge < iCard, "垫片须先于卡脚本");
+});
+
+test("酒馆全局垫片：jQuery/lodash/变量系统/Mvu/waitGlobalInitialized 注入脚本帧", () => {
+	const doc = buildSrcDoc(
+		"<!doctype html><html><head></head><body><script>window.__card=1</script></body></html>",
+		true,
+		true,
+	);
+	const cardScriptStart = doc.indexOf("__card");
+	// 按注入顺序：bridge → globals → 卡脚本
+	assert.ok(doc.indexOf("jQuery v3.7.1") > 0 && doc.indexOf("jQuery v3.7.1") < cardScriptStart, "jQuery 源码在卡脚本前");
+	assert.ok(doc.indexOf("getAllVariables") < cardScriptStart, "getAllVariables 在卡脚本前");
+	assert.ok(doc.indexOf("waitGlobalInitialized") < cardScriptStart, "waitGlobalInitialized 在卡脚本前");
+	assert.ok(doc.indexOf("Mvu") < cardScriptStart, "Mvu 壳在卡脚本前");
+
+	// 静态帧不注入（省体积、无脚本不依赖）
+	const staticDoc = buildSrcDoc("<!doctype html><html><head></head><body><div>x</div></body></html>", false, true);
+	assert.ok(!staticDoc.includes("getAllVariables"), "静态帧不注入变量垫片");
+
+	// 模拟修仙2 形态的卡界面：占位符替换出的 HTML + 脚本裸用 $/getAllVariables/Mvu
+	const cardUi =
+		"```html\n<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<style>.nav-btn{display:inline-block;padding:4px 10px}</style>\n</head>\n<body>\n" +
+		"<div class=\"nav-btn\" data-tab=\"protagonist\">主角状态</div>\n" +
+		"<div class=\"nav-btn\" data-tab=\"simulator\">模拟器</div>\n" +
+		"<script type=\"module\">\n" +
+		"window.switchTab = function(tabId) {\n" +
+		"  $('.nav-btn').removeClass('active');\n" +
+		"  $(`[onclick=\"switchTab('${tabId}')\"]`).addClass('active');\n" +
+		"};\n" +
+		"async function init() {\n" +
+		"  await waitGlobalInitialized('Mvu');\n" +
+		"  const v = getAllVariables();\n" +
+		"  const s = _.get(v, 'stat_data', {});\n" +
+		"  $('#p-name').text((s.主角 || {}).姓名 || '未知');\n" +
+		"  eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, () => {});\n" +
+		"  switchTab('protagonist');\n" +
+		"}\n" +
+		"init();\n" +
+		"</script>\n" +
+		"</body>\n</html>\n";
+	const full = buildSrcDoc(cardUi, true, true);
+	const scriptBlocks = full.match(/<script[\s\S]*?<\/script>/gi) ?? [];
+	const headBlock = scriptBlocks.slice(0, 3).join("\n");
+	assert.ok(headBlock.includes("jQuery v3.7.1"), "jQuery 进入 head");
+	assert.ok(headBlock.includes("g.Mvu"), "Mvu 壳进入 head");
+	assert.ok(headBlock.includes("getAllVariables"), "变量系统垫片进入 head");
+	// 卡脚本本身完整（未被截断）
+	assert.ok(full.includes("switchTab"), "卡脚本原文在场");
 });
