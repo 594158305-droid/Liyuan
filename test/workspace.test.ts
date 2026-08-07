@@ -18,18 +18,23 @@ const deps = (): WorkspaceDeps => ({
 	baseState: defaultState(),
 });
 
-test("writeTools：写侧六件在清单里，draft_write 声明唯一交稿入口、draft_edit 声明批量原子", () => {
+test("writeTools：写侧八件在清单里，两种落笔写法并列、draft_edit 声明批量原子", () => {
 	const names = writeTools("中文").map((t) => t.name);
 	assert.deepEqual(names, [
 		"draft_write",
+		"draft_append",
+		"draft_seal",
 		"draft_edit",
 		"draft_read",
 		"draft_search",
 		"draft_check",
 		"world_state_update",
 	]);
-	assert.match(writeTools("中文")[0].description, /唯一交稿方式/);
-	assert.match(writeTools("中文")[1].description, /整批不套用/);
+	const byName = new Map(writeTools("中文").map((t) => [t.name, t.description]));
+	assert.match(byName.get("draft_write") ?? "", /全量/);
+	assert.match(byName.get("draft_append") ?? "", /追加|续写/);
+	assert.match(byName.get("draft_seal") ?? "", /封笔/);
+	assert.match(byName.get("draft_edit") ?? "", /整批不套用/);
 });
 
 test("draft_write：收稿落工作区并自动验收；空 content 拒收", () => {
@@ -45,6 +50,79 @@ test("draft_write：收稿落工作区并自动验收；空 content 拒收", () 
 	assert.equal(ws.writes, 1);
 	assert.equal(ws.checks, 1); // 收稿即验，省一轮往返
 	assert.match(r.text, /已收稿（第 1 稿/);
+});
+
+// ---------------- M-E：draft_append / draft_seal（分段续写） ----------------
+
+const minRules = (): WorkspaceDeps => ({
+	...deps(),
+	rules: { ...emptyDraftRules(), wordRange: { min: 800, max: 2000 } },
+});
+
+test("draft_append：追加不覆盖；未封笔时字数不算违规，封笔后按完整稿验收", () => {
+	const ws = createWorkspace();
+	const d = minRules();
+	// 第一段只有 300 字——若按完整稿 800 字下限判，必违规；但这是分段续写的第一段
+	const r1 = runWriteTool(ws, d, "draft_append", { segment: "山门外雪落了一夜。他推门进屋，炉火将熄。" });
+	assert.equal(r1.ok, true);
+	assert.equal(ws.draft, "山门外雪落了一夜。他推门进屋，炉火将熄。");
+	assert.equal(ws.appends, 1);
+	assert.equal(ws.sealed, false);
+	assert.doesNotMatch(r1.text, /违规/); // 未封笔：字数不算违规
+	assert.match(r1.text, /续写中/);
+	// 追加第二段：不覆盖，续在末尾
+	runWriteTool(ws, d, "draft_append", { segment: "她还在窗边坐着，像在等什么。" });
+	assert.ok(ws.draft.includes("山门外雪落了一夜。"));
+	assert.ok(ws.draft.includes("她还在窗边坐着"));
+	assert.equal(ws.appends, 2);
+	// 未封笔时 lastGreen 恒 false（谢幕判定：稿子还没写完，不算完成）
+	assert.equal(ws.lastGreen, false);
+	// 封笔：按完整稿验收（这里字数仍不足 800 → 会判违规）
+	const r3 = runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(ws.sealed, true);
+	assert.match(r3.text, /已封笔/);
+});
+
+test("draft_append：追加进时间线是追加段（draft=true），不塌成替换", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "draft_append", { segment: "第一段。" });
+	runWriteTool(ws, d, "draft_append", { segment: "第二段。" });
+	const draftSegs = ws.timeline.filter((s) => s.kind === "text" && s.draft === true);
+	assert.equal(draftSegs.length, 2, "两段续写应为两个独立稿段");
+	assert.equal((draftSegs[0] as { text: string }).text, "第一段。");
+	assert.equal((draftSegs[1] as { text: string }).text, "第二段。");
+});
+
+test("draft_append：续写后 draft_edit 改一处，时间线保持分段不塌成一整块", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "draft_append", { segment: "山门外的雪落了一夜。" });
+	runWriteTool(ws, d, "draft_append", { segment: "他推门进屋，炉火将熄。" });
+	const r = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "推门进屋", new: "推门进了屋" }] });
+	assert.equal(r.ok, true);
+	assert.equal(ws.edits, 1);
+	const segs = ws.timeline.filter((s) => s.kind === "text" && s.draft === true);
+	assert.equal(segs.length, 2, "改稿后仍是两个稿段（分段形态不塌）");
+});
+
+test("draft_seal：空工作区封笔被拒", () => {
+	const ws = createWorkspace();
+	const r = runWriteTool(ws, deps(), "draft_seal", {});
+	assert.equal(r.ok, false);
+	assert.match(r.text, /draft_write|draft_append/);
+});
+
+test("draft_seal：封笔后 draft_edit 仍可改（封笔≠锁稿，改完再验）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "draft_append", { segment: "山门外的雪落了一夜。" });
+	runWriteTool(ws, d, "draft_append", { segment: "她还在窗边。" });
+	runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(ws.sealed, true);
+	const r = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "窗边", new: "廊下" }] });
+	assert.equal(r.ok, true);
+	assert.ok(ws.draft.includes("廊下"));
 });
 
 test("draft_write：全量替换语义——第二稿覆盖第一稿", () => {
@@ -115,12 +193,13 @@ test("未知写侧工具名：可读文本，不抛", () => {
 
 // ---------------- M-B：draft_edit / draft_read / draft_search ----------------
 
-test("draft_edit：无稿时拒绝——初稿必须走 draft_write（唯一交稿入口不被绕过）", () => {
+test("draft_edit：无稿时拒绝——改稿之前必须先落笔（两种写法都指路）", () => {
 	const ws = createWorkspace();
 	const r = runWriteTool(ws, deps(), "draft_edit", { edits: [{ old: "甲", new: "乙" }] });
 	assert.equal(r.ok, false);
 	assert.equal(ws.edits, 0);
-	assert.match(r.text, /先用 draft_write/);
+	assert.match(r.text, /draft_append/);
+	assert.match(r.text, /draft_write/);
 });
 
 test("draft_edit：多处定点替换一次套用，改稿即验，稿次不增而 edits 增", () => {

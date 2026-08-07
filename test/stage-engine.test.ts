@@ -443,9 +443,11 @@ test("引擎工具：查设定 → 结果回喂 → 续演正文；工具装配�
 		const names = (ctxs[0].tools ?? []).map((t) => t.name).sort();
 		assert.deepEqual(names, [
 			"card_read",
+			"draft_append",
 			"draft_check",
 			"draft_edit",
 			"draft_read",
+			"draft_seal",
 			"draft_search",
 			"draft_write",
 			"lorebook_list",
@@ -516,6 +518,97 @@ test("引擎循环：draft_write 工具交稿 → 收稿即验回喂 → 收笔�
 		assert.ok(draftFlags.length > 0, "draft_write 转发带 draft 标记（前端替换语义）");
 		assert.ok(JSON.stringify(ctxs[1].messages).includes("已收稿"), "收稿+验收报告以 toolResult 回喂");
 		assert.ok(activities.some((a) => a.includes("交稿")), "过程条报告交稿");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎循环：draft_append 分段续写 → 中途查证 → draft_seal 封笔 → 定稿为拼接全文（M-E）", async () => {
+	const { cwd, sm } = makeStage();
+	addLorebook(cwd);
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([
+			// 第一段：先写开头
+			fauxAssistantMessage([fauxToolCall("draft_append", { segment: "山门外的雪落了一夜。" })], {
+				stopReason: "toolUse",
+			}),
+			// 写到需要查证的地方停下来查——这正是分段续写要换来的东西
+			fauxAssistantMessage([fauxToolCall("lorebook_search", { query: "骨誓" })], { stopReason: "toolUse" }),
+			// 拿到设定后接着往下写
+			fauxAssistantMessage([fauxToolCall("draft_append", { segment: "他记起北境的规矩：背誓不得入祠。" })], {
+				stopReason: "toolUse",
+			}),
+			// 封笔
+			fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage(""), // 看到验收报告 → 收笔
+			fauxScribeEmpty(),
+		]);
+		const activities: string[] = [];
+		let streamed = "";
+		let resets = 0;
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {
+			onActivity: (d) => activities.push(d),
+			onDelta: (kind, d, draft, reset) => {
+				if (kind !== "text") return;
+				streamed += d;
+				if (draft && reset) resets++;
+			},
+		});
+		await engine.performTurn("我推门进屋。");
+
+		const { history } = rebuildHistory(sm.getBranch() as BranchEntryLike[]);
+		const finalText = history[history.length - 1].text;
+		assert.ok(finalText.includes("山门外的雪落了一夜。"), "第一段在定稿里");
+		assert.ok(finalText.includes("背誓不得入祠"), "续写的第二段也在定稿里（追加不覆盖）");
+		assert.ok(
+			finalText.indexOf("山门外") < finalText.indexOf("背誓不得入祠"),
+			"两段按写作顺序拼接",
+		);
+		// 关键体验：续写不得 reset——已上屏的段落是已经发生的事，不能被擦掉重排
+		assert.equal(resets, 0, "draft_append 的流式转发不带 reset（不清屏重写）");
+		assert.ok(streamed.includes("山门外的雪落了一夜。"), "第一段流式上屏");
+		assert.ok(streamed.includes("背誓不得入祠"), "第二段流式上屏");
+		assert.ok(
+			activities.some((a) => a.includes("续写第 1 段")) && activities.some((a) => a.includes("续写第 2 段")),
+			"过程条按段报告续写",
+		);
+		assert.ok(activities.some((a) => a.includes("封笔")), "过程条报告封笔");
+		// 时间线持久化：两段独立记档（刷新后仍是「一段段长出来」的形态）
+		const branch = JSON.stringify(sm.getBranch());
+		assert.ok(branch.includes("rpTimeline"), "时间线随 details 持久化");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎循环：draft_append 后忘了封笔 → 催告一轮 → 仍不封则兜底封笔，正文不丢（M-E）", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const ctxs: Array<{ messages: unknown[] }> = [];
+		reg.setResponses([
+			fauxAssistantMessage([fauxToolCall("draft_append", { segment: "她把伞收在门外，抖了抖雪。" })], {
+				stopReason: "toolUse",
+			}),
+			// 停手但没封笔 → 引擎应催告一轮
+			(ctx) => {
+				ctxs.push(ctx as never);
+				return fauxAssistantMessage(""); // 催告后仍不封笔
+			},
+			fauxScribeEmpty(),
+		]);
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {});
+		await engine.performTurn("我抬头看她。");
+
+		assert.ok(
+			JSON.stringify(ctxs[0]?.messages ?? []).includes("还没封笔"),
+			"停手未封笔时引擎催告一轮",
+		);
+		const { history } = rebuildHistory(sm.getBranch() as BranchEntryLike[]);
+		assert.equal(history[history.length - 1].text, "她把伞收在门外，抖了抖雪。", "兜底封笔，正文照常落树");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

@@ -621,6 +621,13 @@ export class StageEngine {
 		const aborted = final?.stopReason === "aborted";
 		if (!text) text = textOfAssistant(final);
 
+		// M-E 兜底封笔：分段续写完但模型始终没调 draft_seal（催告已给过一轮）。
+		// 不封笔的稿从未按完整稿验收过——此处程序化补一次，让字数/模块/主权
+		// 与一次性交稿走同一口径；报告只进日志，不再回喂模型（本拍已谢幕）。
+		if (ws.appends > 0 && !ws.sealed && ws.draft.trim()) {
+			runWriteTool(ws, wsDeps, "draft_seal", {});
+		}
+
 		// 定稿 = 工作区稿（工件）；工作区空（中断半拍/循环认栽）退回直出正文
 		// **但**模型常把格式栈尾巴（状态栏/catsay 等）走 text 通道而非 draft_write 参数：
 		// 二选一会把那部分连内容一起扔掉（8/05 实锤：模型宣告要出「正文+状态栏+咪咪点评」，
@@ -835,6 +842,7 @@ export class StageEngine {
 		let text = "";
 		let nudged = false; // 逼稿/报告喂回各只给一轮机会，防空转
 		let tailPass = false; // 收尾放行（模型停手且有稿时，给一轮机会写格式栈尾巴）
+		let sealNudged = false; // 封笔催告（M-E：分段续写完但忘了 draft_seal），只给一轮
 		let lastConsumed = 0; // 本轮开始时 text 长度——判定「本轮新产出文本」用
 
 		for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -854,6 +862,25 @@ export class StageEngine {
 				// 故：有稿、本轮零产出、且上一轮思考宣告过写尾巴的意图时，
 				// 放行一轮收尾（tailPass 只给一次，防空转）。
 				if (o.ws.draft.trim()) {
+					// M-E：分段续写忘了封笔——稿在但从未按完整稿验收过。催一次封笔
+					// （只给一次，防空转）；仍不封则谢幕时兜底封笔，不让本拍丢正文。
+					if (o.ws.appends > 0 && !o.ws.sealed && !sealNudged) {
+						sealNudged = true;
+						convo.push(last);
+						convo.push({
+							role: "user",
+							content: [
+								{
+									type: "text",
+									text:
+										`你用 draft_append 续写了 ${o.ws.appends} 段但还没封笔。` +
+										`正文写完了就调用 draft_seal 按完整稿验收（字数/禁词/格式/主权全量判定）；还没写完就接着续写。`,
+								},
+							],
+							timestamp: Date.now(),
+						});
+						continue;
+					}
 					if (text.trim()) break; // 本轮已有产出（可能正是尾巴）→ 正常谢幕
 					if (tailPass || (!hasTailIntent(last) && !hasTailIntent(o.first))) break;
 					tailPass = true;
@@ -986,33 +1013,45 @@ export class StageEngine {
 	}
 
 	/**
-	 * D1：draft_write 的 content 参数流式转发——工件正文照常逐字上屏。
+	 * D1：draft_write / draft_append 的正文参数流式转发——工件正文照常逐字上屏。
 	 * toolcall_delta 用渐进解析的 arguments（openai-completions 每帧重解 partialArgs）；
 	 * toolcall_end 兜底补齐后缀（faux 等不做渐进解析的 provider 在此整段上屏）。
 	 * 每条流各建一个（sent 按 contentIndex 记已发长度，保证不重发）。
+	 *
+	 * M-E：draft_append 是**追加**语义，reset 必须为 false——已上屏的段落是
+	 * 已经发生的事，续写不能把它擦掉重排（那正是分段续写要消除的体验）。
 	 */
 	#draftForwarder(): (e: StageStreamEvent) => void {
 		const ev = this.#deps.events ?? {};
 		const sent = new Map<number, number>();
-		const forward = (idx: number, content: unknown) => {
+		const forward = (idx: number, content: unknown, append = false) => {
 			if (typeof content !== "string") return;
 			const prev = sent.get(idx) ?? 0;
 			if (content.length <= prev) return;
 			// draft=true：稿件流是替换语义（重交不叠加）——与 runWriteTool 的
 			// replaceDraftSegment 同语义，wire 层透传给前端时间线。
 			// reset=true：本次 draft_write 调用的首个分片——前端用它清掉旧稿。
-			const isFirst = !sent.has(idx);
+			const isFirst = !append && !sent.has(idx);
 			ev.onDelta?.("text", content.slice(prev), true, isFirst);
 			sent.set(idx, content.length);
+		};
+		/** 取正文参数：draft_write 用 content，draft_append 用 segment */
+		const pick = (name: string | undefined, args: Record<string, unknown> | undefined) => {
+			if (name === "draft_write") return { text: args?.content, append: false };
+			if (name === "draft_append") return { text: args?.segment, append: true };
+			return undefined;
 		};
 		return (e) => {
 			const idx = e.contentIndex;
 			if (typeof idx !== "number") return;
 			if (e.type === "toolcall_delta") {
 				const block = e.partial?.content?.[idx];
-				if (block?.type === "toolCall" && block.name === "draft_write") forward(idx, block.arguments?.content);
+				if (block?.type !== "toolCall") return;
+				const p = pick(block.name, block.arguments);
+				if (p) forward(idx, p.text, p.append);
 			} else if (e.type === "toolcall_end") {
-				if (e.toolCall?.name === "draft_write") forward(idx, e.toolCall.arguments?.content);
+				const p = pick(e.toolCall?.name, e.toolCall?.arguments);
+				if (p) forward(idx, p.text, p.append);
 			}
 		};
 	}

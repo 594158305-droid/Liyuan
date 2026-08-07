@@ -27,10 +27,20 @@ import { applyPatch, canonicalizeCharacterKeys } from "../state.ts";
 import type { WorldState } from "../types.ts";
 
 export interface TurnWorkspace {
-	/** 当前稿（draft_write 全量替换语义） */
+	/** 当前稿（draft_write 全量替换语义；draft_append 追加语义） */
 	draft: string;
+	/**
+	 * 已封笔（M-E）：正文写完了，可以按完整稿验收。
+	 *
+	 * 分段续写下「稿子存在」不等于「稿子写完」——首段 300 字不该被预设的 800 字
+	 * 下限判违规。故未封笔时字数一项降为提示，封笔后（或走 draft_write 全量交稿）
+	 * 才按完整稿口径验收。
+	 */
+	sealed: boolean;
 	/** 交稿次数（含宽进严出代收；验收统计「思考量 × draft_write 调用数」用） */
 	writes: number;
+	/** draft_append 追加段数（M-E KPI：分段续写是否真发生） */
+	appends: number;
 	/** draft_edit 成功套用的次数（M-B KPI：定点改稿是否真替代了全文重交） */
 	edits: number;
 	/** world_state_update 已验证入队的 patch（定稿后按序统一套用） */
@@ -64,7 +74,7 @@ export type TurnSegment =
 	| { kind: "tool"; activities: Array<{ kind: string; name: string; detail?: string; isError?: boolean }> };
 
 export function createWorkspace(): TurnWorkspace {
-	return { draft: "", writes: 0, edits: 0, patches: [], lastGreen: false, checks: 0, timeline: [] };
+	return { draft: "", sealed: false, writes: 0, appends: 0, edits: 0, patches: [], lastGreen: false, checks: 0, timeline: [] };
 }
 
 /** 时间线追加：同类并入末段（连续工具聚成一组），异类开新段 */
@@ -129,6 +139,22 @@ function replaceDraftSegment(ws: TurnWorkspace, content: string): void {
 	ws.timeline.push({ kind: "text", text: content, draft: true });
 }
 
+/**
+ * 定点改稿后同步时间线（M-E）：分段续写时**保持分段**，只把整稿重新切回各段。
+ *
+ * 续写形态下屏上是「一段段长出来的故事」，若改一处就塌成一整块，
+ * 已经上屏的部分会在用户眼前重排——那正是 draft_append 要消除的体验。
+ * 故按段落边界重切：稿件以 `\n\n` 分段，逐段替换已记的稿段。
+ */
+function resyncDraftSegments(ws: TurnWorkspace): void {
+	const firstIdx = ws.timeline.findIndex((s) => s.kind === "text" && s.draft === true);
+	ws.timeline = ws.timeline.filter((s) => !(s.kind === "text" && s.draft === true));
+	const parts = ws.draft.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
+	const segs: TurnSegment[] = parts.map((p) => ({ kind: "text" as const, text: p, draft: true }));
+	if (firstIdx >= 0) ws.timeline.splice(Math.min(firstIdx, ws.timeline.length), 0, ...segs);
+	else ws.timeline.push(...segs);
+}
+
 export interface WorkspaceDeps {
 	rules: DraftRules;
 	userName: string;
@@ -165,11 +191,25 @@ function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green
 	// D-C5 降档：预设自带 user_boundary（允许代言对白）时不以「代写对白」打回
 	if (deps.relaxSovereignty) sov = sov.filter((s) => !s.startsWith("代写对白"));
 	ws.checks++;
-	const green = report.violations.length === 0 && sov.length === 0;
-	ws.lastGreen = green;
-	const lines = [formatDraftReport(report)];
+	// 未封笔（分段续写中）：字数与缺模块都不算违规——稿子还没写完，
+	// 拿完整稿口径判在写的段落，只会把模型逼回「一次交完」。降为提示。
+	const pending = ws.appends > 0 && !ws.sealed;
+	const violations = pending
+		? report.violations.filter((v) => !v.startsWith("正文 ") && !v.startsWith("缺模块") && !v.startsWith("缺状态栏"))
+		: report.violations;
+	const green = violations.length === 0 && sov.length === 0;
+	ws.lastGreen = green && !pending;
+	const lines = [formatDraftReport({ ...report, violations })];
 	if (sov.length > 0) lines.push(sov.map((s) => `- [主权] ${s}`).join("\n"));
-	if (green) lines.push("验收通过：可定稿（停止调用工具即交付此稿），或继续打磨。");
+	if (pending) {
+		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;
+		lines.push(
+			`续写中（已 ${ws.appends} 段，正文 ${body} 字，未封笔）：` +
+				`接着 draft_append 往下写；写到头了用 draft_seal 封笔并按完整稿验收。`,
+		);
+	} else if (green) {
+		lines.push("验收通过：可定稿（停止调用工具即交付此稿），或继续打磨。");
+	}
 	return { text: lines.join("\n"), green };
 }
 
@@ -188,6 +228,7 @@ export function runWriteTool(
 		if (!content.trim()) return { text: "content 为空——请提交完整正文。", ok: false };
 		ws.draft = content;
 		ws.writes++;
+		ws.sealed = true; // 全量交稿即完整稿，天然封笔
 		// 时间线：正文按交稿位置入档。重交是**替换**不是追加——
 		// 末段若已是本工作区写过的正文，改写它，避免多稿在屏上叠成几份。
 		replaceDraftSegment(ws, content);
@@ -200,6 +241,35 @@ export function runWriteTool(
 		};
 	}
 
+	if (name === "draft_append") {
+		const seg = typeof args.segment === "string" ? args.segment : "";
+		if (!seg.trim()) return { text: "segment 为空——请提交要续写的段落。", ok: false };
+		const sep = ws.draft.trim().length > 0 ? "\n\n" : "";
+		ws.draft += sep + seg;
+		ws.appends++;
+		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;
+		// 续写的正文入时间线：追加一段（不是替换——已写的部分是已经发生的事，不推翻）
+		ws.timeline.push({ kind: "text", text: seg, draft: true });
+		// 收段即验：报告当前状态（字数/禁词），但未封笔不判字数违规
+		const c = runCheck(ws, deps);
+		return {
+			text: `已续写（第 ${ws.appends} 段，正文 ${body} 字）。当前状态：\n${c.text}`,
+			activity: `续写第 ${ws.appends} 段 · ${body} 字`,
+			ok: true,
+		};
+	}
+
+	if (name === "draft_seal") {
+		if (!ws.draft.trim()) return { text: "工作区还没有稿件——先用 draft_write / draft_append 写正文。", ok: false };
+		ws.sealed = true;
+		const c = runCheck(ws, deps);
+		return {
+			text: `已封笔。按完整稿验收：\n${c.text}`,
+			activity: c.green ? "封笔 · 验收通过" : "封笔 · 需修改",
+			ok: true,
+		};
+	}
+
 	if (name === "draft_check") {
 		if (!ws.draft.trim()) return { text: "尚无稿件——先用 draft_write 交稿。", ok: false };
 		const c = runCheck(ws, deps);
@@ -207,7 +277,7 @@ export function runWriteTool(
 	}
 
 	if (name === "draft_edit") {
-		if (!ws.draft.trim()) return { text: "尚无稿件——先用 draft_write 提交初稿，再定点修改。", ok: false };
+		if (!ws.draft.trim()) return { text: "尚无稿件——先写正文（draft_append 续写 / draft_write 全量交稿），再定点修改。", ok: false };
 		const raw = args.edits;
 		if (!Array.isArray(raw) || raw.length === 0) {
 			return { text: 'edits 需为非空数组，如 [{"old":"原文","new":"新文"}]。', ok: false };
@@ -220,8 +290,10 @@ export function runWriteTool(
 		}
 		ws.draft = r.text;
 		ws.edits++;
-		// 时间线：定点改稿后正文原地更新（改的是同一份稿，不新开一段）
-		replaceDraftSegment(ws, ws.draft);
+		// 时间线：定点改稿后正文原地更新（改的是同一份稿，不新开一段）。
+		// 续写形态下按段重切，保住「一段段长出来」的形态不塌成一整块。
+		if (ws.appends > 0) resyncDraftSegments(ws);
+		else replaceDraftSegment(ws, ws.draft);
 		// 改稿即验（与 draft_write 收稿即验同理）：省一轮往返
 		const c = runCheck(ws, deps);
 		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;

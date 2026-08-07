@@ -95,15 +95,36 @@ export function writeTools(language: string): StageTool[] {
 		{
 			name: "draft_write",
 			description:
-				`提交本拍正文（${language}）。这是**唯一交稿方式**——不调用此工具即无正文产出。` +
-				`全量替换语义：每次提交完整正文，覆盖上一稿。写完一稿就提交，验收报告会告诉你哪里要改；` +
-				`不要在思考里反复排练——先交稿，再按报告修。` +
+				`提交本拍正文（${language}）。这是**唯一交稿方式**——不调用写工具即无正文产出。` +
+				`全量替换语义：每次提交完整正文，覆盖上一稿。` +
+				`不要在思考里反复排练——先落笔，再按验收报告改。` +
+				`可以一次性写完整篇；也可以先写一部分，之后用 draft_append 接着写。` +
 				`**已有稿之后的局部修改一律用 draft_edit 定点改，不要重交全文。**`,
 			parameters: {
 				type: "object",
 				properties: { content: { ...STR, description: "完整正文（纯剧情文字，不含状态栏等格式区块）" } },
 				required: ["content"],
 			},
+		},
+		{
+			name: "draft_append",
+			description:
+				`在现稿末尾**追加**一段正文（${language}），不覆盖已写部分。` +
+				`适合边写边推进：写完一段就交一段，已写的就是已经发生的事，不会被打回。` +
+				`追加后自动给出当前状态（字数/禁词/是否正站在分岔口）。` +
+				`全部写完后调用 draft_seal 封笔，按完整稿验收。`,
+			parameters: {
+				type: "object",
+				properties: { segment: { ...STR, description: "要续写的正文段落（自然段，不含状态栏等格式区块）" } },
+				required: ["segment"],
+			},
+		},
+		{
+			name: "draft_seal",
+			description:
+				"封笔：声明正文已全部写完，按完整稿验收（字数/禁词/模块/主权全量判定）。" +
+				"分段续写（draft_append）结束后必须调用本工具，否则本拍没有最终正文。",
+			parameters: { type: "object", properties: {}, required: [] },
 		},
 		{
 			name: "draft_edit",
