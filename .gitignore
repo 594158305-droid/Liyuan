@@ -25,6 +25,7 @@ packages/**/node_modules/
 
 # local secrets & personal config（含密钥，禁止提交）
 liyuan.agent.json
+liyuan.config.json
 liyuan.draw.json
 liyuan-preset.json
 .liyuan-mcp.json
