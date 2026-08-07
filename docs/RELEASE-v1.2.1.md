@@ -14,12 +14,6 @@ Are you trying to mount a directory onto a file (or vice-versa)?
 
 已经踩上的用户升级后直接起即可，不用手工删任何东西——启动脚本会认出那两个误建的空目录，清掉并重新播种。若你之前按旧文档手工填过 `data/config/liyuan.agent.json`（是文件不是目录），它会被原样保留，Key 不丢。
 
-## 其他改进
-
-- **默认素材不再被遮住**：`data/cards` 目录挂载会盖掉镜像自带的默认角色卡「青梧」与示例世界书，现在首启会补一份进去。
-- **换行规范**：新增 `.gitattributes`，保证 shell 脚本以 LF 入库。此前 Windows 用户 clone 出的 `start.sh` 是 CRLF，在容器内会报 `bad interpreter`。
-- **CI 补上 Docker 覆盖**：新增一条流水线，跑的正是「干净 clone 直接 up」这条路径，外加静态检查禁止 compose 里再出现单文件挂载。这类问题以后发不出去。
-
 ## 安装包
 
 | 平台 | 文件 |
