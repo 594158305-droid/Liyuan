@@ -1,0 +1,29 @@
+{
+	"card": "assets/cards/StarMini.png",
+	"lorebooks": [
+		"assets/lorebooks/【SHOW 】世界观 3000 Gemini.json",
+		"assets/lorebooks/【人物】总书 100 Gemini.json",
+		"assets/lorebooks/【功能】acg角色心理模型 5000 N.json",
+		"assets/lorebooks/【角色】自用角色书 - 同步版 7000 Gemini.json",
+		"assets/lorebooks/【绝对零度写作】安全版.json",
+		"assets/lorebooks/【黑天鹅】女性立体描写 2.0.json",
+		"assets/lorebooks/【黑天鹅】女性反差.json",
+		"assets/lorebooks/【黑天鹅】名器设计.json",
+		"assets/lorebooks/🍊外貌描写指南v2.2.json",
+		"assets/lorebooks/🍊拉扯感协议v2.1.json"
+	],
+	"userName": "编撰者",
+	"userPersona": "作为一个高维观察者，不会亲自参与到故事中，而是通过笔墨操作和演绎着世界的发展。",
+	"language": "中文",
+	"scanDepth": 4,
+	"maxLoreInjections": 3,
+	"greeting": true,
+	"backendControl": true,
+	"creationMode": "ask",
+	"importStripTags": [],
+	"preset": "assets/presets/梦鲸思客V4-0802.json",
+	"assistantModel": {
+		"provider": "opencode-go",
+		"id": "deepseek-v4-flash"
+	}
+}

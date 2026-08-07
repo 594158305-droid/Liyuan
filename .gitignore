@@ -23,10 +23,8 @@ packages/**/node_modules/
 .rp-uploads/
 .playwright-mcp/
 
-# local secrets & personal config
+# local secrets & personal config（含密钥，禁止提交）
 liyuan.agent.json
-liyuan.agent.meta.json
-liyuan.config.json
 liyuan.draw.json
 liyuan-preset.json
 .liyuan-mcp.json
@@ -38,9 +36,9 @@ liyuan-profiles/
 .env
 .env.*
 
-# 服装档案（用户资产；refs 参考图也在此目录）
-.liyuan-wardrobe/
-.liyuan-agents/
+# 服装档案与 agent 会话（用户素材，已确认不含密钥，允许提交）
+# .liyuan-wardrobe/
+# .liyuan-agents/
 
 # logs / build noise
 *.log
@@ -67,15 +65,15 @@ assets/cards/Living With Slaves.png
 assets/cards/淫宫*
 assets/lorebooks/Living With Slaves.json
 assets/lorebooks/淫宫*
-assets/presets/
+# assets/presets/
 assets/ab-test/
 assets/import-test/
-assets/personas/
+# assets/personas/
 
-# 个人素材（自 TauriTavern 导入的角色卡 PNG 与世界书，不入库）
-assets/cards/*.png
+# 个人素材（已确认不含密钥，允许提交；仅排除下载缓存 *.png.*）
+# assets/cards/*.png
 assets/cards/*.png.*
-assets/lorebooks/
+# assets/lorebooks/
 
 # local debug screenshots (not for testers)
 web/shot-*.png

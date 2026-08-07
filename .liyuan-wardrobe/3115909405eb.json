@@ -1,0 +1,29 @@
+{
+	"format": "liyuan-wardrobe",
+	"version": 1,
+	"cardPath": "assets/cards/StarMini.png",
+	"characters": [
+		{
+			"name": "伊利亚斯",
+			"appearanceTags": "",
+			"outfits": [
+				{
+					"id": "abd59862",
+					"name": "光之神降临白袍",
+					"tags": "1.2::white dress::, off-shoulder dress, high slit, slit dress, long dress, silk dress, gold trim, bare shoulders, angel wings, golden halo, long golden hair, blue eyes, pale skin, glowing"
+				}
+			]
+		},
+		{
+			"name": "凯尔",
+			"appearanceTags": "",
+			"outfits": [
+				{
+					"id": "8495bcfe",
+					"name": "裸体",
+					"tags": "nude, naked, male, muscular, short dark hair, average build"
+				}
+			]
+		}
+	]
+}
