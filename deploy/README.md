@@ -38,13 +38,22 @@ docker compose up -d --build
 # 打开 http://服务器IP:7620
 ```
 
-挂载自定义密钥：
+首启无需任何手工准备。容器会自己在宿主机建好 `./data/`：
+
+```
+data/config/liyuan.config.json   角色卡 / 世界书 / 用户身份（从 example 播种）
+data/config/liyuan.agent.json    模型与 API Key（从 example 播种，勿提交仓库）
+data/cards/                      角色卡，含默认「青梧」
+data/lorebooks/                  世界书
+```
+
+填 Key 有两条路，任选：
 
 ```bash
-cp liyuan.agent.example.json liyuan.agent.json
-# 编辑 apiKey
-# 在 docker-compose.yml 取消 volumes 里 agent/config 挂载注释后
-docker compose up -d
+# 路子一：直接在网页的「连接」面板里填，即时生效，不用重启
+# 路子二：改文件
+nano data/config/liyuan.agent.json
+docker compose restart
 ```
 
 停止 / 清理：
@@ -54,3 +63,16 @@ docker compose down
 # 连数据一起删：
 docker compose down -v
 ```
+
+### 报错 "Are you trying to mount a directory onto a file?"
+
+v1.2.0 及更早版本把 `liyuan.config.json` / `liyuan.agent.json` 做了文件级挂载。宿主机上没有这两个文件时，Docker 会建两个**空目录**顶上去，撞上镜像里的同名文件就崩（[issue #1](https://github.com/weidu12123/Liyuan/issues/1)）。v1.2.1 起改成只挂 `data/config` 目录，不会再有这问题。
+
+已经踩上的话，拉新版直接起就行，不用手工删任何东西——entrypoint 会认出那两个空目录、清掉并重新播种：
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+若你之前按旧文档手工填过 `data/config/liyuan.agent.json`（是文件不是目录），它会被原样保留，Key 不丢。

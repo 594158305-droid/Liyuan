@@ -110,3 +110,55 @@ jobs:
           ! grep -q $'\r' start.command
           bash -n start.sh
           bash -n start.command
+
+  # issue #1：文件级 bind mount 让干净 clone 直接崩，而当时 CI 完全不碰 Docker。
+  # 这个 job 走的就是 README 那条路：clone 后什么都不准备，直接 up。
+  docker:
+    name: docker compose (clean clone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: entrypoint is LF-only bash
+        run: |
+          head -n1 docker-entrypoint.sh | grep -q '#!/usr/bin/env bash'
+          ! grep -q $'\r' docker-entrypoint.sh
+          bash -n docker-entrypoint.sh
+
+      - name: No file-level bind mounts in compose
+        run: |
+          # 挂 *.json 单文件 = issue #1 的成因；只允许目录挂载
+          ! grep -nE '^\s*-\s*\./[^:]*\.json:' docker-compose.yml
+
+      - name: Up from a pristine tree
+        run: docker compose up -d --build --wait --wait-timeout 300
+
+      - name: Config seeded as real files (not directories)
+        run: |
+          test -f data/config/liyuan.config.json
+          test -f data/config/liyuan.agent.json
+          python3 -c "import json;json.load(open('data/config/liyuan.agent.json'))"
+          python3 -c "import json;json.load(open('data/config/liyuan.config.json'))"
+
+      - name: Default assets survive the volume mount
+        run: test -f data/cards/default_Qingwu.json
+
+      - name: HTTP probe
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7620/)
+          test "$code" = 200 || { echo "GET / -> $code"; docker compose logs --tail=60; exit 1; }
+
+      - name: Restart is idempotent (config not clobbered)
+        run: |
+          python3 - <<'PY'
+          import json
+          p='data/config/liyuan.agent.json'
+          d=json.load(open(p)); d['__ci_probe']=1
+          json.dump(d, open(p,'w'))
+          PY
+          docker compose restart --wait --wait-timeout 300
+          grep -q __ci_probe data/config/liyuan.agent.json
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=200

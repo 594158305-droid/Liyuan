@@ -1,0 +1,24 @@
+# 默认交给 git 自行判断文本/二进制
+* text=auto
+
+# Shell 脚本必须是 LF：Windows 上 clone 出 CRLF 的话，
+# Docker 镜像里的 /bin/bash 会报 "bad interpreter: No such file or directory"
+*.sh text eol=lf
+start.command text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+
+# Windows 启动器保持 CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制素材不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zip binary

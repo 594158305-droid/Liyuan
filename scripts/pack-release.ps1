@@ -182,6 +182,7 @@ function Stage-Clean {
     ".superpowers", "superpowers",
     "scratch", "summaries", "output", "persist",
     "ab-test", "import-test", "liyuan-profiles",
+    "data",
     "assets/gen", "assets/presets"
   )
   $xf = @(
@@ -288,7 +289,7 @@ function Stage-Clean {
 function Normalize-UnixScripts {
   param([string]$Dest)
   $utf8 = New-Object System.Text.UTF8Encoding $false
-  foreach ($name in @("start.sh", "start.command", "deploy\install.sh")) {
+  foreach ($name in @("start.sh", "start.command", "docker-entrypoint.sh", "deploy\install.sh")) {
     $p = Join-Path $Dest $name
     if (Test-Path $p) {
       $t = [IO.File]::ReadAllText($p) -replace "`r`n", "`n" -replace "`r", "`n"
@@ -314,7 +315,7 @@ skip_dirs = {
   '.liyuan-uploads', '.liyuan-audio', '.liyuan-worldline',
   '.rp-media', '.rp-uploads'
 }
-exec_names = {'start.sh', 'start.command', 'install.sh'}
+exec_names = {'start.sh', 'start.command', 'install.sh', 'docker-entrypoint.sh'}
 with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
     for root, dirs, files in os.walk(stage):
         dirs[:] = [d for d in dirs if d not in skip_dirs]

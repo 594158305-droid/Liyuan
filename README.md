@@ -100,9 +100,11 @@ npm run web         # 起服务；npm run web:new 开新会话
 curl -fsSL https://raw.githubusercontent.com/weidu12123/Liyuan/v1.0.0/deploy/install.sh | bash
 # 装好后填 Key：nano /opt/liyuan/liyuan.agent.json，然后 systemctl restart liyuan
 
-# 方式 B：Docker Compose（数据全在命名卷里，升级重建不丢档）
+# 方式 B：Docker Compose（数据全在卷里，升级重建不丢档）
 git clone --depth 1 https://github.com/weidu12123/Liyuan.git && cd Liyuan
 docker compose up -d --build
+# 首启会自动生成 ./data/config/liyuan.agent.json，填入 Key 后 docker compose restart
+# （也可以直接在网页的连接面板里填，无需改文件）
 
 # 方式 C：手动打包上传（Windows 本机执行，产出免 node_modules 的 zip）
 powershell -File scripts/pack-for-linux.ps1

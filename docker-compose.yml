@@ -2,7 +2,8 @@
 # 用法：
 #   docker compose up -d --build
 #   浏览器 http://localhost:7620
-#   编辑密钥：把本地 liyuan.agent.json 挂进去，或 docker exec 进容器改
+#   填 API Key：编辑 ./data/config/liyuan.agent.json（首启自动生成），然后
+#               docker compose restart；也可以直接在网页的连接面板里改
 
 services:
   liyuan:
@@ -30,13 +31,13 @@ services:
       - liyuan-artifacts:/app/.liyuan-artifacts
       - liyuan-codex:/app/.liyuan-codex
       - liyuan-lore:/app/.liyuan-lore
-      # 用户导入的角色卡 / 世界书 / 配置（重建镜像不丢）
-      # 首次：mkdir -p data/cards data/lorebooks data/config
-      #        并把 example 拷到 data/config/ 再 up
+      # 配置 + 用户导入的角色卡 / 世界书（重建镜像不丢）
+      # 无需任何手工准备：目录不存在时 Docker 自建，首启由 entrypoint 从 example 播种。
+      # 只挂目录、不挂单个文件——文件级 bind mount 在宿主机缺文件时会被 Docker
+      # 当成目录创建，撞上容器内的同名文件直接崩（issue #1）。
+      - ./data/config:/app/config
       - ./data/cards:/app/assets/cards
       - ./data/lorebooks:/app/assets/lorebooks
-      - ./data/config/liyuan.config.json:/app/liyuan.config.json
-      - ./data/config/liyuan.agent.json:/app/liyuan.agent.json
     healthcheck:
       test:
         [
