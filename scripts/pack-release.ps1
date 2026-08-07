@@ -267,7 +267,11 @@ function Stage-Clean {
     "_*",
     "TESTING.md",
     "docs\st-ux-inventory.md",
-    "docs\superpowers"
+    "docs\superpowers",
+    # 内部架构设计文档：研发过程记录（含逆向分析路径、未修问题定位、
+    # 被数据推翻的自我结论），仓库里可见即可，不随发布包分发
+    "docs\PLAN-*.md",
+    "docs\PRESET-SPLIT-TAXONOMY.md"
   )
   foreach ($g in $dropGlobs) {
     $p = Join-Path $dest $g

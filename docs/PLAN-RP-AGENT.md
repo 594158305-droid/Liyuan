@@ -1,7 +1,6 @@
 # PLAN-RP-AGENT：把扮演当成代码来生成（tools 层 + harness 层设计契约）
 
-> 2026-08-03 定稿。前置：用户定案「死磕思考问题」；46KB 思考文件逐行实证（E:\新建文件夹 (8)\Let me
-> work through this carefully..txt）；上轮 harness 重建（PLAN-RP-HARNESS.md）M0–M4 已实弹验证但
+> 2026-08-03 定稿。前置：用户定案「死磕思考问题」；46KB 思考文件逐行实证（本地留档）；上轮 harness 重建（PLAN-RP-HARNESS.md）M0–M4 已实弹验证但
 > M4.5 提速负收益、M5 未做。本文档是「RP agent 化」的完整设计契约——tools 层（写作工具栈）+
 > harness 层（预设拆三层），两层合起来回答一个问题：**为什么梨园不是 RP agent，以及怎么把它变成**。
 

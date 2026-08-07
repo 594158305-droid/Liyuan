@@ -148,7 +148,7 @@ M-A 实弹时格式栈不会完全消失（预设还在要求 w2g/catsay）—�
 
 - **实弹在场预设 = TGbreak😺V2.1.6，46 启用块 / 11517 字**（`.liyuan/preset-override.json`
   优先生效）。「67 块 / 49173 字」是 Agent 版双人成行的数字，且该版残缺——分析语料一律用
-  正常版（`E:\新建文件夹 (9)`）。
+  正常版（本地留档）。
 - **格式栈实测形态**（M-A f1 落树 8469 字）：draft_notes/w2g/catsay/details 摘要/
   UpdateVariable+JSONPatch 全套在正文里；模型调了 world_state_update 仍手写 UpdateVariable
   =双份记账。⚠ KPI 参照修正：f1「交稿 3564 字」是含格式栈的 content，**真正文
