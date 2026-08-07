@@ -49,9 +49,28 @@ import {
 	type CardFieldPatch,
 } from "../src/card.ts";
 import {
+	addGroup,
+	addRule,
 	buildCardFrontSnapshot,
+	cardGroupsOf,
+	copyGroup,
+	displayRules,
+	extractRegexScripts,
+	moveGroup,
+	moveRule,
+	parseFindRegex,
+	removeGroup,
+	removeRule,
+	setCardGroups,
+	setCardRuleOff,
 	setSkinEnabled,
+	setUserGroups,
+	updateGroup,
+	updateRule,
+	userGroupsOf,
 	type CardFrontSnapshot,
+	type DisplayRule,
+	type RuleGroup,
 } from "../src/cardfront.ts";
 import {
 	appendCodexEntry,
@@ -122,7 +141,7 @@ import {
 	type McpServerConfig,
 } from "../src/mcp.ts";
 import { listSkills, saveSkill } from "../src/skills.ts";
-import { DEFAULT_CONFIG, type LorebookEntry, type RpConfig } from "../src/types.ts";
+import { DEFAULT_CONFIG, type AgentBridgePermissions, type AgentConfig, type LorebookEntry, type RpConfig } from "../src/types.ts";
 import { readJsonFile } from "../src/jsonio.ts";
 import { formatBytes, listMedia, listUploads, saveUpload } from "../src/uploads.ts";
 
@@ -207,6 +226,24 @@ export interface RestHost {
 	 * 用于切身份、改 user 设定、挂载世界书等——ST 式即时生效。
 	 */
 	softRefreshConfig(): Promise<void>;
+	/** 自定义 agent 管理界面工具清单（stagehand 工具 + 内置 read/bash/edit/write） */
+	listAgentTools(): string[];
+	/**
+	 * agents 热重建（PUT /api/config 的 agents 段写盘后触发）：
+	 * 返回 agentId → 状态：ok=已生成 / busy=忙碌跳过待下次重启 / removed=已删除。
+	 * 内置助手（assistant）不在管理范围，永不参与删除/变更。
+	 */
+	reloadAgents(): Promise<Record<string, "ok" | "busy" | "removed">>;
+	/**
+	 * 分支角色消息编辑（前端改写/删除回复）：lastRoleIndex=从分支末尾倒数第 N 条角色消息
+	 * （0=最后一条），op=edit 注入 rp-edited-reply（原文保留在分支树内），op=delete 只钉叶到前驱。
+	 */
+	scriptEditMessage(input: {
+		lastRoleIndex?: number;
+		branchIndex?: number;
+		op: "edit" | "delete";
+		text?: string;
+	}): Promise<void>;
 	/** config.card 已写盘后调用：切到该卡最近会话，无则新建 */
 	switchToCard(): Promise<"switched" | "created">;
 	/** 经会话通道执行斜杠命令（/import 等，扩展的 notify 会以 wire notify 推送） */
@@ -334,8 +371,9 @@ export function loadConfig(cwd: string): RpConfig {
 	const p = configPath(cwd);
 	if (!existsSync(p)) return { ...DEFAULT_CONFIG };
 	const raw = { ...DEFAULT_CONFIG, ...(JSON.parse(readFileSync(p, "utf8")) as Partial<RpConfig>) };
-	// 规范化：旧 lorebook 单本 → lorebooks 数组
-	return setMountedLorebooks(raw, mountedLorebookPaths(raw));
+	// 规范化：旧 lorebook 单本 → lorebooks 数组；agents 段读盘容错
+	const normalized = { ...raw, agents: normalizeAgents(raw.agents) };
+	return setMountedLorebooks(normalized, mountedLorebookPaths(normalized));
 }
 
 /**
@@ -357,7 +395,252 @@ export function loadCardFrontSnapshot(cwd: string): CardFrontSnapshot {
 			/* ignore */
 		}
 	}
-	return buildCardFrontSnapshot(config, raw, charName);
+	// 预设正则分组随快照透出（loadEffectivePreset 已保证 regexGroups 从预设文件本体透出，不随草稿）
+	const preset = loadEffectivePreset(cwd).preset;
+	return buildCardFrontSnapshot(config, raw, charName, preset?.regexGroups);
+}
+
+// ---------- 正则分组作用域读写（global|card|preset；三分类共用的存储助手） ----------
+
+/** scope 参数解析（global|card|preset），非法抛中文错（由 handleApiRequest 统一回 400） */
+function assertGroupScope(v: string | null): "global" | "card" | "preset" {
+	if (v === "global" || v === "card" || v === "preset") return v;
+	throw new Error("scope 必须为 global / card / preset");
+}
+
+/**
+ * 读指定作用域的组列表（纯读，不写盘）。
+ * - global: config.userRuleGroups（含旧 userRules 迁移）
+ * - card:   config.cardRuleGroups[card]，附带 card 的卡内嵌规则全量 + 关闭键
+ * - preset: 预设文件本体里的 regexGroups（不碰 preset-override.json 草稿）；无活跃预设时 groups 空、preset=null
+ */
+function readGroupScope(
+	cwd: string,
+	scope: "global" | "card" | "preset",
+	card: string | null,
+): {
+	groups: RuleGroup[];
+	card?: { path: string; cardRules: DisplayRule[]; ruleOff: string[] };
+	preset?: { file: string; name: string } | null;
+} {
+	if (scope === "global") return { groups: userGroupsOf(loadConfig(cwd)) };
+	if (scope === "card") {
+		if (!card) throw new Error("scope=card 时缺少 card 参数");
+		const config = loadConfig(cwd);
+		let cardRules: DisplayRule[] = [];
+		try {
+			const abs = resolvePath(cwd, card);
+			cardRules = displayRules(extractRegexScripts(readCardRawJson(abs).raw as Record<string, unknown>));
+		} catch {
+			/* 卡不可读则规则空 */
+		}
+		return {
+			groups: cardGroupsOf(config, card),
+			card: { path: card, cardRules, ruleOff: (config.cardRuleOff ?? {})[card] ?? [] },
+		};
+	}
+	// preset：直接读预设文件本体
+	const config = loadConfig(cwd);
+	if (!config.preset) return { groups: [], preset: null };
+	try {
+		const p = resolvePath(cwd, config.preset);
+		if (!existsSync(p)) return { groups: [], preset: null };
+		const raw = JSON.parse(readFileSync(p, "utf8")) as { name?: string; regexGroups?: unknown };
+		return {
+			groups: Array.isArray(raw.regexGroups) ? (raw.regexGroups as RuleGroup[]) : [],
+			preset: { file: config.preset, name: typeof raw.name === "string" ? raw.name : "preset" },
+		};
+	} catch {
+		return { groups: [], preset: null };
+	}
+}
+
+/** 写指定作用域的组列表（全量替换） */
+function writeGroupScope(cwd: string, scope: "global" | "card" | "preset", card: string | null, groups: RuleGroup[]): void {
+	if (scope === "global") {
+		writeJsonWithBackup(configPath(cwd), setUserGroups(loadConfig(cwd), groups));
+		return;
+	}
+	if (scope === "card") {
+		if (!card) throw new Error("scope=card 时缺少 card 参数");
+		writeJsonWithBackup(configPath(cwd), setCardGroups(loadConfig(cwd), card, groups));
+		return;
+	}
+	// preset：只写预设文件本体里的 regexGroups（保留其余字段），不碰 preset-override.json 草稿
+	const config = loadConfig(cwd);
+	if (!config.preset) throw new Error("未选择预设");
+	const p = resolvePath(cwd, config.preset);
+	if (!existsSync(p)) throw new Error(`预设文件不存在：${config.preset}`);
+	const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+	writeJsonWithBackup(p, { ...raw, regexGroups: groups });
+}
+
+// ---------- 自定义 agent 段（DESIGN-custom-agents §2：声明式配置 + 校验） ----------
+
+/** agent id 合法形状：小写字母开头，后接小写字母/数字/连字符 */
+const AGENT_ID_RE = /^[a-z][a-z0-9-]*$/;
+
+/** bridge 权限键白名单（与 AgentBridgePermissions 一一对应；不认未知键） */
+const BRIDGE_PERM_KEYS = [
+	"readStory",
+	"writePanels",
+	"storyEdit",
+	"queueCommand",
+	"applyStatePatch",
+	"emitMedia",
+	"refreshMaterials",
+	"mountCodex",
+] as const;
+
+/**
+ * 归一化 agents 段（loadConfig 读盘时容错）：
+ * - 非数组 / 空值 → [];
+ * - 每个条目：非对象或 id 非法则丢弃（写盘校验已在上游 applyConfigPatch 把关，这里只兜底手改的脏数据）；
+ * - 缺省桥权限全部补 false、缺省 skills/tools 补空数组、缺省 name 回退 id、缺省 model 不设（跟随剧情模型）。
+ */
+export function normalizeAgents(input: unknown): AgentConfig[] {
+	if (!Array.isArray(input)) return [];
+	const out: AgentConfig[] = [];
+	for (const item of input) {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+		const a = item as Record<string, unknown>;
+		const id = typeof a.id === "string" ? a.id.trim() : "";
+		if (!AGENT_ID_RE.test(id)) continue;
+		const bridge = (typeof a.bridge === "object" && a.bridge !== null ? a.bridge : {}) as Record<string, unknown>;
+		const perms: AgentBridgePermissions = {
+			readStory: bridge.readStory === true,
+			writePanels: bridge.writePanels === true,
+			storyEdit: bridge.storyEdit === true,
+			queueCommand: bridge.queueCommand === true,
+			applyStatePatch: bridge.applyStatePatch === true,
+			emitMedia: bridge.emitMedia === true,
+			refreshMaterials: bridge.refreshMaterials === true,
+			mountCodex: bridge.mountCodex === true,
+		};
+		const m = a.model;
+		const model =
+			typeof m === "object" &&
+			m !== null &&
+			typeof (m as { provider?: unknown }).provider === "string" &&
+			typeof (m as { id?: unknown }).id === "string"
+				? { provider: (m as { provider: string }).provider, id: (m as { id: string }).id }
+				: undefined;
+		out.push({
+			id,
+			name: typeof a.name === "string" && a.name.trim() ? a.name.trim() : id,
+			...(typeof a.description === "string" ? { description: a.description } : {}),
+			...(model ? { model } : {}),
+			...(typeof a.prompt === "string" ? { prompt: a.prompt } : {}),
+			...(typeof a.promptFile === "string" ? { promptFile: a.promptFile } : {}),
+			skills: Array.isArray(a.skills) ? a.skills.filter((x): x is string => typeof x === "string") : [],
+			tools: Array.isArray(a.tools) ? a.tools.filter((x): x is string => typeof x === "string") : [],
+			bridge: perms,
+		});
+	}
+	return out;
+}
+
+/** 校验 bridge 为完整权限对象（8 键全 boolean，不认未知键）；非法抛错（中文） */
+function validateBridge(input: unknown, id: string): AgentBridgePermissions {
+	if (typeof input !== "object" || input === null || Array.isArray(input)) {
+		throw new Error(`agent「${id}」缺少 bridge 权限对象`);
+	}
+	const b = input as Record<string, unknown>;
+	const out = {} as AgentBridgePermissions;
+	for (const key of BRIDGE_PERM_KEYS) {
+		if (typeof b[key] !== "boolean") {
+			throw new Error(`agent「${id}」bridge.${key} 必须是布尔值（bridge 须为完整权限对象，每个键都显式声明）`);
+		}
+		out[key] = b[key];
+	}
+	const unknownKeys = Object.keys(b).filter((k) => !(BRIDGE_PERM_KEYS as readonly string[]).includes(k));
+	if (unknownKeys.length > 0) {
+		throw new Error(`agent「${id}」bridge 含未知键：${unknownKeys.join("、")}（仅支持 ${BRIDGE_PERM_KEYS.join("/")}）`);
+	}
+	return out;
+}
+
+/** 校验可选字符串数组字段；未提供返回 undefined，提供但非字符串数组则抛错 */
+function validateStringArray(input: unknown, id: string, field: string): string[] | undefined {
+	if (input === undefined) return undefined;
+	if (!Array.isArray(input) || input.some((x) => typeof x !== "string")) {
+		throw new Error(`agent「${id}」的 ${field} 必须是字符串数组`);
+	}
+	return input as string[];
+}
+
+/**
+ * 自定义 agent 段严格校验（applyConfigPatch 入口）：
+ * 任一 agent 非法即抛错拒绝整段（DESIGN-custom-agents §2：不静默丢弃/截断）——
+ * 权限配置宁缺毋滥，宁可整段拒绝让用户修正，也不能悄悄丢掉越权开关。
+ */
+function validateAgentsPatch(input: unknown): AgentConfig[] {
+	if (!Array.isArray(input)) throw new Error("agents 必须是数组");
+	const seen = new Set<string>();
+	const out: AgentConfig[] = [];
+	for (const item of input) {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) {
+			throw new Error("agents 内每个条目必须是对象");
+		}
+		const a = item as Record<string, unknown>;
+		// id：必填，/^[a-z][a-z0-9-]*$/、整段内唯一
+		const id = typeof a.id === "string" ? a.id.trim() : "";
+		if (!id) throw new Error("agent 条目缺少必填字段 id");
+		if (!AGENT_ID_RE.test(id)) {
+			throw new Error(`agent id「${id}」非法：须匹配 /^[a-z][a-z0-9-]*$/（小写字母开头，后接小写字母/数字/连字符）`);
+		}
+		if (seen.has(id)) throw new Error(`agent id 重复：「${id}」`);
+		seen.add(id);
+		// name：必填非空字符串（面板显示名）
+		const name = typeof a.name === "string" ? a.name.trim() : "";
+		if (!name) throw new Error(`agent「${id}」缺少必填字段 name`);
+		const description = typeof a.description === "string" ? a.description : undefined;
+		// model：可选，提供则必须是 { provider, id } 形（缺省跟随剧情模型）
+		let model: { provider: string; id: string } | undefined;
+		if (a.model !== undefined) {
+			const m = a.model as { provider?: unknown; id?: unknown } | null;
+			if (
+				!m ||
+				typeof m !== "object" ||
+				typeof m.provider !== "string" ||
+				!m.provider ||
+				typeof m.id !== "string" ||
+				!m.id
+			) {
+				throw new Error(`agent「${id}」的 model 必须是 { provider, id } 对象`);
+			}
+			model = { provider: m.provider, id: m.id };
+		}
+		// prompt 与 promptFile 二选一（不认同时提供）
+		const prompt = a.prompt !== undefined ? a.prompt : undefined;
+		const promptFile = a.promptFile !== undefined ? a.promptFile : undefined;
+		if (prompt !== undefined || promptFile !== undefined) {
+			if (typeof prompt !== "string" && prompt !== undefined) {
+				throw new Error(`agent「${id}」的 prompt 必须是字符串`);
+			}
+			if (typeof promptFile !== "string" && promptFile !== undefined) {
+				throw new Error(`agent「${id}」的 promptFile 必须是字符串`);
+			}
+			if (typeof prompt === "string" && typeof promptFile === "string") {
+				throw new Error(`agent「${id}」的 prompt 与 promptFile 不能同时提供（二选一）`);
+			}
+		}
+		const skills = validateStringArray(a.skills, id, "skills") ?? [];
+		const tools = validateStringArray(a.tools, id, "tools") ?? [];
+		const bridge = validateBridge(a.bridge, id);
+		out.push({
+			id,
+			name,
+			...(description !== undefined ? { description } : {}),
+			...(model ? { model } : {}),
+			...(typeof prompt === "string" ? { prompt } : {}),
+			...(typeof promptFile === "string" ? { promptFile } : {}),
+			skills,
+			tools,
+			bridge,
+		});
+	}
+	return out;
 }
 
 /** config PUT 白名单（card 不在内：换卡必须走 /api/card/switch 的完整流程） */
@@ -378,12 +661,22 @@ const CONFIG_EDITABLE = new Set([
 	"backendControl",
 	"creationMode",
 	"assistantModel",
+	"agents",
 ]);
 
 export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown>): RpConfig {
 	const next = { ...config } as Record<string, unknown>;
 	for (const [k, v] of Object.entries(patch)) {
 		if (!CONFIG_EDITABLE.has(k)) continue;
+		if (k === "agents") {
+			// 自定义 agent 段：空值 = 清除全部 agent；否则严格校验，任一非法即抛错拒绝整段（设计 §2）
+			if (v === null || v === undefined || v === "") {
+				delete next[k];
+			} else {
+				next[k] = validateAgentsPatch(v);
+			}
+			continue;
+		}
 		if (v === null || v === undefined || v === "") {
 			delete next[k]; // 空值 = 删除可选键（displayName/lorebook/preset 等）
 		} else {
@@ -771,11 +1064,11 @@ export function loadEffectivePreset(cwd: string): { path: string | null; preset:
 	const ovr = presetOverridePath(cwd);
 	if (existsSync(ovr)) {
 		try {
-			return {
-				path: config.preset,
-				preset: normalizeRpPreset(JSON.parse(readFileSync(ovr, "utf8"))),
-				fromOverride: true,
-			};
+			const preset = normalizeRpPreset(JSON.parse(readFileSync(ovr, "utf8")));
+			// regexGroups 只存预设文件本体：草稿合并时从磁盘本体透出，避免 override 吞掉本体字段
+			const disk = loadDiskPreset(cwd);
+			if (disk) preset.regexGroups = disk.preset.regexGroups;
+			return { path: config.preset, preset, fromOverride: true };
 		} catch {
 			/* fall through */
 		}
@@ -1733,6 +2026,227 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 			}
 
+			// ---- 卡前端正则脚本分组（三分类：global/card/preset；scope=card 必带 card= 路径参数） ----
+			// 契约：POST/PUT 规则的 findRegex 可带 /pattern/flags 或裸串，服务端用 parseFindRegex 拆成 source+flags 存储。
+			case "GET /api/cardfront/groups": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const r = readGroupScope(host.cwd, scope, card);
+				sendJson(res, 200, {
+					ok: true,
+					groups: r.groups,
+					...(r.card ? { card: r.card } : {}),
+					...(r.preset !== undefined ? { preset: r.preset } : {}),
+				});
+				return true;
+			}
+			case "POST /api/cardfront/groups": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const body = JSON.parse(await readBody(req)) as { name?: string };
+				if (typeof body.name !== "string") throw new Error("缺少 name");
+				const r = readGroupScope(host.cwd, scope, card);
+				const groups = addGroup(r.groups, body.name.trim());
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "PUT /api/cardfront/groups": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const body = JSON.parse(await readBody(req)) as {
+					index?: number;
+					group?: { name?: string; off?: unknown };
+				};
+				if (typeof body.index !== "number" || !body.group) throw new Error("缺少 index / group");
+				const patch: { name?: string; off?: boolean } = {};
+				if (body.group.name !== undefined) {
+					if (typeof body.group.name !== "string") throw new Error("name 必须是字符串");
+					patch.name = body.group.name.trim();
+				}
+				if (body.group.off !== undefined) {
+					if (typeof body.group.off !== "boolean") throw new Error("off 必须是布尔值");
+					patch.off = body.group.off;
+				}
+				const r = readGroupScope(host.cwd, scope, card);
+				if (body.index < 0 || body.index >= r.groups.length) throw new Error("index 越界");
+				const groups = updateGroup(r.groups, body.index, patch);
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "DELETE /api/cardfront/groups": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const rawIndex = query.get("index");
+				if (rawIndex === null || !/^\d+$/.test(rawIndex)) throw new Error("缺少合法的 index");
+				const index = Number(rawIndex);
+				const r = readGroupScope(host.cwd, scope, card);
+				if (index < 0 || index >= r.groups.length) throw new Error("index 越界");
+				if (r.groups[index].name === "") throw new Error("未分组组不可删除");
+				const groups = removeGroup(r.groups, index);
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "POST /api/cardfront/groups/move": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const body = JSON.parse(await readBody(req)) as { index?: number; delta?: number };
+				if (typeof body.index !== "number" || (body.delta !== -1 && body.delta !== 1)) {
+					throw new Error("index / delta 不合法（delta 必须为 -1 或 1）");
+				}
+				const r = readGroupScope(host.cwd, scope, card);
+				const target = body.index + body.delta;
+				if (body.index < 0 || body.index >= r.groups.length || target < 0 || target >= r.groups.length) {
+					throw new Error("index 越界");
+				}
+				const groups = moveGroup(r.groups, body.index, body.delta);
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "POST /api/cardfront/groups/copy": {
+				const body = JSON.parse(await readBody(req)) as {
+					from?: { scope?: string; card?: string; group?: number };
+					to?: { scope?: string; card?: string };
+				};
+				if (!body.from || !body.to) throw new Error("缺少 from / to");
+				const fromScope = assertGroupScope(body.from.scope ?? null);
+				const toScope = assertGroupScope(body.to.scope ?? null);
+				if (typeof body.from.group !== "number") throw new Error("缺少 from.group");
+				if (fromScope === "card" && !body.from.card) throw new Error("from.scope=card 时缺少 from.card");
+				if (toScope === "card" && !body.to.card) throw new Error("to.scope=card 时缺少 to.card");
+				const src = readGroupScope(host.cwd, fromScope, body.from.card ?? null);
+				if (body.from.group < 0 || body.from.group >= src.groups.length) throw new Error("from.group 越界");
+				// from/to 同分类时基于同一份列表追加（生成副本），否则独立读目标列表
+				const sameScope = fromScope === toScope && body.from.card === body.to.card;
+				const targetGroups = sameScope ? src.groups : readGroupScope(host.cwd, toScope, body.to.card ?? null).groups;
+				const groups = copyGroup(src.groups, body.from.group, targetGroups);
+				writeGroupScope(host.cwd, toScope, body.to.card ?? null, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "POST /api/cardfront/rules": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const body = JSON.parse(await readBody(req)) as {
+					group?: number;
+					name?: string;
+					findRegex?: string;
+					replace?: string;
+					off?: boolean;
+				};
+				if (typeof body.group !== "number") throw new Error("缺少 group");
+				if (typeof body.findRegex !== "string" || !body.findRegex.trim()) throw new Error("缺少 findRegex");
+				if (typeof body.replace !== "string") throw new Error("缺少 replace");
+				const parsed = parseFindRegex(body.findRegex);
+				if (!parsed) throw new Error("findRegex 不是合法的正则表达式");
+				const r = readGroupScope(host.cwd, scope, card);
+				if (body.group < 0 || body.group >= r.groups.length) throw new Error("group 越界");
+				const groups = addRule(r.groups, body.group, {
+					name: (body.name ?? "").trim(),
+					source: parsed.source,
+					flags: parsed.flags,
+					replace: body.replace,
+					off: body.off === true,
+				});
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "PUT /api/cardfront/rules": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const body = JSON.parse(await readBody(req)) as {
+					group?: number;
+					index?: number;
+					rule?: { name?: string; findRegex?: string; replace?: string; off?: boolean };
+					toGroup?: number;
+				};
+				if (typeof body.group !== "number" || typeof body.index !== "number" || !body.rule) {
+					throw new Error("缺少 group / index / rule");
+				}
+				const rule = body.rule;
+				if (typeof rule.findRegex !== "string" || !rule.findRegex.trim()) throw new Error("缺少 findRegex");
+				if (typeof rule.replace !== "string") throw new Error("缺少 replace");
+				const parsed = parseFindRegex(rule.findRegex);
+				if (!parsed) throw new Error("findRegex 不是合法的正则表达式");
+				const r = readGroupScope(host.cwd, scope, card);
+				if (body.group < 0 || body.group >= r.groups.length) throw new Error("group 越界");
+				if (body.index < 0 || body.index >= r.groups[body.group].rules.length) throw new Error("index 越界");
+				if (body.toGroup !== undefined && (body.toGroup < 0 || body.toGroup >= r.groups.length)) {
+					throw new Error("toGroup 越界");
+				}
+				const groups = updateRule(
+					r.groups,
+					body.group,
+					body.index,
+					{
+						name: (rule.name ?? "").trim(),
+						source: parsed.source,
+						flags: parsed.flags,
+						replace: rule.replace,
+						off: rule.off === true,
+					},
+					body.toGroup,
+				);
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "DELETE /api/cardfront/rules": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const rawGroup = query.get("group");
+				const rawIndex = query.get("index");
+				if (rawGroup === null || !/^\d+$/.test(rawGroup) || rawIndex === null || !/^\d+$/.test(rawIndex)) {
+					throw new Error("缺少合法的 group / index");
+				}
+				const group = Number(rawGroup);
+				const index = Number(rawIndex);
+				const r = readGroupScope(host.cwd, scope, card);
+				if (group < 0 || group >= r.groups.length) throw new Error("group 越界");
+				if (index < 0 || index >= r.groups[group].rules.length) throw new Error("index 越界");
+				const groups = removeRule(r.groups, group, index);
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "POST /api/cardfront/rules/move": {
+				const scope = assertGroupScope(query.get("scope"));
+				const card = query.get("card");
+				const body = JSON.parse(await readBody(req)) as { group?: number; index?: number; delta?: number };
+				if (
+					typeof body.group !== "number" ||
+					typeof body.index !== "number" ||
+					(body.delta !== -1 && body.delta !== 1)
+				) {
+					throw new Error("group / index / delta 不合法（delta 必须为 -1 或 1）");
+				}
+				const r = readGroupScope(host.cwd, scope, card);
+				if (body.group < 0 || body.group >= r.groups.length) throw new Error("group 越界");
+				const srcRules = r.groups[body.group].rules;
+				const target = body.index + body.delta;
+				if (body.index < 0 || body.index >= srcRules.length || target < 0 || target >= srcRules.length) {
+					throw new Error("index 越界");
+				}
+				const groups = moveRule(r.groups, body.group, body.index, body.delta);
+				writeGroupScope(host.cwd, scope, card, groups);
+				sendJson(res, 200, { ok: true, groups });
+				return true;
+			}
+			case "PUT /api/cardfront/rule-off": {
+				const body = JSON.parse(await readBody(req)) as { key?: string; off?: boolean };
+				if (typeof body.key !== "string" || !body.key.trim()) throw new Error("缺少 key");
+				if (typeof body.off !== "boolean") throw new Error("off 必须是布尔值");
+				let config = loadConfig(host.cwd);
+				config = setCardRuleOff(config, config.card, body.key, body.off);
+				writeJsonWithBackup(configPath(host.cwd), config);
+				sendJson(res, 200, { ok: true, ruleOff: (config.cardRuleOff ?? {})[config.card] ?? [] });
+				return true;
+			}
+
 			// ---- 卡库（PLAN-PANELS §2.7）：清单/立绘/导入/收藏 ----
 			case "GET /api/cards": {
 				const config = loadConfig(host.cwd);
@@ -2413,6 +2927,12 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				sendJson(res, 200, host.listModels());
 				return true;
 			}
+			// ---- 自定义 agent 管理 ----
+			case "GET /api/agent-tools": {
+				// 自定义 agent 管理界面的工具清单（stagehand 工具 + 内置 read/bash/edit/write）
+				sendJson(res, 200, { tools: host.listAgentTools() });
+				return true;
+			}
 			case "POST /api/models/select": {
 				if (refuseWhileStreaming()) return true;
 				const body = JSON.parse(await readBody(req)) as { provider?: string; id?: string };
@@ -2820,7 +3340,10 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const next = applyConfigPatch(loadConfig(host.cwd), patch);
 				writeJsonWithBackup(configPath(host.cwd), next);
 				await host.softRefreshConfig();
-				sendJson(res, 200, { config: next });
+				// agents 段变更触发 host 热重建（删除/重建自定义 agent；忙碌中的记 busy 待下次重启）。
+				// patch 无 agents 时同样恒发 agentReload（空表），前端可统一解析。
+				const agentReload = await host.reloadAgents();
+				sendJson(res, 200, { config: next, agentReload });
 				return true;
 			}
 
@@ -3395,7 +3918,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				}
 				const ovr = presetOverridePath(host.cwd);
 				mkdirSync(join(host.cwd, ".liyuan"), { recursive: true });
-				writeFileSync(ovr, `${JSON.stringify(next, null, "\t")}\n`, "utf8");
+				// regexGroups 只存预设文件本体：草稿不进 override，显示管线由 loadEffectivePreset 从本体透出
+				const { regexGroups: _ignoreRegexGroups, ...draft } = next;
+				writeFileSync(ovr, `${JSON.stringify(draft, null, "\t")}\n`, "utf8");
 				await host.softRefreshConfig();
 				sendJson(res, 200, { ok: true, dirty: true, saved: false });
 				return true;

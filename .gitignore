@@ -27,14 +27,20 @@ packages/**/node_modules/
 liyuan.agent.json
 liyuan.agent.meta.json
 liyuan.config.json
+liyuan.draw.json
 liyuan-preset.json
 .liyuan-mcp.json
 .liyuan-memory/
 rp.config*.json
 liyuan-profiles/
 *.bak
+*.bak2
 .env
 .env.*
+
+# 服装档案（用户资产；refs 参考图也在此目录）
+.liyuan-wardrobe/
+.liyuan-agents/
 
 # logs / build noise
 *.log
@@ -65,6 +71,11 @@ assets/presets/
 assets/ab-test/
 assets/import-test/
 assets/personas/
+
+# 个人素材（自 TauriTavern 导入的角色卡 PNG 与世界书，不入库）
+assets/cards/*.png
+assets/cards/*.png.*
+assets/lorebooks/
 
 # local debug screenshots (not for testers)
 web/shot-*.png

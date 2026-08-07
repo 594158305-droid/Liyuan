@@ -61,7 +61,7 @@ import {
 	takeAgentMergeLog,
 } from "../src/paths.ts";
 import { applyPatch, loadState, saveState } from "../src/state.ts";
-import { DEFAULT_CONFIG, type RpConfig, type WorldState } from "../src/types.ts";
+import { DEFAULT_CONFIG, type AgentConfig, type RpConfig, type WorldState } from "../src/types.ts";
 import {
 	loadTtsConfig,
 	saveAudioBuffer,
@@ -93,7 +93,7 @@ import {
 	memorySearch,
 	onNarrativeTurnEnd,
 } from "../src/memory/index.ts";
-import { handleApiRequest, loadCardFrontSnapshot, type CurrentModelInfo, type RestHost } from "./rest.ts";
+import { handleApiRequest, loadCardFrontSnapshot, loadConfig, type CurrentModelInfo, type RestHost } from "./rest.ts";
 
 // 用户级 agent 目录 → ~/.liyuan/agent（须在 getAgentDir / 建会话之前）
 // 并合并 fork 改名后遗留的 ~/.pi/agent（会话/配置，不覆盖更新的新树）
@@ -111,8 +111,9 @@ import {
 	type WireNames,
 	type WireStats,
 } from "./wire.ts";
-import { createAssistantHost, type AssistantHost, type StoryBridge } from "./assistant.ts";
-import { registerAssistantRunner } from "../src/assistant-gateway.ts";
+import { createAgentHost, STAGEHAND_TOOL_NAMES, type AssistantHost, type StoryBridge } from "./assistant.ts";
+import { createStoryBridge, FULL_BRIDGE_PERMISSIONS } from "./bridge.ts";
+import { registerAgentRunner, unregisterAgentRunner, type AssistantRunner } from "../src/assistant-gateway.ts";
 import { sameCardPath } from "../src/paths.ts";
 import { toggleDisabledLore } from "../src/lorebook.ts";
 import { syncStoryPanelsFromDisk, syncStoryStateFromDisk } from "../src/story-sync.ts";
@@ -1012,6 +1013,70 @@ const currentModelInfo = (): CurrentModelInfo | null => {
 	};
 };
 
+// ---------- 分支角色消息编辑共用（scriptEditMessage / storyEdit） ----------
+
+type RoleEditTarget =
+	| { ok: true; targetId: string; targetIdx: number }
+	| { ok: false; error: string };
+
+/**
+ * 分支目标定位（scriptEditMessage / storyEdit 共用）：
+ * 二选一定位目标回复的「前驱」entry id。
+ * - lastRoleIndex：从分支末尾倒数第 N 条「角色消息」（assistant / 可显示 custom），0=最后一条；
+ * - branchIndex：分支数组下标（原语义）。
+ * 前驱 = 目标条目的上一条 entry；目标即分支首（无前驱）时钉到分支根自身（目标回复移出当前分支）。
+ */
+const resolveRoleEditTarget = (
+	branch: Array<{ id: string; type?: unknown; message?: { role?: unknown } }>,
+	input: { lastRoleIndex?: number; branchIndex?: number },
+): RoleEditTarget => {
+	if (input.lastRoleIndex !== undefined) {
+		// lastRoleIndex 定位：收集分支中全部「角色消息」条目下标，从末尾往前取第 N+1 个
+		if (!Number.isInteger(input.lastRoleIndex) || input.lastRoleIndex < 0) {
+			return { ok: false, error: "lastRoleIndex 必须是非负整数" };
+		}
+		const roleIdx: number[] = [];
+		branch.forEach((e, i) => {
+			if (e.type !== "message") return;
+			const role = e.message?.role;
+			if (role === "assistant" || role === "custom") roleIdx.push(i);
+		});
+		const target = roleIdx[roleIdx.length - 1 - input.lastRoleIndex];
+		if (target === undefined) {
+			return { ok: false, error: `lastRoleIndex 超出角色消息范围（0..${Math.max(0, roleIdx.length - 1)}）` };
+		}
+		return { ok: true, targetId: target <= 0 ? branch[0].id : branch[target - 1].id, targetIdx: target };
+	}
+	const branchIndex = input.branchIndex;
+	if (
+		typeof branchIndex !== "number" ||
+		!Number.isInteger(branchIndex) ||
+		branchIndex < 0 ||
+		branchIndex >= branch.length
+	) {
+		return { ok: false, error: `branchIndex 超出会话分支范围（0..${Math.max(0, branch.length - 1)}）` };
+	}
+	// 前驱 = 目标条目的上一条 entry；branchIndex===0（分支根无前驱）时导航到分支根自身
+	return {
+		ok: true,
+		targetId: branchIndex === 0 ? branch[0].id : branch[branchIndex - 1].id,
+		targetIdx: branchIndex,
+	};
+};
+
+/**
+ * 钉叶到分支目标前驱 + 同步 agent 内存消息（scriptEditMessage / storyEdit 共用）。
+ * 不用 session.navigateTree——它对 user/assistant 目标有副作用语义
+ * （实测导致分支回退到开场白、改写丢失）。sm.branch 是同步叶指针移动
+ * （无 session_tree 事件、无 editor 副作用）；entry 不存在会抛错（REST 层兜底 400）。
+ */
+const branchCommitToTarget = (targetId: string): void => {
+	const sm = session.sessionManager;
+	sm.branch(targetId);
+	const ctx = sm.buildSessionContext();
+	session.agent.state.messages = ctx.messages;
+};
+
 const restHost: RestHost = {
 	cwd,
 	isStreaming: () => session.isStreaming,
@@ -1142,6 +1207,131 @@ const restHost: RestHost = {
 		refreshNamesFromConfig();
 		resyncAll();
 	},
+	/** 自定义 agent 管理界面工具清单：stagehand 工具 + 内置工具（read/bash/edit/write） */
+	listAgentTools: () => [...STAGEHAND_TOOL_NAMES, "read", "bash", "edit", "write"],
+	/**
+	 * agents 热重建（PUT /api/config 的 agents 段写盘后触发，DESIGN-custom-agents §4/§6）：
+	 * - 删除：不再存在于新配置的自定义 agent → dispose + 注销 runner + 出表（记 removed）；
+	 * - 变更/新增：配置签名（JSON.stringify）与 lastAgentConfigs 不同 → dispose 旧 host、
+	 *   照启动循环同样参数重建（另加 tools 内置工具白名单），更新注册表与签名（记 ok）；相同 → 跳过（记 ok）；
+	 * - 忙碌（isStreaming）中的 agent → busy，本轮跳过，等下次热重建再处理；
+	 * - 内置助手（assistant）不在管理范围：永不删除/重建（行为零变化）；
+	 * - 每个 agent 独立 try/catch，单个失败仅 log 警告并记 busy，不影响其余 agent；
+	 * - 完成后对所有 host 批量对齐当前剧情会话（syncAllAgentStories，switchToStory 幂等）。
+	 */
+	async reloadAgents() {
+		const result: Record<string, "ok" | "busy" | "removed"> = {};
+		const next = loadConfig(cwd).agents ?? [];
+		const nextById = new Map(next.map((c) => [c.id, c] as const));
+
+		// 第一步删除：不再配置的自定义 agent → dispose + 注销 + 出表
+		for (const id of [...agentHosts.keys()]) {
+			if (id === "assistant") continue; // 内置助手不在管理范围
+			if (nextById.has(id)) continue;
+			const host = agentHosts.get(id);
+			if (!host) continue;
+			try {
+				if (host.isStreaming()) {
+					result[id] = "busy"; // 忙碌中：保留，等下次热重建
+					continue;
+				}
+				await host.dispose();
+			} catch (err) {
+				console.warn(
+					`[liyuan] 热重建删除 agent「${id}」失败（保留，记 busy）：${err instanceof Error ? err.message : String(err)}`,
+				);
+				result[id] = "busy";
+				continue;
+			}
+			agentHosts.delete(id);
+			unregisterAgentRunner(id);
+			lastAgentConfigs.delete(id);
+			result[id] = "removed";
+		}
+
+		// 第二步创建/更新：签名比对，变更/新增则重建
+		for (const cfg of next) {
+			const id = cfg.id;
+			if (id === "assistant") continue; // 内置助手名保留（loadConfig 归一化已剔除，这里兜底）
+			const sig = JSON.stringify(cfg);
+			if (lastAgentConfigs.get(id) === sig) {
+				result[id] = "ok"; // 配置未变：跳过
+				continue;
+			}
+			const existing = agentHosts.get(id);
+			try {
+				if (existing?.isStreaming()) {
+					result[id] = "busy"; // 忙碌中：不重建，等下次热重建
+					continue;
+				}
+				// prompt 与 promptFile 二选一（照启动循环同规则）
+				let systemPrompt = cfg.prompt;
+				if (!systemPrompt && cfg.promptFile) {
+					systemPrompt = readFileSync(
+						isAbsolute(cfg.promptFile) ? cfg.promptFile : join(cwd, cfg.promptFile),
+						"utf8",
+					);
+				}
+				if (existing) await existing.dispose();
+				const host = await createAgentHost({
+					cwd,
+					// 桥按各自配置裁剪（只读组 readStory 一键开关；写权限默认 false，配错最多「委托报无权限」）
+					bridge: createStoryBridge(storyBridgeBase, cfg.bridge),
+					agentId: id,
+					agentName: cfg.name,
+					sessionDirName: `.liyuan-agents/${id}`,
+					systemPrompt,
+					toolsAllow: cfg.tools,
+					tools: cfg.tools, // 内置工具白名单：与 stagehand 同清单，两端一起裁剪
+					model: cfg.model ?? null,
+					followsStoryModel: !cfg.model,
+					uiContext,
+					onEvent: onAssistantEvent,
+					onError: (text) => broadcast({ type: "error", text }),
+				});
+				agentHosts.set(id, host);
+				registerAgentRunner(id, buildAgentRunner(id));
+				lastAgentConfigs.set(id, sig);
+				result[id] = "ok";
+			} catch (err) {
+				console.warn(
+					`[liyuan] 热重建 agent「${id}」失败（保留旧 host，记 busy）：${err instanceof Error ? err.message : String(err)}`,
+				);
+				result[id] = "busy";
+			}
+		}
+
+		// 全部重建 host 对齐当前剧情会话（有绑定则打开，无则新建；switchToStory 幂等）
+		try {
+			await syncAllAgentStories();
+		} catch (err) {
+			console.error(
+				`[liyuan] 热重建后对齐剧情会话失败：${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		return result;
+	},
+	async scriptEditMessage(input) {
+		const branch = session.sessionManager.getBranch() as Array<{
+			id: string;
+			parentId?: string | null;
+			type?: unknown;
+			message?: { role?: unknown };
+		}>;
+		const resolved = resolveRoleEditTarget(branch, input);
+		if (!resolved.ok) throw new Error(resolved.error);
+		// 钉叶到前驱：不用 session.navigateTree——它对 user/assistant 目标有副作用语义
+		// （user 会退回 parent 并把文案塞进 editor，实测导致分支回退到开场白、改写丢失）。
+		// 与 regenerateSwipe 同款纪律：sm.branch 直钉叶指针 + 同步 agent.state.messages。
+		// sm.branch 是同步叶指针移动（无 session_tree 事件、无 editor 副作用）；entry 不存在会抛错（REST 层兜底 400）。
+		branchCommitToTarget(resolved.targetId);
+		if (input.op === "edit" && input.text) {
+			// 与扩展 /editreply 一致：注入 rp-edited-reply，上下文钩子会转成 assistant 给 LLM
+			await session.sendCustomMessage({ customType: "rp-edited-reply", content: input.text, display: true });
+		}
+		// op=delete：只导航到前驱（目标回复退出当前分支），不注入任何内容
+		resyncAll();
+	},
 	async switchToCard() {
 		refreshNamesFromConfig(); // rest.ts 已写盘新 card，先让会话过滤对准新卡
 		// 清卡缓存：换卡后列表必须按新 cardPath 重读 rp-card
@@ -1159,15 +1349,9 @@ const restHost: RestHost = {
 			result = "created";
 		}
 		broadcast(await listSessions());
-		// 助手：换卡后按新剧情会话对齐（新建绑定，不误接旧卡/旧聊助手上下文）
-		if (assistantHost) {
-			try {
-				await assistantHost.switchToStory(session.sessionId);
-				broadcast(assistantHelloFrame());
-			} catch (err) {
-				console.error(`[liyuan] 换卡同步助手会话失败：${err instanceof Error ? err.message : String(err)}`);
-			}
-		}
+		// agent：换卡后按新剧情会话对齐（新建绑定，不误接旧卡/旧聊上下文；switchToStory 幂等）
+		await syncAllAgentStories();
+		if (agentHosts.has("assistant")) broadcast(assistantHelloFrame());
 		return result;
 	},
 	promptCommand: (text) => handlePrompt(text),
@@ -1497,7 +1681,16 @@ try {
 // 这里只做三件事：提供剧情桥（只读面 + 白名单写）、把助手事件翻成 assistant_* 帧、
 // 托管生命周期。启动失败不挡剧情（面板显示不可用）。
 
-const storyBridge: StoryBridge = {
+// ---------- 剧情会话与 agent 会话托管 ----------
+// 剧情会话与助手/自定义 agent 会话彻底分治：独立会话树、独立扩展集、独立模型。
+// 这里只做三件事：提供剧情桥（只读面 + 白名单写）、把 agent 事件翻成 assistant_* 帧、
+// 托管生命周期。启动失败不挡剧情（面板显示不可用）。
+//
+// 桥权限模型（DESIGN-custom-agents §4，阶段二）：storyBridgeBase 是基础实现对象，
+// 经 createStoryBridge 工厂按权限裁剪成 storyBridge。内置助手/剧情侧使用全权限，
+// 自定义 agent 将按各自配置（liyuan.config.json 的 agents[].bridge）另行裁剪。
+
+const storyBridgeBase: StoryBridge = {
 	storyMessages: () => session.messages as unknown[],
 	snapshot: () => ({
 		sessionId: session.sessionId,
@@ -1590,18 +1783,188 @@ const storyBridge: StoryBridge = {
 	mountCodex: (name, on) => {
 		restHost.queueCommand(`/codexmount ${on ? "mount" : "unmount"} ${name}`);
 	},
+	/**
+	 * 显式改稿（story_edit 工具落地，设计稿 DESIGN-story-edit §3+§4）：
+	 * 用 scriptEditMessage 的 lastRoleIndex 语义定位目标回复 → sm.branch 直钉前驱 →
+	 * 注入 rp-edited-reply → 经 roleplay 的 globalThis 网关旁路重记账 → resyncAll 全端刷新。
+	 * 死锁注意：本方法由助手侧调用（assistant_run 期间故事侧在 waitForIdle），
+	 * 绝不能经 queueStoryCommand / restHost.queueCommand 触发任何剧情侧命令。
+	 */
+	async storyEdit({ lastRoleIndex, text }) {
+		// 场记旁路网关：roleplay 经 jiti 加载、本文件是 Node 原生 ESM，双模块 scope 下
+		// 不能直接 import，照 src/assistant-gateway.ts 的惯例经 globalThis 挂载点读取。
+		const scribeGate = (globalThis as typeof globalThis & {
+			__liyuanScribeGateway__?: {
+				waitForScribeIdle: (ms?: number) => Promise<void>;
+				scribeTurnOnceExported: (userText: string, assistantText: string) => Promise<void>;
+			};
+		}).__liyuanScribeGateway__;
+		if (!scribeGate) {
+			// 扩展未装载（rp 模式未启动）时无旁路记账能力，无法保证改后账本一致
+			return { ok: false, error: "场记旁路网关未就绪（roleplay 扩展未装载），无法重记账" };
+		}
+		try {
+			// 1. 等在途场记归位——避免在途场记用改前文本覆盖新状态
+			await scribeGate.waitForScribeIdle();
+
+			const branch = session.sessionManager.getBranch() as Array<{
+				id: string;
+				parentId?: string | null;
+				type?: unknown;
+				message?: { role?: unknown; content?: unknown };
+			}>;
+			// 2. 提交前找到目标：与 scriptEditMessage 的 targetId 解析（sm.getBranch + getBranch 语义）
+			const resolved = resolveRoleEditTarget(branch, { lastRoleIndex });
+			if (!resolved.ok) return { ok: false, error: resolved.error };
+			// 3. sm.branch 直钉（绝不用 session.navigateTree——它对 user/assistant 目标有副作用语义，
+			//    实测导致分支回退到开场白、改写丢失）；append-only：原回复保留在树里
+			branchCommitToTarget(resolved.targetId);
+			// 4. 注入改后全文（rp-edited-reply：上下文钩子会转成 assistant 给 LLM，带「已改写」标记）
+			await session.sendCustomMessage({ customType: "rp-edited-reply", content: text, display: true });
+
+			// 5. 重记账：取被编辑轮前一条 user 消息文本 + 改后 text，经网关旁路记账。
+			//    提交已把叶移到编辑后的新叙事位置（rp-edited-reply 是当前叶的一部分），
+			//    roleplay 闭包内的 state/快照即在该位置写——直接调用即可，无需再导航。
+			let userText = "";
+			for (let i = resolved.targetIdx - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e.type === "message" && e.message?.role === "user") {
+					userText = extractEntryText(e.message.content);
+					break;
+				}
+			}
+			if (userText.trim() && !isBackstageText(userText)) {
+				await scribeGate.scribeTurnOnceExported(userText, text);
+			}
+
+			// 6. 全端刷新（照 scriptEditMessage 收尾，让前端看到新叶与标记）
+			resyncAll();
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	},
 };
 
-let assistantHost: AssistantHost | null = null;
+// 桥工厂：基础实现按权限裁剪出最终桥。内置助手/剧情侧用全权限（行为与改前完全一致）；
+// 自定义 agent 将按各自配置裁剪（每方法未授权时抛错，工具执行层转成可见「无权限」）。
+const storyBridge: StoryBridge = createStoryBridge(storyBridgeBase, FULL_BRIDGE_PERMISSIONS);
 
-const assistantHelloFrame = (): ServerFrame => ({
+// 多 agent host 托管（DESIGN-custom-agents P3）：key="assistant" 是内置助手（原单 host 变量），
+// 自定义 agent 按配置 id 入表；换卡/换故事/换会话时全部对齐当前剧情会话。
+const agentHosts = new Map<string, AssistantHost>();
+
+/**
+ * agentId → JSON.stringify(该 agent 配置)：agents 热重建（reloadAgents）的签名比对基准。
+ * 启动时初始化（内置助手与自定义 agent 创建处），reloadAgents 每次生效后更新。
+ * 内置助手（assistant）不在 agents 配置段、不参与热重建，仅占位标记「已初始化」。
+ */
+const lastAgentConfigs = new Map<string, string>();
+
+/** 某 agent 的 hello 帧（内置助手 = 原 assistant_hello 语义；自定义 agent 同构复用同一帧格式） */
+const agentHelloFrame = (host: AssistantHost | null | undefined): ServerFrame => ({
 	type: "assistant_hello",
-	messages: assistantHost ? toAssistantHistory(assistantHost.messages()) : [],
-	busy: assistantHost?.isStreaming() ?? false,
-	model: assistantHost?.modelInfo() ?? null,
-	follow: assistantHost?.follows() ?? true,
-	...(assistantHost?.sessionPath() ? { sessionPath: assistantHost.sessionPath() } : {}),
+	messages: host ? toAssistantHistory(host.messages()) : [],
+	busy: host?.isStreaming() ?? false,
+	model: host?.modelInfo() ?? null,
+	follow: host?.follows() ?? true,
+	...(host?.sessionPath() ? { sessionPath: host.sessionPath() } : {}),
 });
+
+/** 内置助手面板 hello（兼容现有调用点） */
+const assistantHelloFrame = (): ServerFrame => agentHelloFrame(agentHosts.get("assistant"));
+
+/** 取帧里的 agentId（部分 wire 帧未声明该可选字段，经类型断言容错读取）；缺省 "assistant" */
+const agentIdOf = (frame: ClientFrame): string => {
+	const v = (frame as { agentId?: unknown }).agentId;
+	return typeof v === "string" && v.trim() ? v.trim() : "assistant";
+};
+
+/** 未知/未启用 agent 的错误帧（照现有 notify 错误风格） */
+const agentUnavailableFrame = (agentId: string): ServerFrame => ({
+	type: "notify",
+	level: "warning",
+	text: `agent「${agentId}」不存在或未启动`,
+});
+
+/** 全部 agent host 对齐当前剧情会话（自定义 agent 跟随剧情会话；switchToStory 幂等，"same" 不炸） */
+const syncAllAgentStories = async (): Promise<void> => {
+	for (const [id, host] of agentHosts) {
+		try {
+			await host.switchToStory(session.sessionId);
+		} catch (err) {
+			console.error(
+				`[liyuan] ${id === "assistant" ? "助手" : `agent「${id}」`}对齐剧情会话失败：${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+};
+
+/** 生成按 name 路由的委托实现（网关注册表保证 name 已注册，这里兜底用 host 执行 runTask） */
+const buildAgentRunner = (agentId: string): AssistantRunner => async (req) => {
+	const host = agentHosts.get(agentId);
+	const label = agentId === "assistant" ? "助手" : `agent「${agentId}」`;
+	if (!host) {
+		return {
+			ok: false,
+			summary: `${label}不可用。`,
+			media: [],
+			panelsWritten: [],
+			error: "no_host",
+		};
+	}
+	const task = req.task.trim();
+	if (!task) {
+		return { ok: false, summary: "任务为空。", media: [], panelsWritten: [], error: "empty" };
+	}
+	const modeHint =
+		req.mode && req.mode !== "auto"
+			? `【任务类型：${req.mode === "ops" ? "系统/API/办事" : req.mode === "author" ? "作者维护（面板/设定/账本）" : "诊断调优"}】\n`
+			: "";
+	const body = `${modeHint}${task}`;
+	// 右栏可见：用户委托条
+	broadcast({ type: "assistant_message", message: { role: "user", text: `〔剧情委托〕${task}` } });
+	try {
+		if (req.signal?.aborted) {
+			return {
+				ok: false,
+				summary: "已取消。",
+				media: [],
+				panelsWritten: [],
+				abandoned: true,
+				error: "aborted",
+			};
+		}
+		const onAbort = () => {
+			void host.abort();
+		};
+		req.signal?.addEventListener("abort", onAbort, { once: true });
+		try {
+			// 等到 return_answer / 放弃 / 兜底交回（非仅等 agent_end 摘最后一句）
+			const ret = await host.runTask(body);
+			return {
+				ok: ret.ok !== false && !ret.abandoned,
+				summary: ret.summary,
+				media: [],
+				panelsWritten: [],
+				abandoned: ret.abandoned,
+				viaReturnTool: ret.viaReturnTool,
+				...(ret.ok === false || ret.abandoned ? { error: ret.abandoned ? "abandoned" : "failed" } : {}),
+			};
+		} finally {
+			req.signal?.removeEventListener("abort", onAbort);
+		}
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return {
+			ok: false,
+			summary: `${label}执行失败：${msg}`,
+			media: [],
+			panelsWritten: [],
+			error: msg,
+		};
+	}
+};
 
 /** 助手会话事件 → assistant_* wire 帧（与剧情订阅同构，无 swipe/面板等剧情专属面） */
 const onAssistantEvent = (event: unknown) => {
@@ -1670,91 +2033,80 @@ const onAssistantEvent = (event: unknown) => {
 	}
 };
 
-/** 用户对助手发话（面板输入框 / 主输入框场外标记改道共用） */
-const promptAssistant = async (text: string) => {
-	if (!assistantHost) {
-		broadcast({ type: "notify", level: "warning", text: "助手不可用（启动失败或没有可用模型），剧情不受影响" });
-		return;
-	}
+/** 用户对某 agent 发话（面板输入框 / 主输入框场外标记改道共用；调用方已按 agentId 路由到 host） */
+const promptAssistant = async (host: AssistantHost, text: string) => {
 	broadcast({ type: "assistant_message", message: { role: "user", text } });
-	await assistantHost.prompt(text);
+	await host.prompt(text);
 };
 
 try {
-	assistantHost = await createAssistantHost({
+	const assistant = await createAgentHost({
 		cwd,
+		agentId: "assistant",
 		bridge: storyBridge,
 		uiContext,
 		onEvent: onAssistantEvent,
 		onError: (text) => broadcast({ type: "error", text }),
 	});
+	agentHosts.set("assistant", assistant);
+	// 内置助手不在 agents 配置段（不参与热重建比对/删除），占位标记「已初始化」即可
+	lastAgentConfigs.set("assistant", JSON.stringify(null));
 	// 剧情侧 assistant_run → 本 Host（过程进右栏，结果可双写剧情流）
-	registerAssistantRunner(async (req) => {
-		if (!assistantHost) {
-			return {
-				ok: false,
-				summary: "助手不可用。",
-				media: [],
-				panelsWritten: [],
-				error: "no_host",
-			};
-		}
-		const task = req.task.trim();
-		if (!task) {
-			return { ok: false, summary: "任务为空。", media: [], panelsWritten: [], error: "empty" };
-		}
-		const modeHint =
-			req.mode && req.mode !== "auto"
-				? `【任务类型：${req.mode === "ops" ? "系统/API/办事" : req.mode === "author" ? "作者维护（面板/设定/账本）" : "诊断调优"}】\n`
-				: "";
-		const body = `${modeHint}${task}`;
-		// 右栏可见：用户委托条
-		broadcast({ type: "assistant_message", message: { role: "user", text: `〔剧情委托〕${task}` } });
-		try {
-			if (req.signal?.aborted) {
-				return {
-					ok: false,
-					summary: "已取消。",
-					media: [],
-					panelsWritten: [],
-					abandoned: true,
-					error: "aborted",
-				};
-			}
-			const onAbort = () => {
-				void assistantHost?.abort();
-			};
-			req.signal?.addEventListener("abort", onAbort, { once: true });
-			try {
-				// 等到 return_answer / 放弃 / 兜底交回（非仅等 agent_end 摘最后一句）
-				const ret = await assistantHost.runTask(body);
-				return {
-					ok: ret.ok !== false && !ret.abandoned,
-					summary: ret.summary,
-					media: [],
-					panelsWritten: [],
-					abandoned: ret.abandoned,
-					viaReturnTool: ret.viaReturnTool,
-					...(ret.ok === false || ret.abandoned ? { error: ret.abandoned ? "abandoned" : "failed" } : {}),
-				};
-			} finally {
-				req.signal?.removeEventListener("abort", onAbort);
-			}
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return {
-				ok: false,
-				summary: `助手执行失败：${msg}`,
-				media: [],
-				panelsWritten: [],
-				error: msg,
-			};
-		}
-	});
-	console.log(`[liyuan] 助手会话已就位（${assistantHost.modelInfo() ? `${assistantHost.modelInfo()!.provider}/${assistantHost.modelInfo()!.id}` : "暂无模型"}${assistantHost.follows() ? "，跟随剧情模型" : ""}）`);
+	registerAgentRunner("assistant", buildAgentRunner("assistant"));
+	console.log(`[liyuan] 助手会话已就位（${assistant.modelInfo() ? `${assistant.modelInfo()!.provider}/${assistant.modelInfo()!.id}` : "暂无模型"}${assistant.follows() ? "，跟随剧情模型" : ""}）`);
 } catch (err) {
-	registerAssistantRunner(null);
+	registerAgentRunner("assistant", null);
 	console.error(`[liyuan] 助手会话启动失败（面板不可用，剧情不受影响）：${err instanceof Error ? err.message : String(err)}`);
+}
+
+// 自定义 agent：读 liyuan.config.json 的 agents 段逐个创建 host（DESIGN-custom-agents P3）。
+// 启动失败不挡剧情（照助手「面板不可用」模式，log 警告后继续）；缺配置/非法配置已由 loadConfig 归一化静默剔除。
+const agentConfigs: AgentConfig[] = loadConfig(cwd).agents ?? [];
+for (const cfg of agentConfigs) {
+	const id = cfg.id;
+	if (agentHosts.has(id)) {
+		console.warn(`[liyuan] 自定义 agent「${id}」与内置助手或其他 agent 重名，跳过`);
+		continue;
+	}
+	// prompt 与 promptFile 二选一：有 promptFile 则读文件内容作为 systemPrompt
+	let systemPrompt = cfg.prompt;
+	if (!systemPrompt && cfg.promptFile) {
+		try {
+			systemPrompt = readFileSync(isAbsolute(cfg.promptFile) ? cfg.promptFile : join(cwd, cfg.promptFile), "utf8");
+		} catch (err) {
+			console.warn(
+				`[liyuan] 自定义 agent「${id}」promptFile（${cfg.promptFile}）读取失败，跳过启动：${err instanceof Error ? err.message : String(err)}`,
+			);
+			continue;
+		}
+	}
+	try {
+		const host = await createAgentHost({
+			cwd,
+			// 桥按各自配置裁剪（只读组 readStory 一键开关；写权限默认 false，配错最多「委托报无权限」）
+			bridge: createStoryBridge(storyBridgeBase, cfg.bridge),
+			agentId: id,
+			agentName: cfg.name,
+			sessionDirName: `.liyuan-agents/${id}`,
+			systemPrompt,
+			toolsAllow: cfg.tools,
+			tools: cfg.tools, // 内置工具白名单：与 stagehand 同清单，两端一起裁剪（与热重建 reloadAgents 一致）
+			model: cfg.model ?? null,
+			followsStoryModel: !cfg.model,
+			uiContext,
+			onEvent: onAssistantEvent,
+			onError: (text) => broadcast({ type: "error", text }),
+		});
+		agentHosts.set(id, host);
+		// 启动即记录配置签名，供热重建（reloadAgents）比对；之后 PUT /api/config 的 agents 段触发
+		lastAgentConfigs.set(id, JSON.stringify(cfg));
+		registerAgentRunner(id, buildAgentRunner(id));
+		console.log(
+			`[liyuan] 自定义 agent「${id}」（${cfg.name}）已就位（${host.modelInfo() ? `${host.modelInfo()!.provider}/${host.modelInfo()!.id}` : "暂无模型"}${host.follows() ? "，跟随剧情模型" : ""}）`,
+		);
+	} catch (err) {
+		console.warn(`[liyuan] 自定义 agent「${id}」启动失败（跳过，不影响剧情）：${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
 // ---------- HTTP：REST /api/* + 托管 web/dist（存在时）+ 健康检查 ----------
@@ -2626,18 +2978,23 @@ wss.on("connection", (ws, req) => {
 						break;
 					}
 					case "abort": {
-						// 强制停止：按下即收敛 UI/选择卡，再撕掉本拍（台上引擎 + 旧循环 + 委托中的助手）
+						// 强制停止：按下即收敛 UI/选择卡，再撕掉本拍（台上引擎 + 旧循环 + 委托中的 agent）
 						for (const id of [...pendingChoices.keys()]) settleChoice(id, { stop: true });
-						const wasStreaming = storyStreaming() || (assistantHost?.isStreaming() ?? false);
+						const assistant = agentHosts.get("assistant");
+						const wasStreaming = storyStreaming() || (assistant?.isStreaming() ?? false);
 						if (session.isStreaming) broadcast({ type: "agent", state: "end" });
-						if (assistantHost?.isStreaming()) broadcast({ type: "assistant_state", state: "end" });
+						if (assistant?.isStreaming()) broadcast({ type: "assistant_state", state: "end" });
 						stage.abort(); // 引擎自会以 aborted 谢幕（半拍正文保留）
 						void session.abort().catch((err) => {
 							console.error(`[liyuan] abort 失败：${err instanceof Error ? err.message : String(err)}`);
 						});
-						void assistantHost?.abort().catch((err) => {
-							console.error(`[liyuan] assistant abort(on story stop) 失败：${err instanceof Error ? err.message : String(err)}`);
-						});
+						for (const [id, host] of agentHosts) {
+							void host.abort().catch((err) => {
+								console.error(
+									`[liyuan] ${id === "assistant" ? "assistant abort(on story stop)" : `agent「${id}」abort(on story stop)`} 失败：${err instanceof Error ? err.message : String(err)}`,
+								);
+							});
+						}
 						if (!wasStreaming) {
 							// 无流时仍可点停：无事发生
 						}
@@ -2668,33 +3025,18 @@ wss.on("connection", (ws, req) => {
 						const path = String(frame.path ?? "");
 						if (!path || path === session.sessionFile) return;
 						await runtime.switchSession(path);
-						// 助手对齐该剧情会话（有绑定则打开，无则新建，避免接着旧助手上下文）
-						if (assistantHost) {
-							try {
-								await assistantHost.switchToStory(session.sessionId);
-								broadcast(assistantHelloFrame());
-							} catch (err) {
-								console.error(
-									`[liyuan] 助手对齐剧情会话失败：${err instanceof Error ? err.message : String(err)}`,
-								);
-							}
-						}
+						// agent 对齐该剧情会话（有绑定则打开，无则新建，避免接着旧上下文；switchToStory 幂等）
+						await syncAllAgentStories();
+						if (agentHosts.has("assistant")) broadcast(assistantHelloFrame());
 						broadcast({ type: "notify", level: "info", text: "已切换会话" });
 						break;
 					}
 					case "new":
 						if (refuseWhileStreaming(ws, "新建会话")) return;
 						await runtime.newSession();
-						if (assistantHost) {
-							try {
-								await assistantHost.switchToStory(session.sessionId);
-								broadcast(assistantHelloFrame());
-							} catch (err) {
-								console.error(
-									`[liyuan] 助手对齐剧情会话失败：${err instanceof Error ? err.message : String(err)}`,
-								);
-							}
-						}
+						// agent 对齐该剧情会话（有绑定则打开，无则新建，避免接着旧上下文；switchToStory 幂等）
+						await syncAllAgentStories();
+						if (agentHosts.has("assistant")) broadcast(assistantHelloFrame());
 						broadcast({ type: "notify", level: "info", text: "已新建会话" });
 						break;
 					case "choice_reply": {
@@ -2712,36 +3054,67 @@ wss.on("connection", (ws, req) => {
 						break;
 					}
 					case "assistant_prompt": {
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							// 内置助手未启动照旧广播警告；未知/未启动的自定义 agent 回错误帧
+							if (agentId === "assistant") {
+								broadcast({ type: "notify", level: "warning", text: "助手不可用（启动失败或没有可用模型），剧情不受影响" });
+							} else {
+								ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
+							}
+							return;
+						}
 						const t = String(frame.text ?? "").trim();
-						if (t) await promptAssistant(t);
+						if (t) await promptAssistant(host, t);
 						break;
 					}
 					case "assistant_abort": {
-						if (assistantHost?.isStreaming()) {
-							// 助手侧同样：先解锁前端 busy，再后台撕流
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							if (agentId !== "assistant") ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
+							return; // 原语义：无助手无事发生
+						}
+						if (host.isStreaming()) {
+							// agent 侧同样：先解锁前端 busy，再后台撕流
 							broadcast({ type: "assistant_state", state: "end" });
 						}
-						void assistantHost?.abort().catch((err) => {
-							console.error(`[liyuan] assistant abort 失败：${err instanceof Error ? err.message : String(err)}`);
+						void host.abort().catch((err) => {
+							console.error(
+								`[liyuan] ${agentId === "assistant" ? "assistant abort" : `agent「${agentId}」abort`} 失败：${err instanceof Error ? err.message : String(err)}`,
+							);
 						});
 						break;
 					}
 					case "assistant_sessions": {
-						if (!assistantHost) {
-							ws.send(JSON.stringify({ type: "assistant_sessions", list: [] } satisfies ServerFrame));
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							if (agentId === "assistant") {
+								// 原语义：助手未启动回空列表
+								ws.send(JSON.stringify({ type: "assistant_sessions", list: [] } satisfies ServerFrame));
+							} else {
+								ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
+							}
 							return;
 						}
-						const list = await assistantHost.listSessions();
+						const list = await host.listSessions();
 						ws.send(JSON.stringify({ type: "assistant_sessions", list } satisfies ServerFrame));
 						break;
 					}
 					case "assistant_open": {
-						if (!assistantHost) return;
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							if (agentId !== "assistant") ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
+							return;
+						}
 						const path = String(frame.path ?? "");
 						if (!path) return;
 						try {
-							await assistantHost.openSession(path);
-							broadcast(assistantHelloFrame());
+							await host.openSession(path);
+							broadcast(agentHelloFrame(host));
 							broadcast({ type: "notify", level: "info", text: "已切换助手历史" });
 						} catch (err) {
 							ws.send(
@@ -2755,12 +3128,17 @@ wss.on("connection", (ws, req) => {
 						break;
 					}
 					case "assistant_delete": {
-						if (!assistantHost) return;
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							if (agentId !== "assistant") ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
+							return;
+						}
 						const path = String(frame.path ?? "");
 						if (!path) return;
 						try {
-							await assistantHost.deleteSession(path);
-							const list = await assistantHost.listSessions();
+							await host.deleteSession(path);
+							const list = await host.listSessions();
 							broadcast({ type: "assistant_sessions", list });
 							broadcast({ type: "notify", level: "info", text: "已删除助手历史" });
 						} catch (err) {
@@ -2774,26 +3152,55 @@ wss.on("connection", (ws, req) => {
 						}
 						break;
 					}
-					case "assistant_new":
-						if (!assistantHost) return;
-						if (assistantHost.isStreaming()) {
-							ws.send(JSON.stringify({ type: "notify", level: "warning", text: "请等助手当前回复完成（或先停止），再开新对话" } satisfies ServerFrame));
+					case "assistant_new": {
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							if (agentId !== "assistant") ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
 							return;
 						}
-						await assistantHost.newConversation();
-						broadcast(assistantHelloFrame());
-						broadcast({ type: "assistant_sessions", list: await assistantHost.listSessions() });
+						if (host.isStreaming()) {
+							ws.send(
+								JSON.stringify({
+									type: "notify",
+									level: "warning",
+									text: agentId === "assistant" ? "请等助手当前回复完成（或先停止），再开新对话" : "请等该 agent 当前回复完成（或先停止），再开新对话",
+								} satisfies ServerFrame),
+							);
+							return;
+						}
+						await host.newConversation();
+						broadcast(agentHelloFrame(host));
+						broadcast({ type: "assistant_sessions", list: await host.listSessions() });
 						break;
-					case "assistant_sync":
-						ws.send(JSON.stringify(assistantHelloFrame()));
+					}
+					case "assistant_sync": {
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							if (agentId === "assistant") {
+								// 原语义：助手未启动也回空 hello
+								ws.send(JSON.stringify(agentHelloFrame(null)));
+							} else {
+								ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
+							}
+							return;
+						}
+						ws.send(JSON.stringify(agentHelloFrame(host)));
 						break;
+					}
 					case "assistant_model": {
-						if (!assistantHost) return;
+						const agentId = agentIdOf(frame);
+						const host = agentHosts.get(agentId);
+						if (!host) {
+							if (agentId !== "assistant") ws.send(JSON.stringify(agentUnavailableFrame(agentId) satisfies ServerFrame));
+							return;
+						}
 						const provider = typeof frame.provider === "string" ? frame.provider.trim() : "";
 						const id = typeof frame.id === "string" ? frame.id.trim() : "";
 						try {
-							await assistantHost.setModel(provider && id ? { provider, id } : null);
-							broadcast(assistantHelloFrame());
+							await host.setModel(provider && id ? { provider, id } : null);
+							broadcast(agentHelloFrame(host));
 						} catch (err) {
 							ws.send(
 								JSON.stringify({
@@ -2841,7 +3248,13 @@ const shutdown = async () => {
 		for (const ws of clients) ws.close();
 		wss.close();
 		httpServer.close();
-		await assistantHost?.dispose();
+		for (const host of agentHosts.values()) {
+			try {
+				await host.dispose();
+			} catch {
+				// 单个 agent 释放失败不影响整体退出
+			}
+		}
 		await runtime.dispose();
 	} finally {
 		process.exit(0);

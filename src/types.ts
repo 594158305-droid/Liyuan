@@ -3,6 +3,8 @@
  * 本目录（src/）不允许 import pi 的任何东西（PLAN.md D3）。
  */
 
+import type { DisplayRule, RuleGroup } from "./cardfront.ts";
+
 /** 归一化后的角色卡（兼容 V1 / V2 chara_card_v2 / V3 chara_card_v3 / ST 导出格式） */
 export interface CharacterCard {
 	name: string;
@@ -72,6 +74,56 @@ export interface CharacterState {
 	status: string;
 	/** 备注（承诺、得知的秘密等） */
 	notes: string;
+	/** 当前穿着（服装档案里的 outfit id；随世界线回档） */
+	outfit?: string;
+}
+
+/**
+ * 自定义 agent 的桥权限（storyBridge 按此裁剪，DESIGN-custom-agents §2/§4）。
+ * 写权限默认全 false——用户必须显式声明；配错最多是「委托报无权限」，不会产生越权写。
+ */
+export interface AgentBridgePermissions {
+	/** 只读组一键开关：storyMessages / snapshot / worldState / cardName / listModels / deliverMedia。低危。 */
+	readStory: boolean;
+	/** 写面板：writePanels。中危（面板内容会进上下文，可能被诱导注入指令）。 */
+	writePanels: boolean;
+	/** 显式改稿：storyEdit（须征得用户同意，走 rp-edited 分支，原文可回滚）。中危。 */
+	storyEdit: boolean;
+	/** 危险：可触发剧情侧任何斜杠命令（/back /store 等全部命令）。默认 false。 */
+	queueCommand: boolean;
+	/** 写世界状态：applyStatePatch（用户主权字段直接落盘）。高危。 */
+	applyStatePatch: boolean;
+	/** 发媒体：emitStoryMedia。中危（可在剧情中投放图片/音频）。 */
+	emitMedia: boolean;
+	/** 刷新素材：refreshStoryMaterials。中危（重装素材/会话，可能打断当前生成）。 */
+	refreshMaterials: boolean;
+	/** 挂载知识库：mountCodex。低危（只改挂载清单）。 */
+	mountCodex: boolean;
+}
+
+/**
+ * 声明式自定义 agent（liyuan.config.json 的 agents 段，DESIGN-custom-agents §2）。
+ * v1 只支持「叙事外」agent（ops/规划/诊断/文审类，不进世界线）；经 assistant_run 工具按 id 委托。
+ */
+export interface AgentConfig {
+	/** 唯一 id（/^[a-z][a-z0-9-]*$/：小写字母开头，后接小写字母/数字/连字符）；委托时引用 */
+	id: string;
+	/** 面板显示名 */
+	name: string;
+	/** 显示在 agent 选择器的简介 */
+	description?: string;
+	/** 独立模型；缺省跟随剧情模型（同助手 syncFollowModel 语义） */
+	model?: { provider: string; id: string };
+	/** systemPrompt 全文；与 promptFile 二选一 */
+	prompt?: string;
+	/** 相对 cwd 的 .md 文件路径（systemPrompt 内容来源）；与 prompt 二选一 */
+	promptFile?: string;
+	/** 可见技能白名单（复用 skills 机制）；缺省为空 */
+	skills?: string[];
+	/** 工具白名单（只读面由 bridge.readStory 控制）；缺省为空 */
+	tools?: string[];
+	/** 桥权限；写权限默认全 false（用户必须显式声明） */
+	bridge: AgentBridgePermissions;
 }
 
 /** 项目配置（app/liyuan.config.json；旧名 rp.config.json 启动时迁移） */
@@ -132,6 +184,19 @@ export interface RpConfig {
 	assistantModel?: { provider: string; id: string };
 	/** 一档卡皮肤:显示向美化正则被用户关闭的卡路径列表(默认开;spec 2026-07-22 §7 P1) */
 	cardSkinOff?: string[];
+	/**
+	 * @deprecated 旧版平铺用户显示正则（v1 形态）。读取时若 userRuleGroups 缺失且本字段存在，
+	 * 自动迁移为未分组组；写入永远只写 userRuleGroups。
+	 */
+	userRules?: DisplayRule[];
+	/** 用户自建全局正则分组（三分类之一，写入形态；旧 userRules 迁移读取见 cardfront.ts userGroupsOf） */
+	userRuleGroups?: RuleGroup[];
+	/** 角色正则分组（三分类之二）：卡路径 → 组列表，同 cardRuleOff 模式 */
+	cardRuleGroups?: Record<string, RuleGroup[]>;
+	/** 卡路径 → 被关闭的卡内嵌显示规则键列表(同 cardSkinOff 模式;键为规则 id/name/source,见 cardfront.ts ruleKey) */
+	cardRuleOff?: Record<string, string[]>;
+	/** 自定义 agent 声明（DESIGN-custom-agents §2）：每项一个独立会话/模型/提示词/工具面，经 assistant_run 按 id 委托；v1 只支持叙事外 agent */
+	agents?: AgentConfig[];
 }
 
 export const DEFAULT_CONFIG: RpConfig = {
@@ -146,6 +211,8 @@ export const DEFAULT_CONFIG: RpConfig = {
 	greeting: true,
 	backendControl: true,
 	compactEveryNTurns: 30,
+	// 默认无自定义 agent（declarative，见 AgentConfig）
+	agents: [],
 };
 
 /** 宏替换上下文 */

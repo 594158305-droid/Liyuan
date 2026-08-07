@@ -1,12 +1,13 @@
 /**
- * 剧情 agent ↔ 右栏助手 的进程内网关（P0：助手工具化）。
+ * 剧情 agent ↔ 右栏 agent（助手/自定义 agent）的进程内网关
+ * （P0：助手工具化；P3：单 runner slot → 按 name 路由的多 agent 注册表）。
  *
- * main 在启动助手 Host 后 register；roleplay 的 assistant_run 工具通过本模块调用。
+ * main 在启动对应 agent Host 后 register；roleplay 的 assistant_run 工具通过本模块调用。
  * 扩展与 server 解耦：扩展不 import server/*，只依赖本纯注册表。
  *
  * 【双模块陷阱】roleplay 由 jiti 加载（tryNative:false），main 走 Node 原生 ESM，
- * 两边对同一文件会各得到一份 module scope。runner / delegateDepth 必须挂在
- * globalThis 上，否则 register 写进 A、execute 读 B → 永远「助手不可用」。
+ * 两边对同一文件会各得到一份 module scope。runners / delegateDepth 必须挂在
+ * globalThis 上，否则 register 写进 A、execute 读 B → 永远「agent 不可用」。
  */
 
 export type AssistantRunMode = "ops" | "author" | "diagnose" | "auto";
@@ -44,7 +45,12 @@ export interface AssistantRunResult {
 export type AssistantRunner = (req: AssistantRunRequest) => Promise<AssistantRunResult>;
 
 type GatewaySlot = {
-	runner: AssistantRunner | null;
+	/** name → runner 注册表（"assistant" = 内置助手；自定义 agent 用配置 id，如 "director"） */
+	runners: Record<string, AssistantRunner | null>;
+	/**
+	 * v1 互斥委托：全局深度计数，同一时刻最多一个剧情→agent 委托回合。
+	 * v2 扩展方向：按 agent 隔离 delegate 状态，支持多 agent 并发委托。
+	 */
 	delegateDepth: number;
 };
 
@@ -53,18 +59,32 @@ const SLOT_KEY = "__liyuanAssistantGateway__";
 function slot(): GatewaySlot {
 	const g = globalThis as typeof globalThis & { [SLOT_KEY]?: GatewaySlot };
 	if (!g[SLOT_KEY]) {
-		g[SLOT_KEY] = { runner: null, delegateDepth: 0 };
+		g[SLOT_KEY] = { runners: {}, delegateDepth: 0 };
 	}
 	return g[SLOT_KEY];
 }
 
-/** server 启动助手后注册；测试可注入 mock */
+/** 兼容别名：注册内置助手（= registerAgentRunner("assistant", fn)） */
 export function registerAssistantRunner(fn: AssistantRunner | null): void {
-	slot().runner = fn;
+	registerAgentRunner("assistant", fn);
+}
+
+/** server 启动对应 agent 后注册；测试可注入 mock */
+export function registerAgentRunner(name: string, fn: AssistantRunner | null): void {
+	slot().runners[name] = fn;
+}
+
+/**
+ * 注销 runner（agents 热重建删除/重建时调用）：把该 name 置 null，
+ * 照「失败注册 null」的惯例——runAgentTask 对 null 会返回「不可用」而非抛错。
+ * 未注册的 name 幂等，无副作用。
+ */
+export function unregisterAgentRunner(name: string): void {
+	slot().runners[name] = null;
 }
 
 export function hasAssistantRunner(): boolean {
-	return slot().runner !== null;
+	return slot().runners["assistant"] !== null;
 }
 
 export function beginAssistantDelegate(): void {
@@ -76,17 +96,23 @@ export function endAssistantDelegate(): void {
 	s.delegateDepth = Math.max(0, s.delegateDepth - 1);
 }
 
-/** 当前是否处于剧情→助手委托回合（助手工具可双写剧情流） */
+/** 当前是否处于剧情→agent 委托回合（agent 工具可双写剧情流） */
 export function isAssistantDelegateActive(): boolean {
 	return slot().delegateDepth > 0;
 }
 
+/** 兼容别名：委托给内置助手（= runAgentTask("assistant", req)） */
 export async function runAssistantTask(req: AssistantRunRequest): Promise<AssistantRunResult> {
-	const runner = slot().runner;
+	return runAgentTask("assistant", req);
+}
+
+/** 按 name 委托给指定 agent（自定义 agent 用配置 id，如 "director"）；未知/未注册 → 错误结果 */
+export async function runAgentTask(agent: string, req: AssistantRunRequest): Promise<AssistantRunResult> {
+	const runner = slot().runners[agent] ?? null;
 	if (!runner) {
 		return {
 			ok: false,
-			summary: "助手不可用（未启动或没有可用模型）。请用户打开右栏助手面板，或检查模型配置。",
+			summary: `agent「${agent}」未知或不可用（未注册/未启动）。请检查 agent 配置，或改用内置助手。`,
 			media: [],
 			panelsWritten: [],
 			error: "no_runner",

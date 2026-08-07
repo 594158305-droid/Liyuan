@@ -121,6 +121,11 @@ export interface StoryBridge {
 	refreshStoryMaterials(): Promise<void>;
 	/** 收编知识库挂载变化（写文件后调，/codexmount 命令桥） */
 	mountCodex(name: string, on: boolean): void;
+	/**
+	 * 显式改稿：把改后全文以 rp-edited-reply 分支条目提交（带「已改写」标记、原文保留可回滚）。
+	 * lastRoleIndex 语义与 scriptEditMessage 一致：从分支末尾倒数第 N 条角色消息，0=最后一条。
+	 */
+	storyEdit(input: { lastRoleIndex: number; text: string }): Promise<{ ok: boolean; error?: string }>;
 }
 
 export interface AssistantModelSel {
@@ -188,7 +193,8 @@ export interface AssistantHost {
 	dispose(): Promise<void>;
 }
 
-export interface CreateAssistantHostOptions {
+/** 通用宿主选项：不传自定义参数时 = 内置助手（id="assistant"）现状行为 */
+export interface CreateAgentHostOptions {
 	cwd: string;
 	bridge: StoryBridge;
 	/** 会话事件透传（main.ts 翻成 assistant_* wire 帧）；换新对话后自动续接 */
@@ -197,7 +203,27 @@ export interface CreateAssistantHostOptions {
 	onError(text: string): void;
 	/** headless UI 上下文（与剧情会话共用 main.ts 的实现即可） */
 	uiContext: unknown;
+	// ---- 自定义 agent 参数化（全部有默认值；不传 = 内置助手现状行为，见 docs/DESIGN-custom-agents.md §3） ----
+	/** agent 唯一 id（小写连字符，委托时引用）；缺省 "assistant" */
+	agentId?: string;
+	/** 面板显示名；缺省 "助手" */
+	agentName?: string;
+	/** 会话子目录相对路径（自定义 agent 传独立子目录，如 ".liyuan-agents/director"）；缺省 "assistant" = .liyuan-assistant/（内置助手不迁移） */
+	sessionDirName?: string;
+	/** 自定义 agent 的 systemPrompt 全文；缺省 undefined = 内置 stagehand 提示词体系 */
+	systemPrompt?: string;
+	/** 工具白名单（按 createStagehandTools 产物的 name 过滤）；缺省 undefined = 全部助手工具 */
+	toolsAllow?: string[];
+	/** 内置工具白名单（read/bash/edit/write，经 createAgentSession 的 tools 参数生效）；缺省 undefined = 全量内置工具（现状行为） */
+	tools?: string[];
+	/** 显式模型；缺省 null = 跟随剧情模型（syncFollowModel，内置助手现状行为） */
+	model?: { provider: string; id: string } | null;
+	/** false = 关闭跟随剧情模型（自定义 agent 显式模型时用）；缺省 true */
+	followsStoryModel?: boolean;
 }
+
+/** 内置助手专用选项（createAssistantHost 兼容包装的类型，= CreateAgentHostOptions 全量） */
+export type CreateAssistantHostOptions = CreateAgentHostOptions;
 
 /** 文本工具结果 */
 const text = (t: string, isError = false) => ({
@@ -251,7 +277,47 @@ function isAbandonChoice(answer: string | undefined): boolean {
 	return /放弃|返回剧情|取消委托|^取消$|abort|cancel/i.test(answer.trim());
 }
 
-function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: StagehandToolHooks): ToolDefinition[] {
+/**
+ * 助手工具面全量工具名（与 createStagehandTools 里 defineTool 的 name 逐一对应、
+ * 注册顺序一致；含 story_edit）。供管理界面暴露工具清单（GET /api/agent-tools），
+ * 自定义 agent 配置 tools 白名单时照此填。
+ */
+export const STAGEHAND_TOOL_NAMES: string[] = [
+	"return_answer",
+	"ask_user",
+	"story_info",
+	"story_read",
+	"story_search",
+	"story_command",
+	"config_read",
+	"config_write",
+	"preset_read",
+	"preset_toggle",
+	"world_read",
+	"world_write",
+	"story_edit",
+	"lorebook_search",
+	"models_list",
+	"skill_save",
+	"panel_write",
+	"show_media",
+	"draw_generate",
+	"draw_enhance",
+	"wardrobe_list",
+	"wardrobe_update",
+	"lorebook_write",
+	"codex_create",
+	"codex_write",
+	"codex_mount",
+	"card_create",
+];
+
+function createStagehandTools(
+	cwd: string,
+	bridge: StoryBridge,
+	hooks: StagehandToolHooks,
+	allowTools?: string[],
+): ToolDefinition[] {
 	const tools: ToolDefinition[] = [];
 
 	// ---- 委托交回 / 卡住问人（先于其它工具注册，提示词与完成协议挂钩） ----
@@ -419,6 +485,28 @@ function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: Stagehand
 				}
 				const queued = bridge.queueStoryCommand(cmd.startsWith("/") ? cmd : `/${cmd}`);
 				return text(queued ? `已提交 ${cmd}：剧情正在生成，将在本轮结束后执行。` : `已提交 ${cmd}。`);
+			},
+		}),
+		defineTool({
+			name: "story_edit",
+			label: "改写剧情回复",
+			description:
+				"仅当用户已明确要求改稿时使用；target 指向要改写的角色回复，text 为改后全文，confirm 必须为 true。改稿前如需确认可先 ask_user。绝不用于擅自改写剧情正文。",
+			parameters: Type.Object({
+				target: Type.Number({ description: "目标角色回复：从分支末尾倒数第 N 条（0=最后一条）" }),
+				text: Type.String({ description: "改后全文（一次成型的修订稿）" }),
+				confirm: Type.Boolean({ description: "必须为 true（用户已明确要求改稿）" }),
+			}),
+			async execute(_id, params) {
+				if (params.confirm !== true) {
+					return text("story_edit 需 confirm=true（用户已明确要求改稿）；未征得同意前请用 ask_user。", true);
+				}
+				const textInput = (params.text ?? "").trim();
+				if (!textInput) return text("text 不能为空（改后全文缺失）。", true);
+				const r = await bridge.storyEdit({ lastRoleIndex: params.target ?? 0, text: textInput });
+				return r.ok
+					? text(`已改写剧情回复（lastRoleIndex=${params.target ?? 0}）：带「已改写」标记提交，原文保留在分支树内可回滚。`)
+					: text(`改稿失败：${r.error ?? "未知错误"}`, true);
 			},
 		}),
 		defineTool({
@@ -834,10 +922,36 @@ tools.push(
 	),
 );
 
+	// 自定义 agent 按配置裁剪工具面：只保留白名单内工具（缺省 undefined = 全量 = 内置助手现状）。
+	// 基础工具（return_answer / ask_user / 只读类）由配置方的 toolsAllow 里保证。
+	if (allowTools) {
+		return tools.filter((t) => allowTools.includes(t.name));
+	}
 	return tools;
 }
 
 // ---------- 内联扩展工厂（角色库/世界线/面板族工具注入在上方 createStagehandTools 内） ----------
+
+/**
+ * 自定义 agent 的提示词扩展：before_agent_start 时全量替换 system prompt
+ * （不注入剧情快照——那是检场 stagehand 的活，自定义 agent 用 story_read/story_info 工具自取）。
+ * 提示词里的 {{agentName}} / {{agentId}} 占位符在构建时替换，供用户提示词自称用。
+ * 基础工具（return_answer / ask_user / 只读类）仍由 createAgentSession 的 customTools
+ * 注入（经 createStagehandTools 的 allowTools 白名单裁剪），此处不注册工具。
+ */
+function plainPromptExtension(prompt: string, agentName?: string, agentId?: string): ExtensionFactory {
+	const resolved =
+		agentName || agentId
+			? prompt
+					.replace(/\{\{\s*agentName\s*\}\}/g, agentName ?? "")
+					.replace(/\{\{\s*agentId\s*\}\}/g, agentId ?? "")
+			: prompt;
+	return (pi) => {
+		pi.on("before_agent_start", async () => {
+			return { systemPrompt: resolved };
+		});
+	};
+}
 
 function stagehandExtension(
 	cwd: string,
@@ -880,9 +994,26 @@ function stagehandExtension(
 
 // ---------- 会话托管 ----------
 
+/** 内置助手兼容入口（P3 多 host 路由时 main.ts 仍调它）：不传自定义参数 = 泛化前行为完全一致 */
 export async function createAssistantHost(opts: CreateAssistantHostOptions): Promise<AssistantHost> {
+	return createAgentHost(opts);
+}
+
+export async function createAgentHost(opts: CreateAgentHostOptions): Promise<AssistantHost> {
 	const { cwd, bridge, onEvent, onError, uiContext } = opts;
-	const sessionDir = dir(cwd, "assistant");
+	// ---- 自定义 agent 参数化（缺省 = 内置助手，见 docs/DESIGN-custom-agents.md §3） ----
+	const agentId = opts.agentId ?? "assistant";
+	const agentName = opts.agentName;
+	/** 面板显示名（错误上报用；内置助手 = "助手"） */
+	const displayName = agentName ?? "助手";
+	const isAssistant = agentId === "assistant";
+	const systemPrompt = opts.systemPrompt;
+	const toolsAllow = opts.toolsAllow;
+	/** 会话目录：内置助手走 DIRS.assistant（.liyuan-assistant/，不迁移）；自定义 agent 用相对子目录 */
+	const sessionDir =
+		opts.sessionDirName && opts.sessionDirName !== "assistant"
+			? join(cwd, opts.sessionDirName)
+			: dir(cwd, "assistant");
 	mkdirSync(sessionDir, { recursive: true });
 
 	let session: AgentSession;
@@ -1160,7 +1291,9 @@ export async function createAssistantHost(opts: CreateAssistantHostOptions): Pro
 			noPromptTemplates: true,
 			noThemes: true,
 			noContextFiles: true,
-			extensionFactories: [stagehandExtension(cwd, bridge, selfInfo, isDelegating)],
+			extensionFactories: systemPrompt
+				? [plainPromptExtension(systemPrompt, agentName, agentId)]
+				: [stagehandExtension(cwd, bridge, selfInfo, isDelegating)],
 		});
 		await loader.reload();
 
@@ -1175,9 +1308,12 @@ export async function createAssistantHost(opts: CreateAssistantHostOptions): Pro
 		const { session: s } = await createAgentSession({
 			cwd,
 			agentDir,
-			customTools: createStagehandTools(cwd, bridge, toolHooks),
+			customTools: createStagehandTools(cwd, bridge, toolHooks, toolsAllow),
 			// backendControl 关 = 分发模式：助手也不给本机工具（read/bash/edit/write），只留领域工具
 			...(config.backendControl === false ? { noTools: "builtin" as const } : {}),
+			// 内置工具白名单：toolsAllow 管 stagehand 工具、tools 管内建（read/bash/edit/write）。
+			// 两者都提供时内置工具被裁剪为 tools 清单（缺省不传 = 现状行为）。
+			...(opts.tools ? { tools: opts.tools } : {}),
 			resourceLoader: loader,
 			settingsManager,
 			sessionManager: sm,
@@ -1187,13 +1323,15 @@ export async function createAssistantHost(opts: CreateAssistantHostOptions): Pro
 			uiContext: uiContext as never,
 			mode: "rpc",
 			onError: (err: { extensionPath: string; event: string; error: string }) => {
-				onError(`助手扩展错误（${err.event}）：${err.error}`);
+				onError(`${displayName}扩展错误（${err.event}）：${err.error}`);
 			},
 		} as never);
 
-		// 显式助手模型：创建后手动应用（避免 setModel 改写共享默认模型设置）
-		if (config.assistantModel) {
-			applyModelTo(s, config.assistantModel, true);
+		// 显式模型：内置助手读 config.assistantModel（现状语义）；自定义 agent 用 opts.model。
+		// 创建后手动应用（applyModelTo），避免污染共享默认模型设置。
+		const explicitModel = isAssistant ? loadConfig(cwd).assistantModel : (opts.model ?? null);
+		if (explicitModel) {
+			applyModelTo(s, explicitModel, true);
 		}
 		try {
 			ensureBind(s, bridge.snapshot().sessionId);
@@ -1208,12 +1346,12 @@ export async function createAssistantHost(opts: CreateAssistantHostOptions): Pro
 		const m = s.modelRegistry.find(sel.provider, sel.id);
 		if (!m) {
 			if (!quiet) throw new Error(`模型不存在：${sel.provider}/${sel.id}`);
-			onError(`助手模型 ${sel.provider}/${sel.id} 不在可用清单，暂用默认模型`);
+			onError(`${displayName}模型 ${sel.provider}/${sel.id} 不在可用清单，暂用默认模型`);
 			return false;
 		}
 		if (!s.modelRegistry.hasConfiguredAuth(m)) {
 			if (!quiet) throw new Error(`模型 ${sel.provider}/${sel.id} 没有可用的 API key`);
-			onError(`助手模型 ${sel.provider}/${sel.id} 缺少 API key，暂用默认模型`);
+			onError(`${displayName}模型 ${sel.provider}/${sel.id} 缺少 API key，暂用默认模型`);
 			return false;
 		}
 		const cur = s.model;
@@ -1237,7 +1375,12 @@ export async function createAssistantHost(opts: CreateAssistantHostOptions): Pro
 		unsubscribe = session.subscribe((event) => onEvent(event));
 	};
 
-	const follows = () => !loadConfig(cwd).assistantModel;
+	/** 跟随模式判定：显式模型（opts.model）或 followsStoryModel=false → 不跟随；内置助手仅在 config.assistantModel 配置时跟随（现状语义）；自定义 agent 缺省跟随剧情模型 */
+	const follows = () => {
+		if (opts.model || opts.followsStoryModel === false) return false;
+		if (isAssistant) return !loadConfig(cwd).assistantModel;
+		return true;
+	};
 
 	const modelInfo = () => {
 		const m = session?.model;
@@ -1495,6 +1638,16 @@ export async function createAssistantHost(opts: CreateAssistantHostOptions): Pro
 		},
 		sessionPath: () => session.sessionFile,
 		async setModel(sel) {
+			if (!isAssistant) {
+				// 自定义 agent：模型是实例级参数（opts.model），setModel 只作用当前会话，
+				// 不写 config.assistantModel（那是内置助手的配置字段）。
+				if (!sel) {
+					syncFollowModel();
+					return;
+				}
+				applyModelTo(session, sel); // 非法则抛错
+				return;
+			}
 			const config = loadConfig(cwd);
 			if (!sel) {
 				if (config.assistantModel) {

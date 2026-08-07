@@ -374,3 +374,39 @@ export const IconCheck = (p: IconProps) => (
 		<path d="M20 6 9 17l-5-5" />
 	</Icon>
 );
+
+/* 本地功能图标增量 */
+
+export const IconImage = (p: IconProps) => (
+	<Icon {...p}>
+		<rect width="18" height="18" x="3" y="3" rx="2" />
+		<circle cx="9" cy="9" r="2" />
+		<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+	</Icon>
+);
+
+export const IconRegex = (p: IconProps) => (
+	<Icon {...p}>
+		<rect x="3" y="5" width="18" height="14" rx="2" />
+		<path d="M8 9v6" />
+		<path d="M16 9v6" />
+		<path d="m7 16 10-8" />
+	</Icon>
+);
+
+export const IconMaximize = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M15 3h6v6" />
+		<path d="M9 21H3v-6" />
+		<path d="m21 3-7 7" />
+		<path d="m3 21 7-7" />
+	</Icon>
+);
+
+export const IconSparkles = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+		<path d="M20 3v4" />
+		<path d="M22 5h-4" />
+	</Icon>
+);

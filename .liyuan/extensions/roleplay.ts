@@ -61,7 +61,7 @@ import {
 	writePanel,
 	type PanelMap,
 } from "../../src/panels.ts";
-import { runAssistantTask } from "../../src/assistant-gateway.ts";
+import { runAgentTask } from "../../src/assistant-gateway.ts";
 import { enabledBlocks, normalizeRpPreset, type RpPreset } from "../../src/preset.ts";
 import { applyProjectedSamplers } from "../../src/samplers.ts";
 import { registerStoryPanelSync, registerStoryStateSync } from "../../src/story-sync.ts";
@@ -176,6 +176,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	let appCwd = process.cwd();
 	// 场记记账：进行中标志（防重入）；连续性审查已关闭
 	let scribeBusy = false;
+	/** 场记旁侧模型通道缓存（session_start / context 事件捕获；storyEdit 旁路重记账用） */
+	let scribeSideCtx: SideCtx | null = null;
 	// 固定楼层压缩：距上次压缩的叙事轮数 + 主动触发在途标志（防重复触发）
 	let narrativeTurnsSinceCompact = 0;
 	let proactiveCompactInFlight = false;
@@ -1179,6 +1181,11 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				task: Type.String({
 					description: "What the assistant should do, in plain language (include user intent and any paths/API names).",
 				}),
+				agent: Type.Optional(
+					Type.String({
+						description: "委托系统事务给指定的 agent（缺省为内置助手；自定义 agent 用配置里的 id，如 director）。",
+					}),
+				),
 				mode: Type.Optional(
 					Type.Union([Type.Literal("ops"), Type.Literal("author"), Type.Literal("diagnose"), Type.Literal("auto")], {
 						description: "ops=API/media/bash; author=panels/lore/state; diagnose=debug config; auto=default",
@@ -1192,7 +1199,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				),
 			}),
 			async execute(_id, params, signal) {
-				const r = await runAssistantTask({
+				const r = await runAgentTask(params.agent ?? "assistant", {
 					task: params.task,
 					mode: params.mode ?? "auto",
 					signal,
@@ -1344,6 +1351,9 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				snapshotMcpEnabled();
 			}
 			scribeBusy = false;
+			// 场记旁侧模型通道：storyEdit 旁路重记账用（agent_end 自己有 ctx，此缓存供外部调用）
+			// ModelRegistry 与 SideCtx.modelRegistry 结构签名不同（本文件从未过 tsc 校验），用 unknown 桥接
+			scribeSideCtx = { model: ctx.model, modelRegistry: ctx.modelRegistry } as unknown as SideCtx;
 			aliasPromise = null; // 素材可能已变，允许重新初始化（有磁盘缓存，代价极低）
 
 			// MCP 外设：按本会话启用集连接；索引写进 system prompt（D8：会话内字节稳定）
@@ -1534,6 +1544,73 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			await new Promise((r) => setTimeout(r, 200));
 		}
 	};
+
+	/**
+	 * 场记记账单次执行（agent_end 与外部 storyEdit 旁路重记账共用）。
+	 * 只写状态补丁，不做连续性/先斩后奏审查；输出不可解析或 patch 为空时静默跳过。
+	 */
+	const scribeTurnOnce = async (userText: string, assistantText: string, sideCtx?: SideCtx): Promise<void> => {
+		// 防重入（agent_end 与 storyEdit 旁路可能并发触发）
+		if (scribeBusy || !card) return;
+		const c = sideCtx ?? scribeSideCtx;
+		if (!c || !c.model) return;
+		scribeBusy = true;
+		try {
+			const prompt = buildScribeTurnPrompt({
+				state,
+				userText,
+				assistantText,
+				charName: card.name,
+				userName: config.userName,
+			});
+			// 只抽 patch，输出短，token 上限收紧
+			const text = await sideComplete(c, prompt.systemPrompt, prompt.userText, 1024);
+			if (!text) return;
+			const result = parseScribeResult(text);
+			if (!result) {
+				if (process.env.RP_DEBUG) console.error(`[rp-scribe] 输出不可解析，本轮跳过`);
+				return;
+			}
+			if (Object.keys(result.patch).length > 0) {
+				const knownNames = [card.name, config.userName, ...Object.keys(state.characters)];
+				const applied = applyPatch(state, canonicalizeCharacterKeys(result.patch, knownNames));
+				state = applied.state;
+				if (stateFile) saveState(stateFile, state);
+				snapshotState();
+				if (process.env.RP_DEBUG) {
+					console.error(`[rp-scribe] ${applied.applied.join("、") || "（无变更）"}`);
+				}
+			}
+		} catch (err) {
+			if (process.env.RP_DEBUG) {
+				console.error(`[rp-scribe] 失败（本轮跳过）：${err instanceof Error ? err.message : String(err)}`);
+			}
+		} finally {
+			scribeBusy = false;
+		}
+	};
+
+	// 场记旁路网关（storyEdit 重记账用）：roleplay 经 jiti 加载、main 是 Node 原生 ESM，
+	// 双模块 scope 下模块级导出不可靠——照 src/assistant-gateway.ts 惯例经 globalThis 挂载点读取。
+	// 暴露两个能力：
+	// - waitForScribeIdle()：等 scribeBusy 归位（复用 waitForScribe 的 20s 轮询语义）；
+	// - scribeTurnOnceExported(userText, assistantText)：旁路重记账（喂「被编辑轮用户消息 + 改后全文」）。
+	const SCRIBE_GATEWAY_KEY = "__liyuanScribeGateway__";
+	const scribeGateway = () => {
+		const g = globalThis as typeof globalThis & {
+			[SCRIBE_GATEWAY_KEY]?: {
+				waitForScribeIdle: (ms?: number) => Promise<void>;
+				scribeTurnOnceExported: (userText: string, assistantText: string) => Promise<void>;
+			};
+		};
+		// 每次扩展安装都覆盖挂载点：热重载（rprefresh）会重跑本扩展，挂载点须指向最新闭包
+		g[SCRIBE_GATEWAY_KEY] = {
+			waitForScribeIdle: (ms = 20000) => waitForScribe(ms),
+			scribeTurnOnceExported: (userText, assistantText) => scribeTurnOnce(userText, assistantText),
+		};
+		return g[SCRIBE_GATEWAY_KEY];
+	};
+	scribeGateway();
 
 	// 树导航后：账本与面板随剧情位置回退（快照存在树里，导航到哪就恢复到哪）
 	pi.on("session_tree", async (_event, ctx) => {

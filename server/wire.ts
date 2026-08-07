@@ -6,6 +6,8 @@
  *
  * D10：narrative 通道的文本必须是主演模型原始输出，翻译只做通道分发与
  * 结构块（thinking/toolCall）的丢弃，绝不改写正文字符。
+ * rp-edited 例外：经显式改稿（用户手改 / 助手 story_edit）的回复带 edited 标记，
+ * 仅此通道允许出现非模型原始输出；其余路径承诺不变。
  */
 
 import {
@@ -16,7 +18,10 @@ import {
 import { isBackstageText } from "../src/stance.ts";
 import { applyDraftOps, type DraftMsgLike } from "../src/draft.ts";
 import type { RpPanel } from "../src/panels.ts";
+
 import type { WorldState } from "../src/types.ts";
+
+import type { DisplayRule } from "../src/cardfront.ts";
 
 export type { DisplaySkin };
 
@@ -71,6 +76,8 @@ export interface WireMsg {
 	 * 须上屏并进入 hello 重放，以便「停后可见 / 继续写」。
 	 */
 	unfinished?: boolean;
+	/** 用户/助手显式改稿后的回复（rp-edited-reply 通道）；无则缺省 */
+	edited?: boolean;
 	/** user 消息专用：带场外标记（//、（）包裹），该轮助手回复走 backstage 通道 */
 	backstage?: boolean;
 	/** image / audio / video 通道：资源地址（http(s) 或本服务 /media/ · /audio/） */
@@ -231,7 +238,13 @@ export type ServerFrame =
 			cardfront?: {
 				enabled: boolean;
 				hasSkin: boolean;
-				rules: Array<{ name: string; source: string; flags: string; replace: string }>;
+				rules: DisplayRule[];
+				/** 卡内嵌规则全量（筛选后，含被用户关闭的），前端管理用 */
+				cardRules?: DisplayRule[];
+				/** 用户自建全局规则全量（含 off 标记） */
+				userRules?: DisplayRule[];
+				/** 当前卡被关闭的卡内嵌规则键列表 */
+				ruleOff?: string[];
 				charName: string;
 				userName: string;
 			};
@@ -265,6 +278,8 @@ export type ServerFrame =
 			follow: boolean;
 			/** 当前助手会话路径（便于历史列表高亮） */
 			sessionPath?: string;
+			/** 自定义 agent 维度：回显当前 hello 所属 agent id（缺省 assistant，旧前端忽略此字段） */
+			agentId?: string;
 	  }
 	/** 助手历史列表（已按当前角色卡过滤） */
 	| { type: "assistant_sessions"; list: AssistantSessionInfo[] }
@@ -274,6 +289,13 @@ export type ServerFrame =
 	| { type: "assistant_activity"; activity: WireActivity }
 	/** 在线更新状态变化（发现新版/下载进度/就绪）：全量状态推送 */
 	| { type: "update"; update: UpdateWire }
+	/** 脚本运行时程序化生成流（JS Runner 扩展，等价 ST 的 js_generate） */
+	| { type: "ext_gen"; reqId: string; kind: "start" }
+	| { type: "ext_gen"; reqId: string; kind: "delta"; delta: string }
+	| { type: "ext_gen"; reqId: string; kind: "end"; stopReason?: string; usage?: { promptTokens?: number; completionTokens?: number } }
+	| { type: "ext_gen"; reqId: string; kind: "error"; error: string }
+	/** 脚本运行时扩展事件桥（JS Runner）：pi 事件 → ST 风格事件名，args 直通前端脚本总线 */
+	| { type: "ext_event"; name: string; args: unknown[] }
 	| { type: "error"; text: string };
 
 /** 助手会话列表条目（绑定角色卡，与剧情会话列表同构裁剪） */
@@ -312,16 +334,30 @@ export type ClientFrame =
 	/** 剧情决策应答：value=选项原文或自由输入；stop=停止本回合（笔还给用户） */
 	| { type: "choice_reply"; id: string; value?: string; stop?: boolean }
 	/** 助手（右栏独立会话）：发话 / 停止 / 新对话 / 请求全量 / 选模型（provider+id 均缺省 = 跟随剧情模型） */
-	| { type: "assistant_prompt"; text: string }
+	| { type: "assistant_prompt"; text: string; agentId?: string }
 	| { type: "assistant_abort" }
 	| { type: "assistant_new" }
-	| { type: "assistant_sync" }
-	| { type: "assistant_model"; provider?: string; id?: string }
+	| { type: "assistant_sync"; agentId?: string }
+	| { type: "assistant_model"; provider?: string; id?: string; agentId?: string }
 	/** 助手历史：拉列表 / 打开 / 删除（均按当前角色卡过滤） */
 	| { type: "assistant_sessions" }
 	| { type: "assistant_open"; path: string }
 	| { type: "assistant_delete"; path: string }
+	/** 脚本运行时程序化生成（JS Runner 扩展）：发起 / 中止 */
+	| { type: "ext_generate"; reqId: string; params: ExtGenerateParams }
+	| { type: "ext_abort"; reqId: string }
 	| { type: "new" };
+
+/** 脚本运行时程序化生成参数（等价 ST 的 js_generate；精细采样参数按产品决策只支持子集） */
+export interface ExtGenerateParams {
+	/** 缺省 = 当前会话模型 */
+	model?: { provider: string; id: string };
+	systemPrompt?: string;
+	messages: Array<{ role: "user" | "assistant"; content: string }>;
+	temperature?: number;
+	maxTokens?: number;
+	reasoning?: "none" | "low" | "medium" | "high";
+}
 
 /** 翻译时需要的显示名 */
 export interface WireNames {
@@ -468,13 +504,15 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 			: { channel: "user", name: names.userName, text };
 	}
 	if (msg.role === "assistant") {
-		const aborted = msg.stopReason === "aborted";
+		// 未完整完成：用户中断（aborted）或生成预算耗尽被截断（length）——半截稿须上屏，
+		// 即使正文未流出也保留思维链；只有「正常完成」且无正文/纯工具轮才跳过。
+		const unfinished = msg.stopReason === "aborted" || msg.stopReason === "length";
 		const channel: WireChannel = opts?.backstage ? "backstage" : "narrative";
 		const modelThinking = thinkingOf(msg.content).trim();
-		// 正常中间 tool 轮：跳过（防叠泡）；**用户中断**的半截须上屏，即便夹着 toolCall
-		if (!aborted && hasToolCall(msg.content)) return null;
-		// 正常完成且无正文：跳过；中断时即使无 text 也可能有 thinking，后面单独处理
-		if (!aborted && !text) return null;
+		// 正常中间 tool 轮：跳过（防叠泡）；**未完整完成**的半截须上屏，即便夹着 toolCall
+		if (!unfinished && hasToolCall(msg.content)) return null;
+		// 正常完成且无正文：跳过；截断/中断时即使无 text 也可能有 thinking，后面单独处理
+		if (!unfinished && !text) return null;
 
 		const scaffoldThinking = text ? extractScaffoldThinking(text) : "";
 		const thinking = [modelThinking, scaffoldThinking].filter(Boolean).join("\n\n").trim();
@@ -486,8 +524,8 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 			: "";
 
 		if (!display && !thinking) {
-			// 空中断：仍留一条锚点，避免 agent_end→resync 后像「什么都没发生」
-			if (aborted) {
+			// 空中断/空截断：仍留一条锚点，避免 agent_end→resync 后像「什么都没发生」
+			if (unfinished) {
 				return {
 					channel,
 					name: names.charName,
@@ -500,7 +538,7 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 
 		const body =
 			display ||
-			(aborted ? "（正文未流出，见思维链）" : "（脚手架已折叠，见思维链）");
+			(unfinished ? "（正文未流出，见思维链）" : "（脚手架已折叠，见思维链）");
 		// 时间线：从 details.rpTimeline 取出持久化的段序列（引擎在定稿时写入）
 		// text 段必须走 prepareDisplayText——与 msg.text 同管线——否则 <catsay> 等
 		// unwrap 标签会以原文暴露在屏上（时间线优先渲染时绕过了 body 的处理结果）。
@@ -523,7 +561,7 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 			text: body,
 			...(thinking ? { thinking } : {}),
 			...(timeline ? { timeline } : {}),
-			...(aborted ? { unfinished: true } : {}),
+			...(unfinished ? { unfinished: true } : {}),
 		};
 	}
 	if (msg.role === "custom") {
@@ -547,9 +585,11 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 					: {}),
 			};
 		}
-		/** 用户手改后的角色回复：显示同叙事通道 */
+		/** 用户手改后的角色回复：显示同叙事通道，带「已改写」标记（仅此通道允许非模型原始输出） */
 		if (msg.customType === "rp-edited-reply") {
-			return text ? { channel: "narrative", name: names.charName, text: prepareDisplayText(text, skin) } : null;
+			return text
+				? { channel: "narrative", name: names.charName, text: prepareDisplayText(text, skin), edited: true }
+				: null;
 		}
 		if (msg.customType === "rp-import") {
 			return text ? { channel: "import", text: prepareDisplayText(text, skin) } : null;
@@ -608,6 +648,7 @@ export function foldTurnNarratives(msgs: WireMsg[]): WireMsg[] {
 				const prev = out[turnRoleIdx];
 				const thinking = join(prev.thinking, m.thinking);
 				const unfinished = prev.unfinished === true || m.unfinished === true;
+				const edited = prev.edited === true || m.edited === true;
 				out[turnRoleIdx] = {
 					...prev,
 					text: join(prev.text, m.text),
@@ -616,8 +657,10 @@ export function foldTurnNarratives(msgs: WireMsg[]): WireMsg[] {
 					...(m.swipe ? { swipe: m.swipe } : prev.swipe ? { swipe: prev.swipe } : {}),
 					...(m.name ? { name: m.name } : {}),
 					...(unfinished ? { unfinished: true } : {}),
+					...(edited ? { edited: true } : {}),
 				};
 				if (!unfinished) delete out[turnRoleIdx].unfinished;
+				if (!edited) delete out[turnRoleIdx].edited;
 				continue;
 			}
 			turnRoleIdx = out.length;

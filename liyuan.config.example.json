@@ -1,4 +1,5 @@
 {
+	"_agentsExampleNote": "本文件可直接改名复制为 liyuan.config.json 使用。下面的 agents 段是自定义 agent 的示例（director 导演：只开只读与面板写入，写权限全部保守关闭）。不需要自定义 agent 时，删除整个 agents 段（以及本说明行）即可，不影响任何剧情功能。",
 	"card": "assets/cards/default_Qingwu.json",
 	"lorebooks": [],
 	"userName": "旅人",
@@ -10,5 +11,25 @@
 	"backendControl": true,
 	"creationMode": "ask",
 	"importStripTags": [],
-	"greetingIndex": 0
+	"greetingIndex": 0,
+	"agents": [
+		{
+			"id": "director",
+			"name": "导演",
+			"description": "剧情规划与节奏把控（示例 agent，可按需修改或删除）",
+			"prompt": "你是梨园的导演，负责剧情规划、节奏把控与伏笔管理。你的建议要简洁、可执行，优先使用只读与询问类工具。",
+			"skills": [],
+			"tools": ["story_read", "lorebook_search", "ask_user", "return_answer"],
+			"bridge": {
+				"readStory": true,
+				"writePanels": false,
+				"storyEdit": false,
+				"queueCommand": false,
+				"applyStatePatch": false,
+				"emitMedia": false,
+				"refreshMaterials": false,
+				"mountCodex": false
+			}
+		}
+	]
 }

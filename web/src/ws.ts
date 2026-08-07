@@ -12,6 +12,18 @@ export interface WsHandle {
 	send: (frame: ClientFrame) => void;
 }
 
+/** 模块级当前连接（非 React 侧用）：useWire 建连/断连时维护，sendFrame 据此发帧 */
+let activeWs: WebSocket | null = null;
+
+/**
+ * 非 React 侧发送帧（jsrunner/helper.ts 等模块级代码用）。
+ * 未连接（activeWs 空 / 非 OPEN）时静默丢弃——与 WsHandle.send 同一纪律。
+ */
+export function sendFrame(frame: ClientFrame): void {
+	const ws = activeWs;
+	if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+}
+
 export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: ConnState) => void): WsHandle {
 	const wsRef = useRef<WebSocket | null>(null);
 	const onFrameRef = useRef(onFrame);
@@ -30,6 +42,7 @@ export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: Conn
 			const proto = location.protocol === "https:" ? "wss:" : "ws:";
 			const ws = new WebSocket(`${proto}//${location.host}/ws`);
 			wsRef.current = ws;
+			activeWs = ws;
 
 			ws.onopen = () => {
 				retryMs = 1500;
@@ -43,6 +56,8 @@ export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: Conn
 				}
 			};
 			ws.onclose = (ev) => {
+				// 连接替换/关闭后，sendFrame 不应再往旧连接发
+				if (activeWs === ws) activeWs = null;
 				if (closed) return;
 				// 4401 = 服务端鉴权失败（密码在别处被改）：刷新回登录门，别在这无谓重连
 				if (ev.code === 4401) {
@@ -60,6 +75,7 @@ export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: Conn
 		return () => {
 			closed = true;
 			if (timer) clearTimeout(timer);
+			if (activeWs === wsRef.current) activeWs = null;
 			wsRef.current?.close();
 		};
 	}, []);

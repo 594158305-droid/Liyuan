@@ -74,6 +74,17 @@ export interface AssistantPanelProps {
 	onDeleteSession(path: string): void;
 	/** null=回到跟随剧情模型 */
 	onPickModel(sel: { provider: string; id: string } | null): void;
+	/**
+	 * 自定义 agent 维度（可选，2026-08-07）：当前选中的 agent id（缺省=assistant）。
+	 * 仅有多 agent（agents.length>1）时显示选择器；未提供/空列表保持旧行为。
+	 */
+	agentId?: string;
+	/** 可选：agent 选择器数据（始终含内置助手；空/未提供=不显示选择器） */
+	agents?: Array<{ id: string; name: string; description?: string }>;
+	/** 可选：点击切换 agent（App 侧重发 assistant_sync 带 agentId） */
+	onSwitchAgent?(id: string): void;
+	/** 打开自定义 agent 管理面板 */
+	onOpenManager?: () => void;
 }
 
 /** 同一轮的连续助手消息：前 n-1 条是中间步骤，最后一条是回复 */
@@ -163,6 +174,10 @@ export function AssistantPanel({
 	onOpenSession,
 	onDeleteSession,
 	onPickModel,
+	agentId,
+	agents,
+	onSwitchAgent,
+	onOpenManager,
 }: AssistantPanelProps) {
 	const [input, setInput] = useState("");
 	const [models, setModels] = useState<ModelsResponse | null>(null);
@@ -225,6 +240,31 @@ export function AssistantPanel({
 	return (
 		<div className="asst-panel">
 			<div className="asst-toolbar">
+				{agents && agents.length > 1 && (
+					<div className="asst-agents" role="group" aria-label="切换 agent">
+						{agents.map((a) => (
+							<button
+								key={a.id}
+								type="button"
+								className={`chip chip-btn${a.id === (agentId ?? "assistant") ? " chip-active" : ""}`}
+								title={a.description ?? a.name}
+								disabled={busy}
+								onClick={() => onSwitchAgent?.(a.id)}
+							>
+								{a.name}
+							</button>
+						))}
+					</div>
+				)}
+				<button
+					type="button"
+					className="act"
+					onClick={onOpenManager}
+					title="管理自定义 agent"
+					aria-label="管理自定义 agent"
+				>
+					管理
+				</button>
 				<label className="asst-model">
 					<select
 						value={follow ? "" : model ? `${model.provider} ${model.id}` : ""}
@@ -403,4 +443,4 @@ export function AssistantPanel({
 			</div>
 		</div>
 	);
-}
+}

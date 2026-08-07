@@ -135,7 +135,9 @@ export function apiGetCacheClearForPanel(panelId: string): void {
 		settings: ["/api/config"],
 		// 媒体列表挂在 GET /api/uploads 的 media 字段，无独立 /api/media
 		uploads: ["/api/uploads"],
+		draw: ["/api/draw/providers", "/api/wardrobe", "/api/uploads"],
 		worldline: ["/api/worldline"],
+		agentmgr: ["/api/config", "/api/models", "/api/agent-tools"],
 	};
 	const prefixes = map[panelId];
 	if (!prefixes) {
@@ -168,6 +170,8 @@ export function prefetchPanelApis(): void {
 		"/api/agent-config",
 		"/api/agent-profiles",
 		"/api/uploads",
+		"/api/draw/providers",
+		"/api/wardrobe",
 	];
 	for (const p of paths) void apiGet(p).catch(() => {});
 }
@@ -298,7 +302,7 @@ export interface RpConfigView {
 	disabledLore?: string[];
 	backendControl?: boolean;
 	creationMode?: "ask" | "silent";
-	/** 固定楼层压缩：每 N 个叙事轮主动压缩早期正文；0=仅被动压缩 */
+	/** 固定楼层压缩：每 N 个叙事轮主动压缩一次早期正文（0=关闭主动压缩） */
 	compactEveryNTurns?: number;
 }
 
@@ -556,3 +560,27 @@ export function downloadText(filename: string, text: string): void {
 	a.click();
 	URL.revokeObjectURL(url);
 }
+
+// ---------- JS Runner 扩展数据（extdata）：GET/PUT /api/extdata?scope=&key= ----------
+
+/**
+ * 读脚本扩展数据（server/rest.ts GET /api/extdata，body `{value: unknown}`）。
+ * 作用域：global/preset/character/chat（EXTDATA_SCOPES）。
+ */
+export async function getExtData(scope: string, key: string): Promise<unknown> {
+	const data = await apiGet<{ value?: unknown }>(
+		`/api/extdata?scope=${encodeURIComponent(scope)}&key=${encodeURIComponent(key)}`,
+	);
+	return data.value;
+}
+
+/**
+ * 写脚本扩展数据（server/rest.ts PUT /api/extdata，body `{value}`）。
+ * 读-改-写整作用域 JSON（.liyuan-state/extdata/<scope>.json），value 须可 JSON 序列化。
+ */
+export async function putExtData(scope: string, key: string, value: unknown): Promise<void> {
+	await apiPut(
+		`/api/extdata?scope=${encodeURIComponent(scope)}&key=${encodeURIComponent(key)}`,
+		{ value },
+	);
+}

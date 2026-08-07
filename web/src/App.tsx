@@ -26,15 +26,21 @@ import {
 	toAttachmentView,
 	type AttachmentView,
 } from "./attachments.ts";
+import { AgentManagerPanel } from "./components/AgentManagerPanel.tsx";
 import { ArtifactPanel } from "./components/ArtifactPanel.tsx";
 import { AssistantPanel } from "./components/AssistantPanel.tsx";
 import { BrandLogo } from "./components/BrandLogo.tsx";
 import { CardPanel } from "./components/CardPanel.tsx";
 import { CodexPanel } from "./components/CodexPanel.tsx";
 import { ConnectPanel } from "./components/ConnectPanel.tsx";
+import { DrawPanel } from "./components/DrawPanel.tsx";
 import { WelcomePanel } from "./components/HomePage.tsx";
 import { UpdateModal, UpdateToast } from "./components/UpdateFlow.tsx";
 import { PanelRefreshContext } from "./components/kit.tsx";
+import { jsrunnerBus } from "./jsrunner/bus.ts";
+// JS Runner 宿主侧（M3b）：模块加载即注册 bus sink 与 RuntimeHost。
+import "./jsrunner/context.ts";
+import "./jsrunner/helper.ts";
 import { registerTavernChatBridge } from "./tavernShim.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
 import {
@@ -48,11 +54,13 @@ import {
 	IconClose,
 	IconCodex,
 	IconDock,
+	IconImage,
 	IconLorebook,
 	IconPersona,
 	IconPreset,
 	IconPuzzle,
 	IconRefresh,
+	IconRegex,
 	IconRoster,
 	IconSend,
 	IconSessions,
@@ -66,25 +74,19 @@ import {
 	BackstageGroup,
 	Bubble,
 	ChoiceCard,
-	LiveSteps,
 	MsgAvatar,
-	RichContent,
-	ThinkingBlock,
 	TurnTimeline,
 	toolLabel,
 	type ChatMsg,
 	type SkinProp,
 } from "./components/Messages.tsx";
 import {
-	activitiesOf,
 	appendActivity,
 	appendDelta,
 	concatSegments,
 	dropTrailingText,
 	pruneEmpty,
 	segmentsFromLegacy,
-	textOf,
-	thinkingOf,
 	trailingText,
 	type TurnSegment,
 } from "./timeline.ts";
@@ -92,6 +94,7 @@ import type { DisplayRule } from "../../src/cardfront.ts";
 import { PanelDock } from "./components/PanelDock.tsx";
 import { PersonaPanel } from "./components/PersonaPanel.tsx";
 import { PowersPanel } from "./components/PowersPanel.tsx";
+import { RegexPanel } from "./components/RegexPanel.tsx";
 import { PresetPanel } from "./components/PresetPanel.tsx";
 import { RosterPanel } from "./components/RosterPanel.tsx";
 import { SessionsPanel } from "./components/SessionsPanel.tsx";
@@ -144,6 +147,7 @@ type PanelId =
 	| "worldline"
 	| "connect"
 	| "preset"
+	| "regex"
 	| "powers"
 	| "settings"
 	| "card"
@@ -152,6 +156,8 @@ type PanelId =
 	| "persona"
 	| "roster"
 	| "uploads"
+	| "draw"
+	| "agentmgr"
 	| "assistant";
 
 /** agent 自建面板的右栏选择 id（柱 2）：`agent:` + 面板名，页签随 panels 帧动态长出 */
@@ -165,13 +171,13 @@ const agentId = (name: string): AgentPanelId => `agent:${name}`;
  * - 右 4：角色卡 / 世界书 / 知识库 / 用户角色
  * 会话在底栏。
  */
-const LEFT_PANELS: PanelId[] = ["connect", "preset", "powers", "uploads"];
-const RIGHT_PANELS: PanelId[] = ["card", "lorebook", "codex", "persona"];
+const LEFT_PANELS: PanelId[] = ["connect", "preset", "regex", "powers", "uploads", "draw"];
+const RIGHT_PANELS: PanelId[] = ["card", "lorebook", "codex", "persona", "agentmgr"];
 /** 右栏可开面板全集：顶栏 4 入口 + 助手（入口在输入框发送钮右侧，不占顶栏） */
 const RIGHT_OPENABLE: PanelId[] = [...RIGHT_PANELS, "assistant"];
 
 /** 长文面板用宽档（横切基建 §1 面板宽度） */
-const WIDE_PANELS = new Set<PanelId>(["card", "lorebook", "codex"]);
+const WIDE_PANELS = new Set<PanelId>(["card", "lorebook", "codex", "regex"]);
 
 const PANEL_LABEL: Record<PanelId, string> = {
 	sessions: "会话",
@@ -180,12 +186,15 @@ const PANEL_LABEL: Record<PanelId, string> = {
 	preset: "预设",
 	powers: "扩展能力",
 	settings: "设置",
+	regex: "正则",
 	card: "角色卡",
 	lorebook: "世界书",
 	codex: "知识库",
 	persona: "用户角色",
 	roster: "登场名录",
 	uploads: "上传区",
+	draw: "生画",
+	agentmgr: "自定义 Agent",
 	assistant: "助手",
 };
 
@@ -197,12 +206,15 @@ const PANEL_ICON: Record<PanelId, (p: { size?: number }) => React.JSX.Element> =
 	preset: IconPreset,
 	powers: IconPuzzle,
 	settings: IconSettings,
+	regex: IconRegex,
 	card: IconCard,
 	lorebook: IconLorebook,
 	codex: IconCodex,
 	persona: IconPersona,
 	roster: IconRoster,
 	uploads: IconUploads,
+	draw: IconImage,
+	agentmgr: IconPuzzle,
 	assistant: IconAssistant,
 };
 
@@ -282,6 +294,10 @@ export default function App() {
 	const [asstSessions, setAsstSessions] = useState<import("./wire.ts").AssistantSessionInfo[] | null>(null);
 	/** 面板关着时收到助手回复：发送钮旁的小圆点提示 */
 	const [asstUnread, setAsstUnread] = useState(false);
+	/** 自定义 agent 列表（配置 agents 段解析而来；始终含内置助手，保证可切回） */
+	const [asstAgents, setAsstAgents] = useState<Array<{ id: string; name: string; description?: string }>>([]);
+	/** 当前选中的 agent id（缺省=内置助手 assistant） */
+	const [asstAgentId, setAsstAgentId] = useState("assistant");
 	// 面板系统
 	const initialPanels = useMemo(loadPanelPrefs, []);
 	const [leftPanel, setLeftPanel] = useState<PanelId | AgentPanelId | null>(initialPanels.left);
@@ -351,6 +367,7 @@ export default function App() {
 	// manualTick 手动刷新按侧递增（key 重挂载=显式重置，含表单草稿）
 	const [agentTick, setAgentTick] = useState(0);
 	const [manualTick, setManualTick] = useState({ left: 0, right: 0 });
+	const [regexTestTick, setRegexTestTick] = useState(0);
 	/**
 	 * 面板保活：ST 式「打开过就缓存」。关闭侧栏只隐藏 DOM，不卸载，
 	 * 再开时不重复「读取中…」；每侧最多保留 5 个最近打开的面板。
@@ -617,6 +634,8 @@ export default function App() {
 
 	const onFrame = useCallback(
 		(frame: ServerFrame) => {
+			// JS Runner 事件桥（M2）：每个 wire 帧先喂给 jsrunnerBus，再做现有分发
+			jsrunnerBus.onWireFrame(frame);
 			switch (frame.type) {
 				case "hello": {
 					setCharName(frame.charName);
@@ -987,6 +1006,21 @@ export default function App() {
 		return () => clearTimeout(t);
 	}, [conn]);
 	sendRef.current = ws.send;
+
+	// 自定义 agent 列表：读 /api/config 的 agents 段；保存 agent 后复用此函数刷新选择器。
+	const refreshAsstAgents = useCallback(() => {
+		apiGet<{ config?: { agents?: Array<{ id: string; name: string; description?: string }> } }>("/api/config")
+			.then((r) => {
+				const custom = Array.isArray(r.config?.agents)
+					? r.config.agents.filter((a) => a && typeof a.id === "string" && a.id && typeof a.name === "string")
+					: [];
+				setAsstAgents([{ id: "assistant", name: "助手" }, ...custom.filter((a) => a.id !== "assistant")]);
+			})
+			.catch(() => {});
+	}, []);
+	useEffect(() => {
+		refreshAsstAgents();
+	}, [refreshAsstAgents]);
 
 	// 楼层号：只数进入叙事流的消息（user/narrative/greeting；场外问答不占楼层）
 	const numbered = useMemo(() => {
@@ -1439,6 +1473,8 @@ export default function App() {
 				return <ConnectPanel toast={pushToast} />;
 			case "preset":
 				return <PresetPanel toast={pushToast} />;
+			case "regex":
+				return <RegexPanel toast={pushToast} onFrontChange={() => void refreshCardFront()} testTick={regexTestTick} />;
 			case "powers":
 				return <PowersPanel toast={pushToast} />;
 			case "settings":
@@ -1473,6 +1509,10 @@ export default function App() {
 						}}
 					/>
 				);
+			case "draw":
+				return <DrawPanel toast={pushToast} charName={charName} worldState={worldState} />;
+			case "agentmgr":
+				return <AgentManagerPanel onClose={() => openRight(null)} onAgentsChanged={refreshAsstAgents} toast={pushToast} />;
 			case "assistant":
 				return (
 					<AssistantPanel
@@ -1486,7 +1526,15 @@ export default function App() {
 						model={asstModel}
 						follow={asstFollow}
 						sessions={asstSessions}
-						onSend={(text) => ws.send({ type: "assistant_prompt", text })}
+						agentId={asstAgentId}
+						agents={asstAgents}
+						onOpenManager={() => openRight("agentmgr")}
+						onSwitchAgent={(id) => {
+							setAsstAgentId(id);
+							setAsstUnread(false);
+							ws.send({ type: "assistant_sync", agentId: id });
+						}}
+						onSend={(text) => ws.send({ type: "assistant_prompt", text, agentId: asstAgentId })}
 						onAbort={() => {
 							// 强制停止：本地立刻解锁助手输入并冻结流式（保持 asstAbortingRef 直到下次 start）
 							asstAbortingRef.current = true;
@@ -1519,7 +1567,7 @@ export default function App() {
 						onOpenSession={(path) => ws.send({ type: "assistant_open", path })}
 						onDeleteSession={(path) => ws.send({ type: "assistant_delete", path })}
 						onPickModel={(sel) =>
-							ws.send(sel ? { type: "assistant_model", provider: sel.provider, id: sel.id } : { type: "assistant_model" })
+							ws.send(sel ? { type: "assistant_model", provider: sel.provider, id: sel.id, agentId: asstAgentId } : { type: "assistant_model", agentId: asstAgentId })
 						}
 					/>
 				);
@@ -1568,6 +1616,16 @@ export default function App() {
 							{agent ? agent.name : PANEL_LABEL[headId as PanelId]}
 						</span>
 						<span className="panel-head-actions">
+							{headId === "regex" && (
+								<button
+									className="icon-btn"
+									title="测试"
+									aria-label="测试正则"
+									onClick={() => setRegexTestTick((t) => t + 1)}
+								>
+									<IconRegex size={15} />
+								</button>
+							)}
 							{refreshable && (
 								<button className="icon-btn" onClick={doRefresh} title="刷新" aria-label="刷新面板">
 									<IconRefresh size={15} />

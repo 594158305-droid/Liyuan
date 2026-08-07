@@ -10,6 +10,8 @@
  * 分诊判断交给用户（转换报告列明每块去向与长度，内容不外显）。
  */
 
+import type { RuleGroup } from "./cardfront.ts";
+
 export interface PresetBlock {
 	/** ST identifier（保留以便追溯） */
 	id: string;
@@ -31,6 +33,11 @@ export interface RpPreset {
 	 */
 	samplers: Record<string, number>;
 	blocks: PresetBlock[];
+	/**
+	 * 正则脚本分组（一档卡皮肤显示规则，见 cardfront.ts RuleGroup）。
+	 * 只存预设文件本体，不进 preset-override.json 草稿；旧预设无此字段不受影响。
+	 */
+	regexGroups?: RuleGroup[];
 }
 
 export interface ReportItem {

@@ -694,7 +694,7 @@ export function Bubble({
 	const stage = !isUser && !editing && isFullInterface(skinnedBody);
 	return (
 		<div
-			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""}`}
+			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${msg.edited ? "msg-edited" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""}`}
 		>
 			{!stage && (
 				<div className="msg-head">
@@ -704,6 +704,11 @@ export function Bubble({
 					{!isUser && msg.unfinished && (
 						<span className="chip chip-unfinished" title="生成被中断；发送「继续」可接着写">
 							未完成
+						</span>
+					)}
+					{!isUser && msg.edited && (
+						<span className="chip chip-edited" title="本条回复经显式改稿，非模型原始输出" style={{ color: "#2563eb", borderColor: "#93c5fd", background: "#eff6ff" }}>
+							已改写
 						</span>
 					)}
 					{editing && <span className="chip chip-edit">编辑中</span>}
@@ -880,3 +885,4 @@ export function Bubble({
 		</div>
 	);
 }
+

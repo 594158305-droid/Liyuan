@@ -1,0 +1,30 @@
+# Liyuan Agent v1.1.2 - Windows
+
+## Quick start
+1. Install Node.js >= 22 and ensure `node` / `npm` are on PATH
+2. Unzip this archive
+3. Open the `Liyuan` folder
+4. Double-click `start.bat`
+5. First run runs `npm install` (needs network once), then starts the server
+
+## New session
+`start.bat --new`
+
+
+## Requirements
+- Node.js **>= 22** (https://nodejs.org/)
+- Network on **first run** only (`npm install`); later starts are offline-ready
+- Any OpenAI-compatible API key (e.g. DeepSeek)
+
+## After start
+1. Browser opens `http://127.0.0.1:7620` (or open it yourself)
+2. Edit `liyuan.agent.json` -> set `apiKey` and model id
+3. Built-in demo card: `assets/cards/default_Qingwu.json` (Liyuan original; not from SillyTavern)
+
+## Notes
+- No personal API keys or private character cards are included.
+- Runtime data (sessions, uploads, panels) is created under this folder after first run.
+- License: PolyForm Noncommercial 1.0.0 - personal / non-commercial use.
+  See LICENSE. Commercial use needs separate permission.
+- Server deploy / Docker: see `deploy/README.md` and `docker-compose.yml`.
+  Do **not** expose port 7620 to the public internet without auth / reverse proxy.

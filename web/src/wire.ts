@@ -4,6 +4,7 @@ export type {
 	AssistantMsg,
 	AssistantSessionInfo,
 	ClientFrame,
+	ExtGenerateParams,
 	RpPanel,
 	ServerFrame,
 	UpdateWire,
