@@ -150,14 +150,19 @@ jobs:
 
       - name: Restart is idempotent (config not clobbered)
         run: |
-          python3 - <<'PY'
-          import json
-          p='data/config/liyuan.agent.json'
-          d=json.load(open(p)); d['__ci_probe']=1
-          json.dump(d, open(p,'w'))
-          PY
+          # 容器以 root 跑，播种出的文件属主是 root，非 root 的 runner 写不进去。
+          # 从容器内改也更贴近真实场景：用户在网页改 Key 时写入方就是容器。
+          docker compose exec -T liyuan node -e "
+            const fs=require('fs'), p='/app/liyuan.agent.json';
+            const d=JSON.parse(fs.readFileSync(p,'utf8'));
+            d.__ci_probe='survives-restart';
+            fs.writeFileSync(p, JSON.stringify(d,null,'\t'));
+          "
+          # 写穿软链后宿主机应立刻可见
+          grep -q __ci_probe data/config/liyuan.agent.json
           docker compose restart --wait --wait-timeout 300
           grep -q __ci_probe data/config/liyuan.agent.json
+          docker compose exec -T liyuan test -L /app/liyuan.agent.json
 
       - name: Dump logs on failure
         if: failure()
