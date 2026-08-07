@@ -56,7 +56,7 @@ export interface WireSwipe {
  */
 export type WireSegment =
 	| { kind: "thinking"; text: string }
-	| { kind: "text"; text: string; draft?: boolean }
+	| { kind: "text"; text: string; draft?: boolean; raw?: string }
 	| { kind: "tool"; activities: WireActivity[] };
 
 export interface WireMsg {
@@ -64,6 +64,12 @@ export interface WireMsg {
 	/** 发言者显示名（narrative/greeting 为角色名，user 为用户名） */
 	name?: string;
 	text: string;
+	/**
+	 * 未套皮原文（仅当套皮产生变化时携带；text!==raw）。
+	 * 编辑消息时 draft 初始值用 raw ?? text，编辑保存走原文——避免套皮后的 HTML 固化进存储。
+	 * 显示层照旧用 text（套皮后）。user 消息不套皮，无此字段。
+	 */
+	raw?: string;
 	/** 模型思维链（原始输出，UI 折叠呈现；无则缺省） */
 	thinking?: string;
 	/**
@@ -239,12 +245,14 @@ export type ServerFrame =
 				enabled: boolean;
 				hasSkin: boolean;
 				rules: DisplayRule[];
-				/** 卡内嵌规则全量（筛选后，含被用户关闭的），前端管理用 */
+				/** 卡内嵌规则全量（筛选后，含被用户关闭的；已应用覆盖层），前端管理用 */
 				cardRules?: DisplayRule[];
 				/** 用户自建全局规则全量（含 off 标记） */
 				userRules?: DisplayRule[];
 				/** 当前卡被关闭的卡内嵌规则键列表 */
 				ruleOff?: string[];
+				/** 当前卡被覆盖的卡内嵌规则键列表（覆盖层：键=ruleKey，不改卡文件） */
+				overrides?: string[];
 				charName: string;
 				userName: string;
 			};
@@ -346,6 +354,8 @@ export type ClientFrame =
 	/** 脚本运行时程序化生成（JS Runner 扩展）：发起 / 中止 */
 	| { type: "ext_generate"; reqId: string; params: ExtGenerateParams }
 	| { type: "ext_abort"; reqId: string }
+	/** P8: 请求服务端全量重放 hello——规则/卡面保存后，历史消息用新皮肤重套（前端带防抖） */
+	| { type: "resync" }
 	| { type: "new" };
 
 /** 脚本运行时程序化生成参数（等价 ST 的 js_generate；精细采样参数按产品决策只支持子集） */
@@ -491,6 +501,18 @@ function hasToolCall(content: unknown): boolean {
  */
 export type ToWireOpts = { backstage?: boolean; skin?: DisplaySkin | null };
 
+/**
+ * 套皮并保存未套皮原文：raw 仅在套皮发生且产生变化时携带（text!==raw）。
+ * - skin 非 null（narrative/greeting/import 等套皮通道）→ 套皮，结果变化才带 raw=原文
+ * - skin=null（backstage / 皮肤关闭）→ 不套皮，无 raw
+ * 前端编辑消息时 draft 初始值取 raw ?? text，保存走原文——防止套皮 HTML 固化进 rp-edited-reply。
+ */
+function applySkinWithRaw(text: string, skin: DisplaySkin | null): { text: string; raw?: string } {
+	if (!skin) return { text: prepareDisplayText(text, null) };
+	const display = prepareDisplayText(text, skin);
+	return display !== text ? { text: display, raw: text } : { text: display };
+}
+
 export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): WireMsg | null {
 	if (!m || typeof m !== "object") return null;
 	const msg = m as MsgLike;
@@ -516,12 +538,13 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 
 		const scaffoldThinking = text ? extractScaffoldThinking(text) : "";
 		const thinking = [modelThinking, scaffoldThinking].filter(Boolean).join("\n\n").trim();
-		// narrative：先卡显示正则再策略；backstage 仍纯文本策略（不套角色卡皮肤）
-		const display = text
+		// narrative：先卡显示正则再策略（带未套皮原文 raw，编辑消息/保存用）；backstage 纯文本策略不套皮
+		const skinned = text
 			? channel === "narrative"
-				? prepareDisplayText(text, skin)
-				: prepareDisplayText(text, null)
-			: "";
+				? applySkinWithRaw(text, skin)
+				: applySkinWithRaw(text, null)
+			: null;
+		const display = skinned?.text ?? "";
 
 		if (!display && !thinking) {
 			// 空中断/空截断：仍留一条锚点，避免 agent_end→resync 后像「什么都没发生」
@@ -551,7 +574,7 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 			Array.isArray(rpTimeline) && rpTimeline.length > 0
 				? (rpTimeline as WireSegment[]).map((seg) =>
 						seg.kind === "text"
-							? { ...seg, text: prepareDisplayText(seg.text, tlSkin) }
+							? { ...seg, ...applySkinWithRaw(seg.text, tlSkin) }
 							: seg,
 					)
 				: undefined;
@@ -559,6 +582,7 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 			channel,
 			name: names.charName,
 			text: body,
+			...(skinned?.raw ? { raw: skinned.raw } : {}),
 			...(thinking ? { thinking } : {}),
 			...(timeline ? { timeline } : {}),
 			...(unfinished ? { unfinished: true } : {}),
@@ -575,11 +599,13 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 			// index = 非空序位 0-based（角标用 index+1）；total = 非空条数
 			const index = typeof pick?.index === "number" && Number.isFinite(pick.index) ? Math.max(0, pick.index) : undefined;
 			const total = typeof pick?.total === "number" && Number.isFinite(pick.total) ? Math.max(0, pick.total) : undefined;
-			// 先皮肤（开局占位→HTML）再策略；已是 HTML 载荷则不再 unwrap
+			// 先皮肤（开局占位→HTML）再策略；已是 HTML 载荷则不再 unwrap；带未套皮原文 raw
+			const skinned = applySkinWithRaw(text, skin);
 			return {
 				channel: "greeting",
 				name: names.charName,
-				text: prepareDisplayText(text, skin),
+				text: skinned.text,
+				...(skinned.raw ? { raw: skinned.raw } : {}),
 				...(index !== undefined && total !== undefined && total > 0
 					? { greetingPick: { index, total } }
 					: {}),
@@ -587,12 +613,24 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 		}
 		/** 用户手改后的角色回复：显示同叙事通道，带「已改写」标记（仅此通道允许非模型原始输出） */
 		if (msg.customType === "rp-edited-reply") {
-			return text
-				? { channel: "narrative", name: names.charName, text: prepareDisplayText(text, skin), edited: true }
-				: null;
+			if (!text) return null;
+			const skinned = applySkinWithRaw(text, skin);
+			return {
+				channel: "narrative",
+				name: names.charName,
+				text: skinned.text,
+				...(skinned.raw ? { raw: skinned.raw } : {}),
+				edited: true,
+			};
 		}
 		if (msg.customType === "rp-import") {
-			return text ? { channel: "import", text: prepareDisplayText(text, skin) } : null;
+			if (!text) return null;
+			const skinned = applySkinWithRaw(text, skin);
+			return {
+				channel: "import",
+				text: skinned.text,
+				...(skinned.raw ? { raw: skinned.raw } : {}),
+			};
 		}
 		// 用户气泡「配音」写入的可展示音频（details.rpAudio；正文尽量不进 LLM 注意力，见 convert 侧仍可能带短标记）
 		if (msg.customType === "rp-audio") {
@@ -649,9 +687,13 @@ export function foldTurnNarratives(msgs: WireMsg[]): WireMsg[] {
 				const thinking = join(prev.thinking, m.thinking);
 				const unfinished = prev.unfinished === true || m.unfinished === true;
 				const edited = prev.edited === true || m.edited === true;
+				const joinedText = join(prev.text, m.text);
+				// 套皮原文合并：任一段带 raw 则合并后也带（编辑时取回各段原文）；raw 与 text 一致时不产出
+				const mergedRaw = join(prev.raw ?? prev.text, m.raw ?? m.text);
 				out[turnRoleIdx] = {
 					...prev,
-					text: join(prev.text, m.text),
+					text: joinedText,
+					...(mergedRaw !== joinedText ? { raw: mergedRaw } : {}),
 					...(thinking ? { thinking } : {}),
 					// 变体元数据以最后一段为准（annotateSwipes 挂在末条）
 					...(m.swipe ? { swipe: m.swipe } : prev.swipe ? { swipe: prev.swipe } : {}),

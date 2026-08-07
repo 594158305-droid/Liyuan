@@ -195,6 +195,13 @@ export interface RpConfig {
 	cardRuleGroups?: Record<string, RuleGroup[]>;
 	/** 卡路径 → 被关闭的卡内嵌显示规则键列表(同 cardSkinOff 模式;键为规则 id/name/source,见 cardfront.ts ruleKey) */
 	cardRuleOff?: Record<string, string[]>;
+	/**
+	 * 卡内嵌规则编辑覆盖层(需求:卡内嵌规则可编辑,不改卡文件):
+	 * 卡路径 → 规则键 → 覆盖规则;键 = ruleKey(id??name??source),与 cardRuleOff 同一键体系。
+	 * 覆盖后的规则替换原卡内嵌规则进入快照(cardRules 存生效后的 eff);还原 = 删除该键。
+	 * 覆盖里的 disabled=true 同样参与关闭判定,与 ruleOff 双保险无冲突。
+	 */
+	cardRuleOverrides?: Record<string, Record<string, DisplayRule>>;
 	/** 自定义 agent 声明（DESIGN-custom-agents §2）：每项一个独立会话/模型/提示词/工具面，经 assistant_run 按 id 委托；v1 只支持叙事外 agent */
 	agents?: AgentConfig[];
 }

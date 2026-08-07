@@ -7558,6 +7558,216 @@ label.drawer-btn {
 	padding-top: 4px;
 }
 
+/* ══════════ P4/P4b/P5a/P5b/P5c：正则编辑器新字段 / 摘要 chips / 调试器 ══════════ */
+
+/* 规则行摘要 chips（修剪×N / 作用范围 / 仅格式显示 / 深度） */
+.rule-row-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-top: 2px;
+}
+.rule-row-chips .chip {
+	letter-spacing: 0.5px;
+	padding: 0 5px;
+}
+
+/* 正则组空态：提示文案 + 新建规则入口（新建后落入未分组组） */
+.rule-empty {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	padding: 8px 10px;
+	border: 1px dashed var(--hairline-strong);
+	border-radius: var(--radius-s);
+}
+
+/* 卡内嵌规则「已修改」标记（有覆盖时提示可还原） */
+.chip-modified {
+	color: var(--accent-strong);
+	border-color: var(--accent-wash-strong);
+	background: var(--accent-wash);
+}
+
+/* 复选框网格（作用范围 / 短暂） */
+.check-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+	gap: 6px 10px;
+	margin: 4px 0;
+}
+.check-grid label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12.5px;
+	color: var(--text-soft);
+	cursor: pointer;
+	user-select: none;
+}
+.check-grid input {
+	accent-color: var(--accent);
+}
+
+/* 最小/最大深度数字输入行 */
+.depth-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.depth-row input.panel-search.num {
+	width: 80px;
+	margin-bottom: 0;
+}
+.depth-row .dash {
+	color: var(--text-faint);
+}
+
+/* 测试页签下的「测试 / 调试器」子页签 */
+.regex-subtabs {
+	margin-bottom: 10px;
+}
+.regex-subtabs .regex-tab {
+	flex: 0 1 auto;
+	padding: 5px 16px;
+}
+
+/* ── 调试器 ── */
+.dbg-view {
+	padding-top: 4px;
+}
+
+.dbg-group {
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	margin: 8px 0;
+	background: var(--surface);
+	padding: 6px 8px;
+}
+.dbg-group-name {
+	font-size: 12px;
+	color: var(--text-faint);
+	font-weight: 600;
+	letter-spacing: 0.5px;
+	padding: 4px 2px 6px;
+}
+.dbg-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 6px 8px;
+	margin: 4px 0;
+	background: var(--surface);
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	cursor: grab;
+	transition: border-color 0.12s, background 0.12s, opacity 0.12s;
+}
+.dbg-row-readonly {
+	cursor: default;
+	background: var(--surface-dim);
+}
+.dbg-row.dragging {
+	opacity: 0.5;
+	border-style: dashed;
+}
+.dbg-row.over {
+	border-color: var(--accent);
+	background: var(--accent-wash);
+}
+.dbg-grip {
+	color: var(--text-faint);
+	font-size: 13px;
+	line-height: 1.3;
+	flex: none;
+	margin-top: 2px;
+	user-select: none;
+}
+.dbg-row-main {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.dbg-row-top {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+.dbg-src {
+	font-size: 11px;
+	color: var(--text-faint);
+	margin-left: auto;
+}
+.chip-off {
+	opacity: 0.7;
+}
+
+.dbg-steps {
+	margin-top: 10px;
+}
+.dbg-step {
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	margin: 8px 0;
+	padding: 8px 10px;
+	background: var(--surface);
+}
+.dbg-step-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin-bottom: 6px;
+}
+.dbg-step-name {
+	font-size: 12.5px;
+	color: var(--text-strong);
+	font-weight: 600;
+}
+.dbg-stats {
+	font-size: 11.5px;
+	color: var(--text-soft);
+	margin-left: auto;
+	font-variant-numeric: tabular-nums;
+}
+.dbg-total {
+	margin-top: 8px;
+	font-size: 12.5px;
+	color: var(--accent-strong);
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+.diff-view {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 12px;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	word-break: break-all;
+	background: var(--surface-dim);
+	border-radius: var(--radius-s);
+	padding: 8px 10px;
+	max-height: 220px;
+	overflow: auto;
+}
+.diff-del {
+	color: var(--accent-strong);
+	background: var(--accent-wash);
+	text-decoration: line-through;
+	text-decoration-color: color-mix(in srgb, var(--accent) 60%, transparent);
+	border-radius: 2px;
+	padding: 0 1px;
+}
+.diff-add {
+	color: var(--ok);
+	background: color-mix(in srgb, var(--ok) 14%, transparent);
+	border-radius: 2px;
+	padding: 0 1px;
+}
+
 
 /* ══════════ 绘画面板（DrawPanel）：API 管理 / 服装管理 / 画廊 ══════════ */
 

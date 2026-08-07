@@ -73,6 +73,8 @@ export function createStoryBridge(base: StoryBridge, perms: BridgePermissions): 
 		// ---- 配置/设定热载与素材收编：refreshMaterials 一键管两个同源方法 ----
 		refreshStoryMaterials: perms.refreshMaterials ? base.refreshStoryMaterials.bind(base) : () => deny("refreshStoryMaterials"),
 		softRefreshConfig: perms.refreshMaterials ? base.softRefreshConfig.bind(base) : () => deny("softRefreshConfig"),
+		// ---- P8 显示重放：仅广播 hello 帧（无状态写入、无素材重装），不做权限裁剪 ----
+		resyncStory: base.resyncStory.bind(base),
 		// ---- 知识库挂载桥：独立权限 ----
 		mountCodex: perms.mountCodex ? base.mountCodex.bind(base) : () => deny("mountCodex"),
 	};

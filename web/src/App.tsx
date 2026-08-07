@@ -610,6 +610,33 @@ export default function App() {
 		}
 	}, []);
 
+	/**
+	 * P8：规则/卡面保存后，请求服务端全量重放 hello（历史消息用新皮肤重套）。
+	 * 300–500ms 防抖：连续操作只发一次 resync（多个面板/多次编辑合并成一帧）。
+	 * 注意：不把 resync 塞进 refreshCardFront 内部——hello 处理器也调它，
+	 * 否则会形成 resync → hello → refresh → resync 的循环。
+	 */
+	const resyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const wsSendResync = useCallback(() => {
+		if (resyncTimerRef.current) clearTimeout(resyncTimerRef.current);
+		resyncTimerRef.current = setTimeout(() => {
+			resyncTimerRef.current = null;
+			sendRef.current({ type: "resync" });
+		}, 400);
+	}, []);
+	useEffect(
+		() => () => {
+			if (resyncTimerRef.current) clearTimeout(resyncTimerRef.current);
+		},
+		[],
+	);
+
+	/** RegexPanel / CardPanel 共用的「保存后刷新聊天」接线：刷新皮肤 + 防抖 resync */
+	const handleFrontChange = useCallback(() => {
+		void refreshCardFront();
+		wsSendResync();
+	}, [refreshCardFront, wsSendResync]);
+
 	/** 拉角色卡立绘 + 当前身份头像（hello / 切卡后） */
 	const refreshAvatars = useCallback(() => {
 		void (async () => {
@@ -1274,9 +1301,10 @@ export default function App() {
 			const m = messages[idx];
 			if (!m || busy) return;
 			// 用户消息：编辑可见正文（去掉附件尾行，提交时若原有附件再拼回）
-			let draft = m.text;
+			// 套皮消息用 raw 原文（text 是套皮后 HTML），防止 HTML 固化进 rp-edited-reply
+			let draft = m.raw ?? m.text;
 			if (kind === "user") {
-				const { body } = splitAttachments(m.text);
+				const { body } = splitAttachments(m.raw ?? m.text);
 				draft = body;
 			}
 			setMsgEdit({ idx, kind, draft });
@@ -1300,7 +1328,8 @@ export default function App() {
 			ws.send({ type: "reroll", text: full });
 		} else {
 			// agent / 开场白：采用改写（不重新跑模型）；原文未改则等同「重新生成」
-			const orig = (messages[msgEdit.idx]?.text ?? "").trim();
+			// orig 用 raw 原文比较：draft 初始取自 raw，未改则相等 → 走重新生成
+			const orig = (messages[msgEdit.idx]?.raw ?? messages[msgEdit.idx]?.text ?? "").trim();
 			if (text === orig && msgEdit.kind === "narrative") {
 				ws.send({ type: "reroll" });
 			} else {
@@ -1479,7 +1508,7 @@ export default function App() {
 			case "preset":
 				return <PresetPanel toast={pushToast} />;
 			case "regex":
-				return <RegexPanel toast={pushToast} onFrontChange={() => void refreshCardFront()} testTick={regexTestTick} />;
+				return <RegexPanel toast={pushToast} onFrontChange={handleFrontChange} testTick={regexTestTick} />;
 			case "powers":
 				return <PowersPanel toast={pushToast} />;
 			case "settings":
@@ -1491,7 +1520,7 @@ export default function App() {
 						onEnterChat={dismissWelcome}
 						onGoHome={showWelcome}
 						active={rightPanel === "card"}
-						onFrontChange={() => void refreshCardFront()}
+						onFrontChange={handleFrontChange}
 					/>
 				);
 			case "lorebook":

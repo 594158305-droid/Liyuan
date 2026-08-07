@@ -72,17 +72,10 @@ test("displayRules: 非法正则跳过不抛", () => {
 	}
 });
 
-test("displayRules: trimStrings 非空的规则整条跳过(v1 不支持,宁缺毋错)", () => {
-	const warnings: string[] = [];
-	const oldWarn = console.warn;
-	try {
-		console.warn = (...args) => warnings.push(args.join(" "));
-		const rules = displayRules([{ ...skinScript, trimStrings: ["x"] }]);
-		assert.equal(rules.length, 0);
-		assert.ok(warnings.some((w) => w.includes("trimStrings")));
-	} finally {
-		console.warn = oldWarn;
-	}
+test("displayRules: trimStrings 规则放行并原样透传(引擎 cardSkin.ts 已原生支持)", () => {
+	const rules = displayRules([{ ...skinScript, trimStrings: ["x", "y"] }]);
+	assert.equal(rules.length, 1);
+	assert.deepEqual(rules[0].trimStrings, ["x", "y"]);
 });
 
 test("skin 开关:默认开,cardSkinOff 关,setSkinEnabled 幂等往返", () => {
@@ -95,17 +88,10 @@ test("skin 开关:默认开,cardSkinOff 关,setSkinEnabled 幂等往返", () => 
 	assert.deepEqual(on.cardSkinOff, []);
 });
 
-test("displayRules: substituteRegex 非零的规则整条跳过,warn", () => {
-	const warnings: string[] = [];
-	const oldWarn = console.warn;
-	try {
-		console.warn = (...args) => warnings.push(args.join(" "));
-		const rules = displayRules([{ ...skinScript, substituteRegex: 1 }]);
-		assert.equal(rules.length, 0);
-		assert.ok(warnings.some((w) => w.includes("substituteRegex")));
-	} finally {
-		console.warn = oldWarn;
-	}
+test("displayRules: substituteRegex 非零的规则不再跳过,透传字段", () => {
+	const rules = displayRules([{ ...skinScript, substituteRegex: 1 }]);
+	assert.equal(rules.length, 1);
+	assert.equal(rules[0].substituteRegex, 1);
 });
 
 test("displayRules: minDepth/maxDepth 字段忽略但 warn,规则仍应用", () => {

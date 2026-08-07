@@ -35,6 +35,7 @@ import { cardTools, type CardDeps } from "../src/tools/card.ts";
 import { worldlineTools, type WorldlineDeps, type WorldlineViewLite } from "../src/tools/worldline.ts";
 import { panelTools, type PanelDeps } from "../src/tools/panels.ts";
 import type { PanelWriteOutput } from "../src/tools/panels.ts";
+import { regexTools, type RegexDeps } from "../src/tools/regex.ts";
 import { assistantToolDefs } from "./tool-adapter.ts";
 import { loadCardFile } from "../src/card.ts";
 import {
@@ -64,6 +65,7 @@ import {
 	applyConfigPatch,
 	configPath,
 	loadConfig,
+	loadDiskPreset,
 	loadEffectivePreset,
 	loadMergedLore,
 	mergePresetPatches,
@@ -86,6 +88,8 @@ export interface StoryBridge {
 	applyStatePatch(patch: Record<string, unknown>): Promise<{ applied: string[]; warnings: string[] }>;
 	/** 配置/预设变更后热载剧情会话（流式中自动排队） */
 	softRefreshConfig(): Promise<void>;
+	/** P8：广播 hello 全量重放（显示规则写盘后让所有端用新规则重渲当前消息；纯广播无写入） */
+	resyncStory(): void;
 	/** 可用模型清单 + 当前剧情模型（/api/models 同源） */
 	listModels(): {
 		current: { provider: string; id: string; name: string } | null;
@@ -310,6 +314,7 @@ export const STAGEHAND_TOOL_NAMES: string[] = [
 	"codex_write",
 	"codex_mount",
 	"card_create",
+	"regex_manage",
 ];
 
 function createStagehandTools(
@@ -917,6 +922,37 @@ tools.push(
 			loadPanels: () => bridge.storyPanels().load(),
 			writePanel: (input) => bridge.storyPanels().write(input) as PanelWriteOutput,
 			closePanel: (name) => bridge.storyPanels().close(name),
+		},
+		loadConfig(cwd).language,
+	),
+);
+
+// 显示正则族（P7）：regex_manage 单工具 + action 分派，覆盖 global/card/preset 三作用域
+// 分组与规则 CRUD、卡内嵌规则启停、单规则试运行（test 纯函数不写盘）。
+// 写盘类操作成功后 saveConfig/savePresetGroups + broadcastResync（P8：广播 hello 重渲）。
+tools.push(
+	...assistantToolDefs<RegexDeps>(
+		regexTools,
+		{
+			loadConfig: () => loadConfig(cwd),
+			saveConfig: (next) => {
+				writeJsonWithBackup(configPath(cwd), next);
+				try {
+					void bridge.softRefreshConfig();
+				} catch {
+					/* 无 refreshMaterials 权限时忽略热载（配置已写盘，下次 hello/换轮仍生效） */
+				}
+			},
+			// 预设作用域：读写预设文件本体里的 regexGroups（不碰 preset-override.json 草稿）
+			loadPresetGroups: () => loadEffectivePreset(cwd).preset?.regexGroups ?? null,
+			savePresetGroups: (groups) => {
+				const disk = loadDiskPreset(cwd);
+				if (!disk) throw new Error("未选择预设或预设文件不存在");
+				writeJsonWithBackup(resolve(cwd, disk.path), { ...disk.preset, regexGroups: groups });
+			},
+			// P8：写盘后广播 hello 帧，前端用新规则重渲当前消息
+			broadcastResync: () => bridge.resyncStory(),
+			cwd,
 		},
 		loadConfig(cwd).language,
 	),

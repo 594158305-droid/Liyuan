@@ -12,14 +12,51 @@ const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** 超过此长度视为「整页/程序卡」替换串：`$` 一律按字面，只认 {{match}} */
 const LITERAL_REPLACE_THRESHOLD = 8_000;
 
-function substMacros(text: string, macros: { charName: string; userName: string }, forRegex: boolean): string {
-	const char = forRegex ? escapeReg(macros.charName) : macros.charName;
-	const user = forRegex ? escapeReg(macros.userName) : macros.userName;
-	return text.replace(/\{\{\s*char\s*\}\}/gi, char).replace(/\{\{\s*user\s*\}\}/gi, user);
+/**
+ * 宏替换：{{char}}/{{user}} → 名字。
+ * forRegex=true 时处理 find 正则源侧的宏，由 substitute 档位控制：
+ *   - 缺省(undefined) → 转义替换（历史行为，兼容不回读该字段的旧卡规则）
+ *   - 0 → 保留字面 {{char}}/{{user}}（不展开，正则按字面去匹配）
+ *   - 1 → 直接替换（不转义）
+ *   - 2 → 转义后替换（正则安全）
+ * forRegex=false 时（replace 侧）永远是直接替换，不做正则转义。
+ */
+function substMacros(
+	text: string,
+	macros: { charName: string; userName: string },
+	forRegex: boolean,
+	substitute?: number,
+): string {
+	if (forRegex) {
+		const mode = substitute === undefined ? 2 : substitute;
+		if (mode === 0) return text;
+		const char = mode === 2 ? escapeReg(macros.charName) : macros.charName;
+		const user = mode === 2 ? escapeReg(macros.userName) : macros.userName;
+		return text.replace(/\{\{\s*char\s*\}\}/gi, char).replace(/\{\{\s*user\s*\}\}/gi, user);
+	}
+	return text.replace(/\{\{\s*char\s*\}\}/gi, macros.charName).replace(/\{\{\s*user\s*\}\}/gi, macros.userName);
 }
 
 /**
- * 展开捕获组 / {{match}}（短模板与长程序卡共用）。
+ * 按 trimStrings 从捕获值中逐个剔除子串（ST trimStrings 语义）。
+ * trimStrings 里可含 {{char}}/{{user}} 宏——宏替换在剔除前做（replace 侧直接替换）。
+ */
+function filterCapture(
+	v: string,
+	trimStrings: string[] | undefined,
+	macros: { charName: string; userName: string },
+): string {
+	if (!trimStrings || trimStrings.length === 0) return v;
+	let out = v;
+	for (const raw of trimStrings) {
+		const t = substMacros(raw, macros, false);
+		if (t) out = out.replaceAll(t, "");
+	}
+	return out;
+}
+
+/**
+ * 展开捕获组 / {{match}} / $<name>（短模板与长程序卡共用）。
  *
  * **不可**把模板直接交给 `String.replace(re, template)`：
  * JS 会把 `$'`（后文）、`$``（前文）当特殊序列。
@@ -27,23 +64,34 @@ function substMacros(text: string, macros: { charName: string; userName: string 
  *
  * 规则：
  * - 始终展开：`$$` → `$`；`$1`…`$n`（n ≤ 实际捕获组数）→ 对应捕获
+ * - 命名组 `$<name>` → groups 对应值（groups 缺失或名字不存在保持字面）
  * - 长模板（≥8KB 程序卡 HTML）**不**展开 `$&`：卡内常有字面 `\$&` 片段，展开会毁掉 JS
  * - 短模板展开 `$&` → 整段命中
  * - **永不**展开 `$'` / `$``（本函数不匹配它们）
+ * - 令牌单趟展开（不递归）：某令牌展开出的值里再含 `$1`/`$<name>` 不会被二次处理，
+ *   与 JS String.replace 的替换串语义一致
  *
  * Living With Slaves 状态栏模板 >8KB 且依赖 `rawData = \`$2\``——若长串一律不展开 $n，
  * 会变成字面 `$2` → 状态栏空、源码泄漏。故长串也必须展开有效 $n。
  */
-export function expandSkinReplacement(template: string, match: string, captures: Array<string | undefined>): string {
+export function expandSkinReplacement(
+	template: string,
+	match: string,
+	captures: Array<string | undefined>,
+	groups?: Record<string, string | undefined> | null,
+): string {
 	const withMatch = template.replace(/\{\{\s*match\s*\}\}/gi, () => match);
 	const isLong = template.length >= LITERAL_REPLACE_THRESHOLD;
-	return withMatch.replace(/\$(\$|&|\d{1,2})/g, (whole, kind: string) => {
-		if (kind === "$") return "$";
-		if (kind === "&") {
+	return withMatch.replace(/\$\$|\$&|\$\d{1,2}|\$<([A-Za-z_][A-Za-z0-9_]*)>/g, (whole, name?: string) => {
+		if (whole === "$$") return "$";
+		if (whole === "$&") {
 			// 长程序卡：保留字面 $&；短模板：整段命中
 			return isLong ? whole : match;
 		}
-		const n = Number(kind);
+		if (whole.startsWith("$<")) {
+			return groups && name !== undefined && name in groups ? (groups[name] ?? "") : whole;
+		}
+		const n = Number(whole.slice(1));
 		// 仅当本规则真有该捕获组时才展开；否则保留字面 $1（程序卡内可能出现）
 		if (n >= 1 && n <= captures.length) {
 			return captures[n - 1] ?? "";
@@ -60,7 +108,7 @@ export function applyCardSkin(
 	let out = text;
 	for (const r of rules) {
 		try {
-			const re = new RegExp(substMacros(r.source, macros, true), r.flags);
+			const re = new RegExp(substMacros(r.source, macros, true, r.substituteRegex), r.flags);
 			const template = substMacros(r.replace, macros, false);
 			out = out.replace(re, (match, ...args) => {
 				// args: g1, g2, …, offset, input[, groupsObj]
@@ -68,7 +116,14 @@ export function applyCardSkin(
 				const hasNamed = typeof last === "object" && last !== null;
 				const captEnd = hasNamed ? args.length - 3 : args.length - 2;
 				const captures = args.slice(0, Math.max(0, captEnd)) as Array<string | undefined>;
-				return expandSkinReplacement(template, match, captures);
+				// trimStrings：替换前从捕获值中逐个剔除（宏先展开），再用于替换
+				const trimmed = captures.map((c) => (c === undefined ? c : filterCapture(c, r.trimStrings, macros)));
+				return expandSkinReplacement(
+					template,
+					match,
+					trimmed,
+					hasNamed ? (last as Record<string, string | undefined>) : undefined,
+				);
 			});
 		} catch {
 			// 单条坏规则不拖累整条管线

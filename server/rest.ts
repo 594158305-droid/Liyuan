@@ -53,16 +53,21 @@ import {
 	addRule,
 	buildCardFrontSnapshot,
 	cardGroupsOf,
+	cardOverridesOf,
 	copyGroup,
 	displayRules,
+	ensureUngrouped,
 	extractRegexScripts,
 	moveGroup,
 	moveRule,
 	parseFindRegex,
+	removeCardRuleOverride,
 	removeGroup,
 	removeRule,
+	ruleKey,
 	setCardGroups,
 	setCardRuleOff,
+	setCardRuleOverride,
 	setSkinEnabled,
 	setUserGroups,
 	updateGroup,
@@ -411,8 +416,9 @@ function assertGroupScope(v: string | null): "global" | "card" | "preset" {
 /**
  * 读指定作用域的组列表（纯读，不写盘）。
  * - global: config.userRuleGroups（含旧 userRules 迁移）
- * - card:   config.cardRuleGroups[card]，附带 card 的卡内嵌规则全量 + 关闭键
+ * - card:   config.cardRuleGroups[card]，附带 card 的卡内嵌规则全量（已应用覆盖层）+ 关闭键 + 覆盖键
  * - preset: 预设文件本体里的 regexGroups（不碰 preset-override.json 草稿）；无活跃预设时 groups 空、preset=null
+ * 三个 scope 返回前均 ensureUngrouped（只读补，不落盘）：全新配置前端才能 openNewRule(0)。
  */
 function readGroupScope(
 	cwd: string,
@@ -420,39 +426,55 @@ function readGroupScope(
 	card: string | null,
 ): {
 	groups: RuleGroup[];
-	card?: { path: string; cardRules: DisplayRule[]; ruleOff: string[] };
+	card?: { path: string; cardRules: DisplayRule[]; ruleOff: string[]; overrides: string[] };
 	preset?: { file: string; name: string } | null;
 } {
-	if (scope === "global") return { groups: userGroupsOf(loadConfig(cwd)) };
+	if (scope === "global") return { groups: ensureUngrouped(userGroupsOf(loadConfig(cwd))) };
 	if (scope === "card") {
 		if (!card) throw new Error("scope=card 时缺少 card 参数");
 		const config = loadConfig(cwd);
-		let cardRules: DisplayRule[] = [];
-		try {
-			const abs = resolvePath(cwd, card);
-			cardRules = displayRules(extractRegexScripts(readCardRawJson(abs).raw as Record<string, unknown>));
-		} catch {
-			/* 卡不可读则规则空 */
-		}
 		return {
-			groups: cardGroupsOf(config, card),
-			card: { path: card, cardRules, ruleOff: (config.cardRuleOff ?? {})[card] ?? [] },
+			groups: ensureUngrouped(cardGroupsOf(config, card)),
+			card: cardFrontCardState(cwd, card),
 		};
 	}
 	// preset：直接读预设文件本体
 	const config = loadConfig(cwd);
-	if (!config.preset) return { groups: [], preset: null };
+	if (!config.preset) return { groups: ensureUngrouped([]), preset: null };
 	try {
 		const p = resolvePath(cwd, config.preset);
-		if (!existsSync(p)) return { groups: [], preset: null };
+		if (!existsSync(p)) return { groups: ensureUngrouped([]), preset: null };
 		const raw = JSON.parse(readFileSync(p, "utf8")) as { name?: string; regexGroups?: unknown };
 		return {
-			groups: Array.isArray(raw.regexGroups) ? (raw.regexGroups as RuleGroup[]) : [],
+			groups: ensureUngrouped(Array.isArray(raw.regexGroups) ? (raw.regexGroups as RuleGroup[]) : []),
 			preset: { file: config.preset, name: typeof raw.name === "string" ? raw.name : "preset" },
 		};
 	} catch {
-		return { groups: [], preset: null };
+		return { groups: ensureUngrouped([]), preset: null };
 	}
+}
+
+/**
+ * 某卡的 card 段最新状态（卡内嵌规则已应用覆盖层 + 关闭键 + 覆盖键）。
+ * 供 GET groups?scope=card 的 card 段与 PUT/DELETE /api/cardfront/cardrule 返回值共用，前端直接替换。
+ */
+function cardFrontCardState(cwd: string, card: string): { path: string; cardRules: DisplayRule[]; ruleOff: string[]; overrides: string[] } {
+	const config = loadConfig(cwd);
+	let rawRules: DisplayRule[] = [];
+	try {
+		const abs = resolvePath(cwd, card);
+		rawRules = displayRules(extractRegexScripts(readCardRawJson(abs).raw as Record<string, unknown>));
+	} catch {
+		/* 卡不可读则规则空 */
+	}
+	const overrides = cardOverridesOf(config, card);
+	const cardRules = rawRules.map((r) => overrides[ruleKey(r)] ?? r);
+	return {
+		path: card,
+		cardRules,
+		ruleOff: (config.cardRuleOff ?? {})[card] ?? [],
+		overrides: Object.keys(overrides),
+	};
 }
 
 /** 写指定作用域的组列表（全量替换） */
@@ -473,6 +495,89 @@ function writeGroupScope(cwd: string, scope: "global" | "card" | "preset", card:
 	if (!existsSync(p)) throw new Error(`预设文件不存在：${config.preset}`);
 	const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
 	writeJsonWithBackup(p, { ...raw, regexGroups: groups });
+}
+
+/** POST/PUT 规则 body 白名单字段校验；非法类型/越界抛中文错（由 handleApiRequest 统一回 400） */
+function validateRuleBodyFields(body: Record<string, unknown>): {
+	name?: string;
+	disabled?: boolean;
+	trimStrings?: string[];
+	placement?: number[];
+	runOnEdit?: boolean;
+	substituteRegex?: 0 | 1 | 2;
+	minDepth?: number | null;
+	maxDepth?: number | null;
+	markdownOnly?: boolean;
+	promptOnly?: boolean;
+} {
+	const out: {
+		name?: string;
+		disabled?: boolean;
+		trimStrings?: string[];
+		placement?: number[];
+		runOnEdit?: boolean;
+		substituteRegex?: 0 | 1 | 2;
+		minDepth?: number | null;
+		maxDepth?: number | null;
+		markdownOnly?: boolean;
+		promptOnly?: boolean;
+	} = {};
+	if (body.name !== undefined) {
+		if (typeof body.name !== "string") throw new Error("name 必须是字符串");
+		out.name = body.name.trim();
+	}
+	// disabled：统一开关字段；兼容旧 off（收到 off 也转存为 disabled）
+	if (body.disabled !== undefined || body.off !== undefined) {
+		if (body.disabled !== undefined && typeof body.disabled !== "boolean") throw new Error("disabled 必须是布尔值");
+		if (body.off !== undefined && typeof body.off !== "boolean") throw new Error("off 必须是布尔值");
+		out.disabled = body.disabled !== undefined ? body.disabled : body.off;
+	}
+	if (body.trimStrings !== undefined) {
+		if (!Array.isArray(body.trimStrings) || body.trimStrings.some((x) => typeof x !== "string")) {
+			throw new Error("trimStrings 必须是字符串数组（编辑器回车分隔）");
+		}
+		out.trimStrings = body.trimStrings.filter((x) => x.length > 0);
+	}
+	if (body.placement !== undefined) {
+		if (!Array.isArray(body.placement)) throw new Error("placement 必须是数字数组（1/2/3/5/6）");
+		if (body.placement.length === 0) throw new Error("placement 不能为空数组");
+		const ok = [1, 2, 3, 5, 6];
+		if (body.placement.some((x) => typeof x !== "number" || !ok.includes(x))) {
+			throw new Error("placement 只允许 1/2/3/5/6（1=用户输入/2=AI输出/3=快捷命令/5=世界信息/6=推理）");
+		}
+		out.placement = body.placement as number[];
+	}
+	if (body.runOnEdit !== undefined) {
+		if (typeof body.runOnEdit !== "boolean") throw new Error("runOnEdit 必须是布尔值");
+		out.runOnEdit = body.runOnEdit;
+	}
+	if (body.substituteRegex !== undefined) {
+		if (body.substituteRegex !== 0 && body.substituteRegex !== 1 && body.substituteRegex !== 2) {
+			throw new Error("substituteRegex 必须为 0/1/2（0=不替换 1=raw 2=escaped）");
+		}
+		out.substituteRegex = body.substituteRegex as 0 | 1 | 2;
+	}
+	for (const k of ["minDepth", "maxDepth"] as const) {
+		if (body[k] !== undefined) {
+			const v = body[k];
+			if (v === null) {
+				out[k] = null;
+				continue;
+			}
+			if (typeof v !== "number" || !Number.isFinite(v)) throw new Error(`${k} 必须是数字或 null`);
+			if (v < 0) throw new Error(`${k} 不能为负数`);
+			out[k] = v;
+		}
+	}
+	if (body.markdownOnly !== undefined) {
+		if (typeof body.markdownOnly !== "boolean") throw new Error("markdownOnly 必须是布尔值");
+		out.markdownOnly = body.markdownOnly;
+	}
+	if (body.promptOnly !== undefined) {
+		if (typeof body.promptOnly !== "boolean") throw new Error("promptOnly 必须是布尔值");
+		out.promptOnly = body.promptOnly;
+	}
+	return out;
 }
 
 // ---------- 自定义 agent 段（DESIGN-custom-agents §2：声明式配置 + 校验） ----------
@@ -2130,26 +2235,23 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			case "POST /api/cardfront/rules": {
 				const scope = assertGroupScope(query.get("scope"));
 				const card = query.get("card");
-				const body = JSON.parse(await readBody(req)) as {
-					group?: number;
-					name?: string;
-					findRegex?: string;
-					replace?: string;
-					off?: boolean;
-				};
+				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
 				if (typeof body.group !== "number") throw new Error("缺少 group");
 				if (typeof body.findRegex !== "string" || !body.findRegex.trim()) throw new Error("缺少 findRegex");
 				if (typeof body.replace !== "string") throw new Error("缺少 replace");
 				const parsed = parseFindRegex(body.findRegex);
 				if (!parsed) throw new Error("findRegex 不是合法的正则表达式");
+				const extra = validateRuleBodyFields(body);
 				const r = readGroupScope(host.cwd, scope, card);
-				if (body.group < 0 || body.group >= r.groups.length) throw new Error("group 越界");
-				const groups = addRule(r.groups, body.group, {
-					name: (body.name ?? "").trim(),
+				// 空组兜底:全新配置 groups=[] 时补未分组组,保证 group=0 可承接规则
+				const groups0 = ensureUngrouped(r.groups);
+				if (body.group < 0 || body.group >= groups0.length) throw new Error("group 越界");
+				const groups = addRule(groups0, body.group, {
+					...extra,
+					name: extra.name ?? "",
 					source: parsed.source,
 					flags: parsed.flags,
 					replace: body.replace,
-					off: body.off === true,
 				});
 				writeGroupScope(host.cwd, scope, card, groups);
 				sendJson(res, 200, { ok: true, groups });
@@ -2161,10 +2263,16 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const body = JSON.parse(await readBody(req)) as {
 					group?: number;
 					index?: number;
-					rule?: { name?: string; findRegex?: string; replace?: string; off?: boolean };
+					rule?: Record<string, unknown>;
 					toGroup?: number;
 				};
-				if (typeof body.group !== "number" || typeof body.index !== "number" || !body.rule) {
+				if (
+					typeof body.group !== "number" ||
+					typeof body.index !== "number" ||
+					!body.rule ||
+					typeof body.rule !== "object" ||
+					Array.isArray(body.rule)
+				) {
 					throw new Error("缺少 group / index / rule");
 				}
 				const rule = body.rule;
@@ -2172,22 +2280,25 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (typeof rule.replace !== "string") throw new Error("缺少 replace");
 				const parsed = parseFindRegex(rule.findRegex);
 				if (!parsed) throw new Error("findRegex 不是合法的正则表达式");
+				const extra = validateRuleBodyFields(rule);
 				const r = readGroupScope(host.cwd, scope, card);
-				if (body.group < 0 || body.group >= r.groups.length) throw new Error("group 越界");
-				if (body.index < 0 || body.index >= r.groups[body.group].rules.length) throw new Error("index 越界");
-				if (body.toGroup !== undefined && (body.toGroup < 0 || body.toGroup >= r.groups.length)) {
+				// 空组兜底:全新配置 groups=[] 时补未分组组,保证 group=0 可更新
+				const groups0 = ensureUngrouped(r.groups);
+				if (body.group < 0 || body.group >= groups0.length) throw new Error("group 越界");
+				if (body.index < 0 || body.index >= groups0[body.group].rules.length) throw new Error("index 越界");
+				if (body.toGroup !== undefined && (body.toGroup < 0 || body.toGroup >= groups0.length)) {
 					throw new Error("toGroup 越界");
 				}
 				const groups = updateRule(
-					r.groups,
+					groups0,
 					body.group,
 					body.index,
 					{
-						name: (rule.name ?? "").trim(),
+						...extra,
+						name: extra.name ?? "",
 						source: parsed.source,
 						flags: parsed.flags,
 						replace: rule.replace,
-						off: rule.off === true,
 					},
 					body.toGroup,
 				);
@@ -2244,6 +2355,41 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				config = setCardRuleOff(config, config.card, body.key, body.off);
 				writeJsonWithBackup(configPath(host.cwd), config);
 				sendJson(res, 200, { ok: true, ruleOff: (config.cardRuleOff ?? {})[config.card] ?? [] });
+				return true;
+			}
+			// ---- 卡内嵌规则编辑(覆盖层,不改卡文件;作用于当前卡 config.card) ----
+			// 契约:写入/还原后返回 card 段最新状态(与 GET groups?scope=card 的 card 段一致,前端直接替换)。
+			// 关闭判定:覆盖里的 disabled=true 与 ruleOff 双保险无冲突——还原后原卡 disabled 恢复,ruleOff 独立工作。
+			case "PUT /api/cardfront/cardrule": {
+				const body = JSON.parse(await readBody(req)) as { key?: string; rule?: Record<string, unknown> };
+				if (typeof body.key !== "string" || !body.key.trim()) throw new Error("缺少 key");
+				if (!body.rule || typeof body.rule !== "object" || Array.isArray(body.rule)) throw new Error("缺少 rule");
+				const ruleBody = body.rule;
+				if (typeof ruleBody.findRegex !== "string" || !ruleBody.findRegex.trim()) throw new Error("缺少 findRegex");
+				if (typeof ruleBody.replace !== "string") throw new Error("缺少 replace");
+				const parsed = parseFindRegex(ruleBody.findRegex);
+				if (!parsed) throw new Error("findRegex 不是合法的正则表达式");
+				const extra = validateRuleBodyFields(ruleBody);
+				const config = loadConfig(host.cwd);
+				const rule: DisplayRule = {
+					...extra,
+					name: extra.name ?? "",
+					source: parsed.source,
+					flags: parsed.flags,
+					replace: ruleBody.replace,
+				};
+				const next = setCardRuleOverride(config, config.card, body.key.trim(), rule);
+				writeJsonWithBackup(configPath(host.cwd), next);
+				sendJson(res, 200, { ok: true, card: cardFrontCardState(host.cwd, config.card) });
+				return true;
+			}
+			case "DELETE /api/cardfront/cardrule": {
+				const key = (query.get("key") ?? "").trim();
+				if (!key) throw new Error("缺少 key");
+				const config = loadConfig(host.cwd);
+				const next = removeCardRuleOverride(config, config.card, key);
+				writeJsonWithBackup(configPath(host.cwd), next);
+				sendJson(res, 200, { ok: true, card: cardFrontCardState(host.cwd, config.card) });
 				return true;
 			}
 

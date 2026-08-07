@@ -1706,6 +1706,8 @@ const storyBridgeBase: StoryBridge = {
 	worldState: () => currentState(),
 	applyStatePatch: (patch) => restHost.applyStatePatch(patch),
 	softRefreshConfig: () => restHost.softRefreshConfig(),
+	/** P8：广播 hello 全量重放（regex_manage 写盘后让所有端用新显示规则重渲当前消息） */
+	resyncStory: () => resyncAll(),
 	listModels: () => {
 		const r = restHost.listModels();
 		return {
@@ -3039,6 +3041,13 @@ wss.on("connection", (ws, req) => {
 						if (agentHosts.has("assistant")) broadcast(assistantHelloFrame());
 						broadcast({ type: "notify", level: "info", text: "已新建会话" });
 						break;
+					case "resync": {
+						// P8：前端改完显示规则后请求全量重放 hello——所有端用新规则重渲当前消息。
+						// 纯广播无写操作；流式时不响应（照相邻 case 的守卫模式，避免打断生成）。
+						if (refuseWhileStreaming(ws, "刷新显示规则")) return;
+						resyncAll();
+						break;
+					}
 					case "choice_reply": {
 						const id = String(frame.id ?? "");
 						if (!pendingChoices.has(id)) return; // 已被他端应答/超时收敛
