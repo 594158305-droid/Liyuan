@@ -160,7 +160,13 @@ jobs:
           "
           # 写穿软链后宿主机应立刻可见
           grep -q __ci_probe data/config/liyuan.agent.json
-          docker compose restart --wait --wait-timeout 300
+          # restart 不吃 --wait（只有 up 有），自己轮询探活
+          docker compose restart
+          for i in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7620/)" = 200 ] && break
+            [ "$i" = 60 ] && { echo "重启后 60s 内没起来"; docker compose logs --tail=60; exit 1; }
+            sleep 2
+          done
           grep -q __ci_probe data/config/liyuan.agent.json
           docker compose exec -T liyuan test -L /app/liyuan.agent.json
 
