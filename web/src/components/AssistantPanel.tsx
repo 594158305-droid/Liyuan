@@ -236,25 +236,29 @@ export function AssistantPanel({
 	}, [models]);
 
 	const histCount = sessions?.length ?? 0;
+	const currentAgentName = useMemo(
+		() => agents?.find((a) => a.id === (agentId ?? "assistant"))?.name ?? (agentId ?? "assistant"),
+		[agents, agentId],
+	);
 
 	return (
 		<div className="asst-panel">
 			<div className="asst-toolbar">
 				{agents && agents.length > 1 && (
-					<div className="asst-agents" role="group" aria-label="切换 agent">
-						{agents.map((a) => (
-							<button
-								key={a.id}
-								type="button"
-								className={`chip chip-btn${a.id === (agentId ?? "assistant") ? " chip-active" : ""}`}
-								title={a.description ?? a.name}
-								disabled={busy}
-								onClick={() => onSwitchAgent?.(a.id)}
-							>
-								{a.name}
-							</button>
-						))}
-					</div>
+					<label className="asst-model" title="切换 agent">
+						<select
+							value={agentId ?? "assistant"}
+							disabled={busy}
+							aria-label="切换 agent"
+							onChange={(e) => onSwitchAgent?.(e.target.value)}
+						>
+							{agents.map((a) => (
+								<option key={a.id} value={a.id} title={a.description ?? a.name}>
+									{a.name}
+								</option>
+							))}
+						</select>
+					</label>
 				)}
 				<button
 					type="button"
@@ -294,16 +298,16 @@ export function AssistantPanel({
 				</label>
 				<button
 					type="button"
-					className={`icon-btn ${histOpen ? "active" : ""}`}
+					className={`icon-btn text-btn ${histOpen ? "active" : ""}`}
 					onClick={() => {
 						setHistOpen((o) => !o);
 						onRefreshSessions();
 					}}
-					title="本角色卡的助手历史"
-					aria-label="助手历史"
+					title={`「${currentAgentName}」的历史`}
+					aria-label={`「${currentAgentName}」的历史`}
 					aria-expanded={histOpen}
 				>
-					历史{histCount > 0 ? ` ${histCount}` : ""}
+					历史{histCount > 0 && <span className="hist-count">{histCount}</span>}
 				</button>
 				<button
 					type="button"
@@ -319,14 +323,14 @@ export function AssistantPanel({
 			{histOpen && (
 				<div className="asst-history">
 					<div className="asst-history-head">
-						<span>本卡助手历史</span>
+						<span>「{currentAgentName}」的历史</span>
 						<button type="button" className="welcome-link" onClick={onRefreshSessions}>
 							刷新
 						</button>
 					</div>
 					{sessions === null && <div className="sp-empty">读取历史…</div>}
 					{sessions !== null && sessions.length === 0 && (
-						<div className="sp-empty">当前角色卡还没有助手对话</div>
+						<div className="sp-empty">「{currentAgentName}」还没有历史对话</div>
 					)}
 					{sessions !== null &&
 						sessions.map((s) => (

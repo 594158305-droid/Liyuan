@@ -298,6 +298,11 @@ export default function App() {
 	const [asstAgents, setAsstAgents] = useState<Array<{ id: string; name: string; description?: string }>>([]);
 	/** 当前选中的 agent id（缺省=内置助手 assistant） */
 	const [asstAgentId, setAsstAgentId] = useState("assistant");
+	/** 在 onFrame 等稳定回调里读最新选中的 agent id */
+	const asstAgentIdRef = useRef(asstAgentId);
+	useEffect(() => {
+		asstAgentIdRef.current = asstAgentId;
+	}, [asstAgentId]);
 	// 面板系统
 	const initialPanels = useMemo(loadPanelPrefs, []);
 	const [leftPanel, setLeftPanel] = useState<PanelId | AgentPanelId | null>(initialPanels.left);
@@ -863,8 +868,8 @@ export default function App() {
 					asstActsRef.current = [];
 					setAsstLiveActs([]);
 					clearAsstStream();
-					// 换会话后重拉助手历史列表
-					sendRef.current({ type: "assistant_sessions" });
+					// 换会话后重拉当前 agent 的助手历史列表
+					sendRef.current({ type: "assistant_sessions", agentId: asstAgentIdRef.current });
 					break;
 				case "assistant_sessions":
 					setAsstSessions(frame.list);
@@ -1532,7 +1537,9 @@ export default function App() {
 						onSwitchAgent={(id) => {
 							setAsstAgentId(id);
 							setAsstUnread(false);
+							setAsstSessions(null);
 							ws.send({ type: "assistant_sync", agentId: id });
+							ws.send({ type: "assistant_sessions", agentId: id });
 						}}
 						onSend={(text) => ws.send({ type: "assistant_prompt", text, agentId: asstAgentId })}
 						onAbort={() => {
@@ -1562,10 +1569,10 @@ export default function App() {
 							}
 							ws.send({ type: "assistant_abort" });
 						}}
-						onNew={() => ws.send({ type: "assistant_new" })}
-						onRefreshSessions={() => ws.send({ type: "assistant_sessions" })}
-						onOpenSession={(path) => ws.send({ type: "assistant_open", path })}
-						onDeleteSession={(path) => ws.send({ type: "assistant_delete", path })}
+						onNew={() => ws.send({ type: "assistant_new", agentId: asstAgentId })}
+						onRefreshSessions={() => ws.send({ type: "assistant_sessions", agentId: asstAgentId })}
+						onOpenSession={(path) => ws.send({ type: "assistant_open", path, agentId: asstAgentId })}
+						onDeleteSession={(path) => ws.send({ type: "assistant_delete", path, agentId: asstAgentId })}
 						onPickModel={(sel) =>
 							ws.send(sel ? { type: "assistant_model", provider: sel.provider, id: sel.id, agentId: asstAgentId } : { type: "assistant_model", agentId: asstAgentId })
 						}
@@ -2370,9 +2377,9 @@ export default function App() {
 										return;
 									}
 									setAsstUnread(false);
-									openRight("assistant");
-									ws.send({ type: "assistant_sync" });
-									ws.send({ type: "assistant_sessions" });
+								openRight("assistant");
+								ws.send({ type: "assistant_sync", agentId: asstAgentId });
+								ws.send({ type: "assistant_sessions", agentId: asstAgentId });
 								}}
 								title="助手"
 								aria-label="打开助手面板"

@@ -336,13 +336,13 @@ export type ClientFrame =
 	/** 助手（右栏独立会话）：发话 / 停止 / 新对话 / 请求全量 / 选模型（provider+id 均缺省 = 跟随剧情模型） */
 	| { type: "assistant_prompt"; text: string; agentId?: string }
 	| { type: "assistant_abort" }
-	| { type: "assistant_new" }
+	| { type: "assistant_new"; agentId?: string } // 新建会话归属该 agent，缺省=assistant
 	| { type: "assistant_sync"; agentId?: string }
 	| { type: "assistant_model"; provider?: string; id?: string; agentId?: string }
 	/** 助手历史：拉列表 / 打开 / 删除（均按当前角色卡过滤） */
-	| { type: "assistant_sessions" }
-	| { type: "assistant_open"; path: string }
-	| { type: "assistant_delete"; path: string }
+	| { type: "assistant_sessions"; agentId?: string } // 自定义 agent 维度：缺省=assistant，按 agent 查询其会话历史
+	| { type: "assistant_open"; path: string; agentId?: string } // 打开哪个 agent 的历史会话，缺省=assistant
+	| { type: "assistant_delete"; path: string; agentId?: string } // 同：哪个 agent 的历史会话，缺省=assistant
 	/** 脚本运行时程序化生成（JS Runner 扩展）：发起 / 中止 */
 	| { type: "ext_generate"; reqId: string; params: ExtGenerateParams }
 	| { type: "ext_abort"; reqId: string }

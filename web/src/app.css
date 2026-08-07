@@ -666,6 +666,19 @@ html[data-theme="dark"] [data-tip]:focus-visible::after {
 	color: var(--text-strong);
 }
 
+/* 文本类 icon-btn：宽度自适应（如助手面板「历史」按钮），文字横排不换行 */
+.icon-btn.text-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: auto;
+	min-width: 30px;
+	height: 30px;
+	padding: 0 8px;
+	gap: 2px;
+	white-space: nowrap;
+}
+
 /* ── 三栏布局:左右面板默认不渲染 ──
    面板是覆盖在两侧留白上的浮层(不挤压聊天流):聊天列永远相对屏幕居中;
    面板宽 = 留白宽(下限 300px)(用户定调 2026-07-09) */
