@@ -236,7 +236,9 @@ export function createSlot(
 	return store;
 }
 
-/** 追加版本（增强/编辑 TAG 再生/重生成产生新版本）；slot 不存在 → 原样返回 */
+/** 追加版本（增强/编辑 TAG 再生/重生成产生新版本）；slot 不存在 → 原样返回。
+ *  追加后自动选中新版本（selectedVersionIndex = 新下标）——增强/重生成/放大的结果
+ *  成为当前显示（前端 reload 后直接展示新图与最新计数）。 */
 export function appendVersion(
 	cwd: string,
 	slotId: string,
@@ -245,18 +247,20 @@ export function appendVersion(
 	const store = effectiveStore(cwd);
 	const entry = store.slots[slotId];
 	if (!entry) return store;
+	const versions = [
+		...entry.versions,
+		{
+			file: opts.file,
+			params: opts.params ?? {},
+			savedAt: 0,
+			discarded: false,
+			...(opts.failed ? { failed: { code: opts.failed.code || "unknown", reason: opts.failed.reason } } : {}),
+		},
+	];
 	store.slots[slotId] = {
 		...entry,
-		versions: [
-			...entry.versions,
-			{
-				file: opts.file,
-				params: opts.params ?? {},
-				savedAt: 0,
-				discarded: false,
-				...(opts.failed ? { failed: { code: opts.failed.code || "unknown", reason: opts.failed.reason } } : {}),
-			},
-		],
+		versions,
+		selectedVersionIndex: versions.length - 1,
 	};
 	saveSlotStoreDebounced(cwd, store);
 	return store;

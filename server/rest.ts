@@ -4486,6 +4486,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			// 不依赖插件 init；保存/删除/清理的操作对象是 slot-store 文件与 cache/media 文件，
 			// 与插件开关解耦（渲染层见 web/src/components/draw-slot-image.tsx）。
 			case "GET /api/draw/slots": {
+				// 先 flush 防抖 pending：createSlot/appendVersion 走防抖落盘（300ms），
+				// 若直接读盘会拿到旧数据——增强/重生成后前端立即 reload 时计数/新图不刷新
+				flushSlotStorePending(host.cwd);
 				const slotId = (query.get("slotId") ?? "").trim();
 				if (slotId) {
 					const info = getSlotInfo(host.cwd, slotId);
