@@ -1,0 +1,10 @@
+{
+	"id": "draw-slot",
+	"name": "图像存储映射",
+	"version": "0.1.0",
+	"description": "占位符 [image:slotId] 进正文、slot 映射文件持久化、保存模式（手动默认 + 自动开关）、过期清理、索引重建、前端占位符渲染",
+	"tools": [],
+	"panels": [],
+	"skills": [],
+	"requires": []
+}

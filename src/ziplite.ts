@@ -92,6 +92,15 @@ export function listZipEntries(zipPath: string): ZipEntryInfo[] {
 	return readCentralDirectory(buf).map(({ name, size, isDir, mode }) => ({ name, size, isDir, mode }));
 }
 
+/** 从内存 Buffer 解析 zip，返回第一个名字匹配 predicate 的条目字节；无匹配返回 null */
+export function readZipEntryBytes(zipBuf: Buffer, predicate: (name: string) => boolean): Buffer | null {
+	const entries = readCentralDirectory(zipBuf);
+	for (const e of entries) {
+		if (predicate(e.name)) return entryData(zipBuf, e);
+	}
+	return null;
+}
+
 /**
  * 解压整个 zip 到 destDir。zip-slip 防御：解出的绝对路径必须落在 destDir 内。
  */

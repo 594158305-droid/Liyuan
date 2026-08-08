@@ -13,7 +13,7 @@
 
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, watch, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { dirname, extname, isAbsolute, join, normalize } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -43,7 +43,7 @@ import { loadAgentConfig, normalizeAgentConfig, syncAgentConfigToRuntime } from 
 import { streamSimple } from "@liyuan/ai/compat";
 import { loadCardFile } from "../src/card.ts";
 import { buildGreeting } from "../src/greeting.ts";
-import { StageEngine, type StageStreamFn } from "../src/stage/engine.ts";
+import { StageEngine, type AssistantMsgLike, type StageStreamFn } from "../src/stage/engine.ts";
 import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
 import {
 	activePanels,
@@ -93,7 +93,8 @@ import {
 	memorySearch,
 	onNarrativeTurnEnd,
 } from "../src/memory/index.ts";
-import { handleApiRequest, loadCardFrontSnapshot, loadConfig, type CurrentModelInfo, type RestHost } from "./rest.ts";
+import { handleApiRequest, loadCardFrontSnapshot, loadConfig, loadMergedLore, type CurrentModelInfo, type RestHost } from "./rest.ts";
+import { searchEntries } from "../src/lorebook.ts";
 
 // 用户级 agent 目录 → ~/.liyuan/agent（须在 getAgentDir / 建会话之前）
 // 并合并 fork 改名后遗留的 ~/.pi/agent（会话/配置，不覆盖更新的新树）
@@ -111,7 +112,12 @@ import {
 	type WireNames,
 	type WireStats,
 } from "./wire.ts";
-import { createAgentHost, STAGEHAND_TOOL_NAMES, type AssistantHost, type StoryBridge } from "./assistant.ts";
+import { createAgentHost, stagehandPluginToolNames, STAGEHAND_TOOL_NAMES, type AssistantHost, type StoryBridge } from "./assistant.ts";
+import { turnEndHooks } from "../src/draw-plugins/registry.ts";
+import { registerLoreSearcher, registerPlannerCaller } from "../src/draw-plugins/draw-pipeline/index.ts";
+import { buildInsertPatch } from "../src/draw-plugins/draw-pipeline/anchor.ts";
+import { createSlot } from "../src/draw-plugins/draw-slot/slot-store.ts";
+import { resolveCharacterTags } from "../src/draw-plugins/draw-role/resolver.ts";
 import { createStoryBridge, FULL_BRIDGE_PERMISSIONS } from "./bridge.ts";
 import { registerAgentRunner, unregisterAgentRunner, type AssistantRunner } from "../src/assistant-gateway.ts";
 import { sameCardPath } from "../src/paths.ts";
@@ -217,6 +223,11 @@ let unsubscribe: (() => void) | undefined;
 const clients = new Set<WebSocket>();
 const broadcast = (frame: ServerFrame) => {
 	const data = JSON.stringify(frame);
+	// 诊断日志（正文嵌入链路）：hello 帧广播目标数——确认前端是否收到
+	if (frame.type === "hello") {
+		const n = [...clients].filter((c) => c.readyState === c.OPEN).length;
+		console.log("[ws] broadcast hello 发送给 " + n + " 个客户端（messages=" + (frame.messages?.length ?? 0) + "）");
+	}
 	for (const ws of clients) {
 		if (ws.readyState === ws.OPEN) ws.send(data);
 	}
@@ -558,7 +569,19 @@ const helloFrame = (): ServerFrame => {
 };
 
 /** 全量重放（斜杠命令 / 树导航 / 压缩后：让所有端与会话文件对齐） */
-const resyncAll = () => broadcast(helloFrame());
+const resyncAll = () => {
+	const frame = helloFrame();
+	// 诊断日志（正文嵌入链路）：hello 帧含占位符文本时打印——确认前端重放时服务端发出的内容
+	try {
+		const ph = (frame.messages ?? []).filter(
+			(m) => m && typeof (m as { text?: unknown }).text === "string" && /\[image:/.test((m as { text: string }).text),
+		).length;
+		if (ph > 0) console.log("[draw-slot] resyncAll hello 帧含占位符消息 " + ph + " 条");
+	} catch {
+		/* 诊断日志不阻断 */
+	}
+	broadcast(frame);
+};
 
 /** 会话树条目是否为开场白 */
 const isGreetingTreeEntry = (e: Record<string, unknown>): boolean => {
@@ -1207,8 +1230,8 @@ const restHost: RestHost = {
 		refreshNamesFromConfig();
 		resyncAll();
 	},
-	/** 自定义 agent 管理界面工具清单：stagehand 工具 + 内置工具（read/bash/edit/write） */
-	listAgentTools: () => [...STAGEHAND_TOOL_NAMES, "read", "bash", "edit", "write"],
+	/** 自定义 agent 管理界面工具清单：stagehand 工具 + 启用插件工具 + 内置工具（read/bash/edit/write） */
+	listAgentTools: () => [...STAGEHAND_TOOL_NAMES, ...stagehandPluginToolNames(), "read", "bash", "edit", "write"],
 	/**
 	 * agents 热重建（PUT /api/config 的 agents 段写盘后触发，DESIGN-custom-agents §4/§6）：
 	 * - 删除：不再存在于新配置的自定义 agent → dispose + 注销 runner + 出表（记 removed）；
@@ -1444,6 +1467,101 @@ const restHost: RestHost = {
 		saveState(file, r.state); // fs.watch 自动广播 state 帧
 		syncStoryStateFromDisk();
 		return { applied: r.applied, warnings: r.warnings };
+	},
+	/** 世界状态只读：与 storyBridge.worldState() 同源（currentState：树快照优先，磁盘缓存兜底） */
+	worldState() {
+		try {
+			return currentState();
+		} catch {
+			return null;
+		}
+	},
+	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮；Q15 简化通道——
+	 *  runPipeline + patches 应用到最新 assistant 全文 → editEntryViaStoryChannel（rp-edited-reply） */
+	async manualPipelineRun(text: string) {
+		try {
+			const { runPipeline } = await import("../src/draw-plugins/draw-pipeline/pipeline.ts");
+			const { defaultPipelineDeps } = await import("../src/draw-plugins/draw-pipeline/index.ts");
+			// 最新 assistant（嵌入目标：当前分支倒序第一条非空 assistant 文本）
+			const branch = session.sessionManager.getBranch() as Array<{
+				id?: string;
+				type?: string;
+				message?: { role?: string; content?: unknown };
+			}>;
+			let entryId = "";
+			let entryText = "";
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e?.type === "message" && e.message?.role === "assistant") {
+					entryId = e.id ?? "";
+					entryText = extractEntryText(e.message.content);
+					if (entryText.trim()) break;
+				}
+			}
+			const result = await runPipeline(cwd, {
+				entryId: entryId || `manual-${Date.now()}`,
+				chatId: session.sessionId,
+				messageText: text,
+				settings: { auto: true, characters: [], minIntervalMs: 0, maxImages: 2, maxCharactersPerImage: 3 },
+				deps: defaultPipelineDeps(cwd),
+			});
+			// 嵌入：patches 依次应用到最新 assistant 全文 → storyEdit 通道（rp-edited-reply）
+			let embedded = false;
+			if (result.ran && result.patches.length > 0 && entryId) {
+				let newText = entryText;
+				for (const patch of result.patches) newText = applyDraftOpToText(newText, patch);
+				const r = await editEntryViaStoryChannel(entryId, newText);
+				embedded = r.ok;
+			}
+			return { ok: true, slots: result.slots, warnings: result.warnings, embedded };
+		} catch (e) {
+			return { ok: false, error: e instanceof Error ? e.message : String(e) };
+		}
+	},
+	/**
+	 * 从当前分支全部消息正文剥离指定 slotId 的 [image:slotId] 占位符并保存（删除所有图时用）：
+	 * 逐条 extractEntryText → 独立成段的占位符连周围空白一起清（\n 收拢），内联残留清空 →
+	 * 有改动的经 editEntryViaStoryChannel（rp-edited-reply 通道）保存。
+	 * editEntryViaStoryChannel 对「目标之后已有更新角色回复」会失败（只清当前分支可安全编辑的），
+	 * 失败原因记入 errors 继续，不 console 刷屏。
+	 */
+	async stripStoryPlaceholders(slotIds: string[]) {
+		const ids = [...new Set((slotIds ?? []).filter((s) => typeof s === "string" && s.trim()))];
+		const errors: string[] = [];
+		let stripped = 0;
+		if (ids.length === 0) return { stripped, errors: errors.length ? errors : undefined };
+		const branch = session.sessionManager.getBranch() as Array<{
+			id?: string;
+			type?: string;
+			message?: { role?: string; content?: unknown };
+			customType?: string;
+			content?: unknown;
+		}>;
+		for (const entry of branch) {
+			const entryId = entry.id;
+			if (!entryId) continue;
+			// 取文本：message 条目 content 在 entry.message.content；custom_message（rp-edited-reply 等）
+			// content 在 entry.content（同 branchMessages L527-539 结构）；其余类型无正文跳过
+			const content = entry.type === "custom_message" ? entry.content : entry.type === "message" ? entry.message?.content : undefined;
+			if (content === undefined) continue;
+			const text = extractEntryText(content);
+			if (!text) continue;
+			let newText = text;
+			for (const slotId of ids) {
+				const placeholder = `[image:${slotId}]`;
+				// 防注入：slotId 来自 REST 请求体，构造正则前转义正则特殊字符
+				const esc = slotId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+				// 独立成段的占位符：连同其前后 0-2 个换行与周围空白一起清掉（换行收拢为单个 \n）
+				newText = newText.replace(new RegExp(`\\n{0,2}\\s*\\[image:${esc}\\]\\s*`, "g"), "\n");
+				// 内联残留（段落中间直接嵌的）：精确清空
+				newText = newText.split(placeholder).join("");
+			}
+			if (newText === text) continue;
+			const r = await editEntryViaStoryChannel(entryId, newText);
+			if (r.ok) stripped++;
+			else errors.push(r.error ?? `条目 ${entryId} 保存失败`);
+		}
+		return { stripped, ...(errors.length > 0 ? { errors } : {}) };
 	},
 	// ---- 世界线视图 / 软删除 / 线名 ----
 	worldlineView() {
@@ -1846,7 +1964,170 @@ const storyBridgeBase: StoryBridge = {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
 	},
+	/**
+	 * 把生图结果嵌入最近一条剧情消息正文（Q15）：
+	 * createSlot 登记 slot（file 指向 cache/media 相对路径）+ buildInsertPatch 生成 rp-draft-op 补丁
+	 * + 分支校验 + sendCustomMessage 写入。树上字节不改（补丁读取时生效）。
+	 */
+	async embedStoryImage({ src, anchor, scene, characters }) {
+		try {
+			// 1) src 解析：/cache/xxx → .liyuan-cache/xxx（相对 cwd）；/media/xxx → .liyuan-media/xxx；绝对路径原样
+			let rel: string;
+			let abs: string;
+			if (src.startsWith("/cache/")) {
+				rel = `.liyuan-cache/${src.slice("/cache/".length)}`;
+				abs = join(cwd, rel);
+			} else if (src.startsWith("/media/")) {
+				rel = `.liyuan-media/${src.slice("/media/".length)}`;
+				abs = join(cwd, rel);
+			} else {
+				abs = isAbsolute(src) ? src : join(cwd, src);
+				rel = src;
+			}
+			if (!existsSync(abs)) return { ok: false, error: `文件不存在：${abs}` };
+
+			// 2) 最新 assistant 条目（复用 onTurnEnd branchMessages 取法：倒序找最后一条 assistant content）
+			const branch = session.sessionManager.getBranch() as Array<{
+				id?: string;
+				type?: string;
+				message?: { role?: string; content?: unknown };
+				customType?: string;
+				content?: unknown;
+			}>;
+			let targetId = "";
+			let targetText = "";
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e?.type === "message" && e.message?.role === "assistant") {
+					targetId = e.id ?? "";
+					targetText = extractEntryText(e.message.content);
+					if (targetText.trim()) break;
+				}
+			}
+			if (!targetId || !targetText.trim()) {
+				return { ok: false, error: "暂无剧情消息可嵌入" };
+			}
+
+			// 3) createSlot：slotId = slot-<uuid>，chatId=sessionId，messageId=条目 id，file=rel
+			//    params 存结构化分栏（LWB 编辑 TAG 数据源）：
+			//    有 characters → 经服装档案组装 characterPrompts（过滤空 tag）；无 → 仅 scene/positive
+			const slotId = `slot-${randomUUID()}`;
+			let params: Record<string, unknown> = {};
+			if (scene) {
+				params = { scene, positive: scene };
+			}
+			if (characters && characters.length > 0) {
+				const card = cardPath || (() => {
+					try {
+						return (JSON.parse(readFileSync(join(cwd, "liyuan.config.json"), "utf8")) as { card?: string }).card ?? "";
+					} catch {
+						return "";
+					}
+				})();
+				if (card) {
+					try {
+						const r = resolveCharacterTags(cwd, card, characters, currentState());
+						const characterPrompts = r.characters
+							.filter((c) => c.tags.trim())
+							.map((c) => ({ name: c.name, prompt: c.tags.trim() }));
+						if (characterPrompts.length > 0) params.characterPrompts = characterPrompts;
+					} catch {
+						// 解析失败：跳过分栏（保持 scene 整段）
+					}
+				}
+			}
+			createSlot(cwd, {
+				slotId,
+				chatId: session.sessionId,
+				messageId: targetId,
+				file: rel,
+				...(Object.keys(params).length > 0 ? { params } : {}),
+			});
+
+			// 4) buildInsertPatch：正文 + anchor（缺省 → append 到末尾）+ 占位符
+			const placeholder = `[image:${slotId}]`;
+			const patchRes = buildInsertPatch(targetText, anchor, placeholder);
+			if (!patchRes.ok) {
+				return { ok: false, error: patchRes.reason };
+			}
+
+			// 5) 应用补丁得新全文（占位符进正文——正文可修改，红线 2026-08-08 已移除）
+			const newText = applyDraftOpToText(targetText, patchRes.patch);
+
+			// 6) 经 storyEdit 通道（rp-edited-reply 分支注入）写入：
+			//    改后全文作为最新叙事版本（带「已改写」标记、原文旁支可回滚），
+			//    渲染走 RichContent（无 rp-draft-op 补丁的 timeline 快照问题）
+			const r = await editEntryViaStoryChannel(targetId, newText);
+			if (!r.ok) return { ok: false, error: r.error };
+			return { ok: true, slotId };
+		} catch (e) {
+			return { ok: false, error: e instanceof Error ? e.message : String(e) };
+		}
+	},
 };
+
+/** 应用占位符补丁到正文：{append} → 末尾追加；{old,new} → 定点替换 */
+function applyDraftOpToText(text: string, patch: Record<string, unknown>): string {
+	if (typeof patch.append === "string" && patch.append.trim()) {
+		return `${text}\n\n${patch.append}`;
+	}
+	if (typeof patch.old === "string" && patch.old && typeof patch.new === "string") {
+		return text.includes(patch.old) ? text.replace(patch.old, patch.new) : text;
+	}
+	return text;
+}
+
+/**
+ * 经 storyEdit 通道把改后全文注入剧情（Q15 简化方案，2026-08-08 用户定调：
+ * 生图得 id → 改正文 tool 写入 → 渲染正则替换，三步即可，不走 rp-draft-op 补丁）：
+ * 场记网关等待 → 目标条目仍在分支且其后无更新的角色回复（否则放弃）→
+ * branchCommitToTarget 钉回 → sendCustomMessage rp-edited-reply → 旁路重记账 → resyncAll。
+ */
+async function editEntryViaStoryChannel(entryId: string, newText: string): Promise<{ ok: boolean; error?: string }> {
+	const scribeGate = (globalThis as typeof globalThis & {
+		__liyuanScribeGateway__?: {
+			waitForScribeIdle: (ms?: number) => Promise<void>;
+			scribeTurnOnceExported: (userText: string, assistantText: string) => Promise<void>;
+		};
+	}).__liyuanScribeGateway__;
+	if (!scribeGate) {
+		return { ok: false, error: "场记旁路网关未就绪（roleplay 扩展未装载），无法重记账" };
+	}
+	try {
+		await scribeGate.waitForScribeIdle();
+		const branch = session.sessionManager.getBranch() as Array<{
+			id: string;
+			type?: unknown;
+			message?: { role?: unknown; content?: unknown };
+		}>;
+		const idx = branch.findIndex((e) => e.id === entryId);
+		if (idx === -1) return { ok: false, error: "目标消息已离开当前分支（用户已进入新回合），嵌入放弃" };
+		// 目标之后不得有更新的角色回复（嵌入目标必须是最新叙事，否则钉回会旁支化新回合）
+		for (let i = idx + 1; i < branch.length; i++) {
+			if (branch[i].type === "message" && branch[i].message?.role === "assistant") {
+				return { ok: false, error: "目标消息之后已有更新的角色回复（用户已进入新回合），嵌入放弃" };
+			}
+		}
+		branchCommitToTarget(entryId);
+		await session.sendCustomMessage({ customType: "rp-edited-reply", content: newText, display: true });
+		// 旁路重记账（与 storyEdit 同款）：取目标前一条 user 文本 + 改后全文
+		let userText = "";
+		for (let i = idx - 1; i >= 0; i--) {
+			const e = branch[i];
+			if (e.type === "message" && e.message?.role === "user") {
+				userText = extractEntryText(e.message.content);
+				break;
+			}
+		}
+		if (userText.trim() && !isBackstageText(userText)) {
+			await scribeGate.scribeTurnOnceExported(userText, newText);
+		}
+		resyncAll();
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
+}
 
 // 桥工厂：基础实现按权限裁剪出最终桥。内置助手/剧情侧用全权限（行为与改前完全一致）；
 // 自定义 agent 将按各自配置裁剪（每方法未授权时抛错，工具执行层转成可见「无权限」）。
@@ -2027,7 +2308,8 @@ const onAssistantEvent = (event: unknown) => {
 			broadcast({
 				type: "notify",
 				level: "warning",
-				text: `助手模型请求失败，自动重试 ${ev.attempt}/${ev.maxAttempts}…`,
+				// 事件载荷带 errorMessage（agent-session auto_retry_start）——显示出来便于定位失败原因
+				text: `助手模型请求失败，自动重试 ${ev.attempt}/${ev.maxAttempts}…（${(ev as { errorMessage?: string }).errorMessage ?? "未知错误"}）`,
 			});
 			break;
 		default:
@@ -2040,6 +2322,60 @@ const promptAssistant = async (host: AssistantHost, text: string) => {
 	broadcast({ type: "assistant_message", message: { role: "user", text } });
 	await host.prompt(text);
 };
+
+// 生图管线规划 LLM（draw-pipeline）：注册旁路实现，与场记/压缩同款 streamSimple 通道。
+// settings.llm 可覆盖 provider/model（经 modelRegistry 查找）；缺省跟随剧情模型（session.model）。
+registerPlannerCaller(async (prompt, llm) => {
+	const model = (() => {
+		if (llm?.provider && llm?.model) {
+			const m = session.modelRegistry.find(llm.provider, llm.model);
+			if (m) return m as never;
+		}
+		return session.model as never;
+	})();
+	if (!model) throw new Error("尚无可用模型（未配置剧情模型）");
+	const { apiKey, headers } = session.modelRegistry.getApiKeyAndHeaders(model);
+	const s = streamSimple(
+		model,
+		{
+			systemPrompt: prompt.system,
+			messages: [{ role: "user", content: [{ type: "text", text: prompt.user }], timestamp: Date.now() }],
+		},
+		{
+			apiKey,
+			headers,
+			maxTokens: 4096,
+			reasoning: "off",
+		},
+	);
+	let final: AssistantMsgLike | null = null;
+	for await (const e of s) {
+		if (e.type === "done") final = e.message ?? null;
+		else if (e.type === "error") throw new Error(e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`);
+	}
+	if (!final) throw new Error("规划 LLM 流未产出最终消息");
+	const text = (final.content ?? [])
+		.filter((p) => p?.type === "text")
+		.map((p) => String((p as { text?: string }).text ?? ""))
+		.join("");
+	if (!text.trim()) throw new Error("规划 LLM 最终消息无文本");
+	return text;
+});
+
+// 生图管线 lore 检索（draw-pipeline）：注册 host 实现——loadMergedLore + searchEntries。
+// 与 assistant 侧 lorebook_search 同一数据源（rest.ts loadMergedLore → searchEntries）。
+registerLoreSearcher((query, limit) => {
+	try {
+		const entries = loadMergedLore(cwd, loadConfig(cwd));
+		const hits = searchEntries(entries, query, limit ?? 3);
+		return hits
+			.map((h) => `【${h.entry.comment || h.entry.keys[0] || "未命名"}】\n${h.entry.content}`)
+			.join("\n\n");
+	} catch (e) {
+		console.warn("[draw-pipeline] lore 检索失败：", e);
+		return "";
+	}
+});
 
 try {
 	const assistant = await createAgentHost({
@@ -2280,6 +2616,23 @@ const httpServer = createServer((req, res) => {
 				res.writeHead(200, {
 					"content-type": MIME[extname(file).toLowerCase()] ?? "application/octet-stream",
 					"cache-control": "public, max-age=31536000, immutable", // 内容寻址文件名，可永久缓存
+				});
+				res.end(readFileSync(file));
+			} else {
+				res.writeHead(404);
+				res.end();
+			}
+			return;
+		}
+		// 生图缓存托管（draw_generate → .liyuan-cache/；未保存缓存随时可能被清理，不设长期缓存）
+		if (url.startsWith("/cache/")) {
+			const cacheDir = dir(cwd, "cache");
+			const rel = normalize(url.slice("/cache/".length)).replace(/^([/\\.])+/, "");
+			const file = join(cacheDir, rel);
+			if (file.startsWith(cacheDir) && existsSync(file)) {
+				res.writeHead(200, {
+					"content-type": MIME[extname(file).toLowerCase()] ?? "application/octet-stream",
+					"cache-control": "no-cache",
 				});
 				res.end(readFileSync(file));
 			} else {
@@ -2554,6 +2907,103 @@ const stage = new StageEngine({
 					console.warn("[memory] auto ingest failed", e);
 				}
 			})();
+
+			// 生图管线钩子（能力包插件注册；后台执行不阻塞回合）
+			// 取本回合最新 assistant 定稿文本（供管线规划；与向量记忆同源取法）
+			const pipelineHooks = turnEndHooks();
+			if (pipelineHooks.length > 0 && info.entryId) {
+				const msgs2 = branchMessages() as Array<{ role?: string; content?: unknown }>;
+				let pipelineText = "";
+				for (let i = msgs2.length - 1; i >= 0; i--) {
+					const m = msgs2[i];
+					if (m?.role !== "assistant") continue;
+					const c = m.content;
+					if (typeof c === "string") pipelineText = c;
+					else if (Array.isArray(c)) {
+						pipelineText = c
+							.map((p) =>
+								p && typeof p === "object" && (p as { type?: string }).type === "text"
+									? String((p as { text?: string }).text ?? "")
+									: "",
+							)
+							.join("");
+					}
+					if (pipelineText.trim()) break;
+				}
+				const chatId = session.sessionId;
+				// 前文（最近 3 条 assistant/user 消息，不含当前 entry——补丁/摘要/账本等 custom 不算）
+				let historyText = "";
+				{
+					const msgs3 = branchMessages() as Array<{ role?: string; customType?: string; content?: unknown }>;
+					const parts: string[] = [];
+					for (let i = msgs3.length - 1; i >= 0 && parts.length < 3; i--) {
+						const m = msgs3[i];
+						if (m?.role !== "assistant" && m?.role !== "user") continue;
+						const c = m.content;
+						let t = "";
+						if (typeof c === "string") t = c;
+						else if (Array.isArray(c)) {
+							t = c
+								.map((p) =>
+									p && typeof p === "object" && (p as { type?: string }).type === "text"
+										? String((p as { text?: string }).text ?? "")
+										: "",
+								)
+								.join("");
+						}
+						if (t.trim()) parts.push(`${m.role}: ${t.trim()}`);
+					}
+					historyText = parts.reverse().join("\n\n");
+				}
+				// 压缩摘要（rp-summary）：最近一条摘要条目的 data.summary（无则 ""）
+				let summaryText = "";
+				{
+					const branch = session.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>;
+					for (let i = branch.length - 1; i >= 0; i--) {
+						const e = branch[i];
+						if (e?.type === "custom" && e.customType === "rp-summary") {
+							const d = e.data as { summary?: unknown } | undefined;
+							if (d && typeof d.summary === "string" && d.summary.trim()) {
+								summaryText = d.summary;
+							}
+							break;
+						}
+					}
+				}
+				// 补丁执行（Q15 简化：改正文通道 = storyEdit 语义，不走 rp-draft-op 补丁）：
+				// 应用补丁得新全文 → editEntryViaStoryChannel（rp-edited-reply 分支注入）
+				const appendPatch = async (patch: Record<string, unknown>) => {
+					try {
+						const branchIds = (session.sessionManager.getBranch() as Array<{ id?: string }>).map((e) => e.id);
+						if (!branchIds.includes(info.entryId!)) {
+							return { ok: false as const, reason: "目标消息已离开当前分支（用户已进入新回合），补丁丢弃" };
+						}
+						const newText = applyDraftOpToText(pipelineText ?? "", patch);
+						const r = await editEntryViaStoryChannel(info.entryId!, newText);
+						return r.ok ? { ok: true as const } : { ok: false as const, reason: r.error ?? "嵌入失败" };
+					} catch (e) {
+						console.warn("[draw-pipeline] 补丁写入失败", e);
+						return { ok: false as const, reason: e instanceof Error ? e.message : String(e) };
+					}
+				};
+				for (const h of pipelineHooks) {
+					void (async () => {
+						try {
+							await h({
+								entryId: info.entryId,
+								aborted: info.aborted,
+								text: pipelineText,
+								chatId,
+								historyText,
+								summaryText,
+								appendPatch,
+							});
+						} catch (e) {
+							console.warn("[draw-pipeline]", e);
+						}
+					})();
+				}
+			}
 		},
 	},
 });
@@ -2954,6 +3404,7 @@ wss.on("connection", (ws, req) => {
 		return;
 	}
 	clients.add(ws);
+	console.log("[ws] 客户端连接，当前连接数 " + clients.size);
 	ws.send(JSON.stringify(helloFrame()));
 	if (storyStreaming()) ws.send(JSON.stringify({ type: "agent", state: "start" } satisfies ServerFrame));
 	// 助手面板：连接即对齐（busy 随帧携带，断线重连恢复生成中状态）
@@ -3228,8 +3679,14 @@ wss.on("connection", (ws, req) => {
 		})();
 	});
 
-	ws.on("close", () => clients.delete(ws));
-	ws.on("error", () => clients.delete(ws));
+	ws.on("close", () => {
+		clients.delete(ws);
+		console.log("[ws] 客户端断开，剩余 " + clients.size);
+	});
+	ws.on("error", () => {
+		clients.delete(ws);
+		console.log("[ws] 客户端错误断开，剩余 " + clients.size);
+	});
 });
 
 // ---------- 启动 ----------

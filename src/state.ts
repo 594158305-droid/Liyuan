@@ -117,6 +117,9 @@ export function applyPatch(state: WorldState, patch: Record<string, unknown>): P
 						if (typeof p.affinity === "number") cur.affinity = clamp(Math.round(p.affinity), -100, 100);
 						if (typeof p.status === "string") cur.status = p.status;
 						if (typeof p.notes === "string") cur.notes = p.notes;
+						// 当前穿着（服装档案 outfit id，随世界线回档）：显式 null 清除
+						if (typeof p.outfit === "string") cur.outfit = p.outfit;
+						else if (p.outfit === null) delete cur.outfit;
 						next.characters[name] = cur;
 						applied.push(`characters.${name} 已更新`);
 					}

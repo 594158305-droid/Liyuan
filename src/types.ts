@@ -99,6 +99,8 @@ export interface AgentBridgePermissions {
 	refreshMaterials: boolean;
 	/** 挂载知识库：mountCodex。低危（只改挂载清单）。 */
 	mountCodex: boolean;
+	/** 助手生图嵌入剧情正文（Q15）：embedStoryImage。中危（写正文补丁 + slot 登记）。 */
+	embedStoryImage: boolean;
 }
 
 /**
@@ -204,6 +206,11 @@ export interface RpConfig {
 	cardRuleOverrides?: Record<string, Record<string, DisplayRule>>;
 	/** 自定义 agent 声明（DESIGN-custom-agents §2）：每项一个独立会话/模型/提示词/工具面，经 assistant_run 按 id 委托；v1 只支持叙事外 agent */
 	agents?: AgentConfig[];
+	/**
+	 * 生图插件（能力包）开关（DESIGN-draw §3.0）：插件 id → { enabled, settings }。
+	 * 缺省视为 disabled（插件默认关闭，防无感消耗额度）。扫描/加载见 src/draw-plugins/registry.ts。
+	 */
+	plugins?: Record<string, { enabled?: boolean; settings?: Record<string, unknown> }>;
 }
 
 export const DEFAULT_CONFIG: RpConfig = {

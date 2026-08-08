@@ -18,25 +18,40 @@ npm run pack:release  # 出发布包（scripts/pack-release.ps1，输出到仓�
 
 ### Windows 下启动服务验证的正确姿势（血泪教训，别再踩）
 
-**错误姿势**（会卡住）：`Start-Process -NoNewWindow` + 固定 `Start-Sleep 12` + 同管道内 `Invoke-WebRequest`。
-原因：`-NoNewWindow` 让 node 子进程共享当前控制台，`server/main.ts` 启动后持续打印日志（预设宏/卡片皮肤警告等），日志流无限刷进 PowerShell 5.1 的管道缓冲 → 整条命令看起来"卡死"（实际上服务可能已经起来了）。
+**错误姿势**（会卡住，逐个排除过）：
+1. `Start-Process -NoNewWindow` + 固定 `Start-Sleep 12` + 同管道内 `Invoke-WebRequest`——`-NoNewWindow` 让 node 共享控制台管道，`server/main.ts` 启动后持续打印日志，日志流无限刷进管道缓冲 → 整条命令看起来"卡死"。
+2. `Start-Process -RedirectStandardOutput/-RedirectStandardError`（即使输出已重定向到文件）——PowerShell 5.1 从管道化上下文调用时，子进程**仍继承父进程的 std 管道句柄**；宿主（CLI 工具）等管道 EOF 永远等不到 → 命令已经输出了结果却一直"转圈"不结束。
+3. 把"启动 + 就绪轮询"写进同一条命令——轮询期间命令一直处于"执行中"状态。
 
-**正确姿势**：日志重定向到文件（不共享控制台）+ HTTP 轮询就绪（不等固定秒数）：
+**正确姿势（启动与检查分两条命令，各自立即返回）**：用 `Win32_Process.Create`（或 .NET `ProcessStartInfo.UseShellExecute=$true`）启动——这类方式创建的进程**不继承调用者的任何 std 管道句柄**，命令立即返回；日志重定向在 .cmd 脚本内部完成（WMI 不直接传重定向）；就绪检查单独一条命令短轮询。
 
 ```powershell
-# 杀旧实例
+# ① 杀旧实例 + 启动（立即返回，不等待）
 $old = Get-NetTCPConnection -LocalPort 7620 -State Listen -ErrorAction SilentlyContinue
 if ($old) { Stop-Process -Id $old.OwningProcess -Force; Start-Sleep 1 }
-# 起服务：stdout/stderr 重定向到文件，命令立即返回
-$p = Start-Process -FilePath node -ArgumentList "server/main.ts" -WorkingDirectory "J:\liyuan\Liyuan" `
-     -RedirectStandardOutput "$env:TEMP\liyuan-srv.log" -RedirectStandardError "$env:TEMP\liyuan-srv-err.log" -PassThru
-# 轮询就绪（最多 30 秒），不要 Start-Sleep 固定等待
-for ($i = 0; $i -lt 30; $i++) {
-    Start-Sleep -Seconds 1
-    try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:7620/" -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { "READY pid=$($p.Id)"; break } } catch {}
+$script = Join-Path $env:TEMP "start-liyuan.cmd"
+@"
+@echo off
+cd /d "J:\liyuan\Liyuan"
+node server/main.ts > "%TEMP%\liyuan-srv-out.log" 2>&1
+"@ | Set-Content -LiteralPath $script -Encoding ASCII
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "cmd /c `"$script`"" }
+"STARTED ret=$($r.ReturnValue) pid=$($r.ProcessId)"
+
+# ② 就绪检查（单独一条命令，短轮询 ≤15s）
+$ok = $false
+for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 750
+    try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:7620/healthz" -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { $ok = $true; break } } catch {}
 }
-# 结束后：Stop-Process -Id $p.Id -Force；清理临时脚本
+if ($ok) { "READY" } else { "NOT_READY"; Get-Content (Join-Path $env:TEMP "liyuan-srv-out.log") -Tail 25 }
+
+# ③ 结束后杀进程
+$old = Get-NetTCPConnection -LocalPort 7620 -State Listen -ErrorAction SilentlyContinue
+if ($old) { Stop-Process -Id $old.OwningProcess -Force }
 ```
+
+关键点：① 启动必须走 `Win32_Process.Create`（或 `UseShellExecute=$true`）——不继承句柄，`Start-Process` 系列全都会卡；② 日志重定向放在 .cmd 脚本内部（`> log 2>&1`），WMI 不直接传重定向；③ 启动与检查分两条命令跑，避免轮询期间命令"执行中"。
 
 ## 架构（改代码前先读这里）
 
@@ -57,7 +72,7 @@ for ($i = 0; $i -lt 30; $i++) {
 
 ## 产品红线
 
-- 剧情正文：自动路径永远是模型原始输出——代码与旁侧模型只做输入侧加工、记账与元信息，**绝不改写/补写正文**；显式改稿（用户手改 / 助手经 story_edit 且征得用户同意）走 rp-edited 分支条目，带「已改写」标记、原文可回滚（见 `docs/DESIGN-story-edit.md`）。
+- 剧情正文：**允许系统组件/旁侧模型修改正文**——2026-08-08 用户裁决移除「绝不改写/补写正文」红线（文章多次润色属常态），如生图管线向正文附加 `[image:slotId]` 占位符锚点、未来润色等均获授权。修改保留可追溯性：原文保留在会话树分支、可回滚（沿用 `docs/DESIGN-story-edit.md` 的 rp-edited 分支机制）；显式改稿（用户手改 / 助手经 story_edit 且征得用户同意）仍走原通道。
 - 用户原始世界书只读；agent 新写设定进 `.liyuan-lore/`，不改用户文件。
 - 发布流程：`packages/` 内 `npm-shrinkwrap.json` 由 `scripts/generate-coding-agent-shrinkwrap.mjs` 生成，改依赖后需重跑；每版本发布说明在 `docs/RELEASE-vX.Y.Z.md`。
 

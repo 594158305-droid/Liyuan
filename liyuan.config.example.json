@@ -1,5 +1,6 @@
 {
 	"_agentsExampleNote": "本文件可直接改名复制为 liyuan.config.json 使用。下面的 agents 段是自定义 agent 的示例（director 导演：只开只读与面板写入，写权限全部保守关闭）。不需要自定义 agent 时，删除整个 agents 段（以及本说明行）即可，不影响任何剧情功能。",
+	"_pluginsExampleNote": "生图插件能力包开关（DESIGN-draw §3.0）：{ \"draw-role\": { \"enabled\": false } }，默认全关。需要时按插件 id 打开，可带 settings 段。",
 	"card": "assets/cards/default_Qingwu.json",
 	"lorebooks": [],
 	"userName": "旅人",
@@ -12,6 +13,7 @@
 	"creationMode": "ask",
 	"importStripTags": [],
 	"greetingIndex": 0,
+	"plugins": {},
 	"agents": [
 		{
 			"id": "director",

@@ -30,6 +30,22 @@ export interface WardrobeCharacter {
 	outfits: Outfit[];
 	/** 默认穿着（无当前穿着状态时回退） */
 	defaultOutfit?: string;
+	/** 别名（检出用；正文含别名即算在场） */
+	aliases?: string[];
+	/** 角色类型（如 主角/配角/NPC） */
+	type?: string;
+	/** 角色级负面 tag（生图时并入 negativePrompt） */
+	negativeTags?: string;
+	/** Danbooru 角色 tag（如 hakurei_reimu） */
+	danbooruTag?: string;
+	/** 生图时是否并入 danbooruTag（缺省 true） */
+	useDanbooruTag?: boolean;
+	/** 隐藏：不出现在检出/候选 */
+	hidden?: boolean;
+	/** 该角色选中的自定义标签组 id（见 draw-role/tag-groups.ts） */
+	selectedGroupId?: string;
+	/** 可选角色 id（LWB 对齐；缺省用 name） */
+	id?: string;
 }
 
 export interface WardrobeFile {
@@ -91,6 +107,18 @@ export function loadWardrobe(cwd: string, cardPath: string): WardrobeFile {
 							appearanceTags: typeof co.appearanceTags === "string" ? co.appearanceTags : "",
 							outfits,
 							...(typeof co.defaultOutfit === "string" && co.defaultOutfit ? { defaultOutfit: co.defaultOutfit } : {}),
+							...(Array.isArray(co.aliases)
+								? {
+										aliases: co.aliases.filter((a): a is string => typeof a === "string" && a.trim() !== ""),
+									}
+								: {}),
+							...(typeof co.type === "string" && co.type ? { type: co.type } : {}),
+							...(typeof co.negativeTags === "string" && co.negativeTags ? { negativeTags: co.negativeTags } : {}),
+							...(typeof co.danbooruTag === "string" && co.danbooruTag ? { danbooruTag: co.danbooruTag } : {}),
+							...(typeof co.useDanbooruTag === "boolean" ? { useDanbooruTag: co.useDanbooruTag } : {}),
+							...(co.hidden === true ? { hidden: true } : {}),
+							...(typeof co.selectedGroupId === "string" && co.selectedGroupId ? { selectedGroupId: co.selectedGroupId } : {}),
+							...(typeof co.id === "string" && co.id ? { id: co.id } : {}),
 						};
 					})
 					.filter((c): c is WardrobeCharacter => c !== null)
@@ -113,11 +141,37 @@ export function newOutfitId(): string {
 
 // ---------- 增改删（返回新档案，调用方决定是否落盘） ----------
 
-export function upsertCharacter(wb: WardrobeFile, name: string): WardrobeFile {
+export interface UpsertCharacterFields {
+	aliases?: string[];
+	type?: string;
+	negativeTags?: string;
+	danbooruTag?: string;
+	useDanbooruTag?: boolean;
+	hidden?: boolean;
+	selectedGroupId?: string;
+	id?: string;
+}
+
+/** 建新角色（参数可选，带新字段时一并写入；已存在同名 → 原样返回） */
+export function upsertCharacter(wb: WardrobeFile, name: string, fields: UpsertCharacterFields = {}): WardrobeFile {
 	const n = name.trim();
 	if (!n) return wb;
 	if (wb.characters.some((c) => c.name === n)) return wb;
-	return { ...wb, characters: [...wb.characters, { name: n, appearanceTags: "", outfits: [], defaultOutfit: undefined }] };
+	const base: WardrobeCharacter = {
+		name: n,
+		appearanceTags: "",
+		outfits: [],
+		defaultOutfit: undefined,
+	};
+	if (Array.isArray(fields.aliases) && fields.aliases.length > 0) base.aliases = [...fields.aliases];
+	if (typeof fields.type === "string" && fields.type) base.type = fields.type;
+	if (typeof fields.negativeTags === "string" && fields.negativeTags) base.negativeTags = fields.negativeTags;
+	if (typeof fields.danbooruTag === "string" && fields.danbooruTag) base.danbooruTag = fields.danbooruTag;
+	if (typeof fields.useDanbooruTag === "boolean") base.useDanbooruTag = fields.useDanbooruTag;
+	if (fields.hidden === true) base.hidden = true;
+	if (typeof fields.selectedGroupId === "string" && fields.selectedGroupId) base.selectedGroupId = fields.selectedGroupId;
+	if (typeof fields.id === "string" && fields.id) base.id = fields.id;
+	return { ...wb, characters: [...wb.characters, base] };
 }
 
 export function removeCharacter(wb: WardrobeFile, name: string): WardrobeFile {

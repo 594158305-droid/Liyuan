@@ -73,6 +73,10 @@ import {
 	writeJsonWithBackup,
 } from "./rest.ts";
 import { parseCardFromSessionHead } from "./wire.ts";
+import { loadDrawConfig } from "../src/draw/config.ts";
+import { generateImage, enhanceImage } from "../src/draw/service.ts";
+import { DrawError } from "../src/draw/errors.ts";
+import { enabledPluginToolDefs, enabledPluginToolNames, initPlugins } from "../src/draw-plugins/registry.ts";
 
 /** 剧情会话桥：main.ts 提供，助手工具经此只读剧情面 / 提交白名单写操作 */
 export interface StoryBridge {
@@ -130,6 +134,17 @@ export interface StoryBridge {
 	 * lastRoleIndex 语义与 scriptEditMessage 一致：从分支末尾倒数第 N 条角色消息，0=最后一条。
 	 */
 	storyEdit(input: { lastRoleIndex: number; text: string }): Promise<{ ok: boolean; error?: string }>;
+	/**
+	 * 把生图结果嵌入最近一条剧情消息正文（rp-draft-op 补丁 + slot 登记）；返回 slotId 供后续引用。
+	 * Q15 裁决：draw_generate 默认嵌入；用户明确不要进正文时由工具传 embed:false 跳过。
+	 * opts.scene：结构化 tags 的 scene（助手画面描述）；opts.characters：在场角色名列表
+	 * （领域层经服装档案组装 characterPrompts 分栏；缺省无角色分栏）。
+	 */
+	embedStoryImage?(opts: { src: string; anchor?: string; scene?: string; characters?: string[] }): Promise<{
+		ok: boolean;
+		error?: string;
+		slotId?: string;
+	}>;
 }
 
 export interface AssistantModelSel {
@@ -245,6 +260,22 @@ const parseJsonObject = (raw: string): Record<string, unknown> | null => {
 	}
 };
 
+/** DrawError → 中文提示 */
+function drawErrorToChinese(e: unknown): string {
+	if (e instanceof DrawError) {
+		switch (e.code) {
+			case "auth": return "API Key 无效或未配置";
+			case "quota": return "Anlas 不足（额度用尽）";
+			case "busy": return "当前请求繁忙，请稍后重试";
+			case "timeout": return "请求超时";
+			case "network": return "网络错误";
+			case "parse": return "响应解析失败";
+			default: return e.message;
+		}
+	}
+	return e instanceof Error ? e.message : String(e);
+}
+
 // ---------- 助手工具面（白名单写 + 只读剧情面） ----------
 
 type AssistantUiSelect = (
@@ -307,8 +338,6 @@ export const STAGEHAND_TOOL_NAMES: string[] = [
 	"show_media",
 	"draw_generate",
 	"draw_enhance",
-	"wardrobe_list",
-	"wardrobe_update",
 	"lorebook_write",
 	"codex_create",
 	"codex_write",
@@ -316,6 +345,14 @@ export const STAGEHAND_TOOL_NAMES: string[] = [
 	"card_create",
 	"regex_manage",
 ];
+
+/**
+ * 能力包（插件）工具名：启用插件注册的额外工具。
+ * 插件默认关（config.plugins.<id>.enabled），未初始化/未启用时返回空数组。
+ */
+export function stagehandPluginToolNames(): string[] {
+	return enabledPluginToolNames();
+}
 
 function createStagehandTools(
 	cwd: string,
@@ -679,7 +716,16 @@ function createStagehandTools(
 				if (/^https?:\/\//i.test(params.source)) {
 					return text("show_media 只接本机文件路径；http(s) 链接直接在回复里给出即可。", true);
 				}
-				const abs = isAbsolute(params.source) ? params.source : join(cwd, params.source);
+				// 生图管线的 URL 形态（/cache/ /media/）→ 映射到实际目录；
+				// 必须先于 isAbsolute 判断（Windows 下 isAbsolute("/cache/x") 为 true，会误按根路径解析导致文件不存在）
+				let abs: string;
+				if (params.source.startsWith("/cache/")) {
+					abs = join(cwd, ".liyuan-cache", params.source.slice("/cache/".length));
+				} else if (params.source.startsWith("/media/")) {
+					abs = join(cwd, ".liyuan-media", params.source.slice("/media/".length));
+				} else {
+					abs = isAbsolute(params.source) ? params.source : join(cwd, params.source);
+				}
 				const contentKey = hooks.mediaContentKey(abs);
 				// 同内容已交付过（本回合）：不重复入库/推送，只回报已有结果
 				if (contentKey && hooks.wasMediaDelivered(contentKey)) {
@@ -706,6 +752,133 @@ function createStagehandTools(
 					],
 					details: { asstMedia: { src: r.src, kind: r.kind, ...(params.caption ? { caption: params.caption } : {}) } },
 				};
+			},
+		}),
+		defineTool({
+			name: "draw_generate",
+			label: "生成图片",
+			description:
+				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**生成后默认嵌入最近一条剧情消息正文**（图文并茂）；用户明确不要进正文时传 embed:false。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。tag 写法与构图规范见 skill novelai-draw。",
+			parameters: Type.Object({
+				prompt: Type.String({ description: "画面描述/场景构图（不含角色特征 tag）" }),
+				negativePrompt: Type.Optional(Type.String({ description: "整图负面 tag" })),
+				characters: Type.Optional(
+					Type.Array(
+						Type.String({ description: "在场角色名列表（自动套用服装档案外观+当前穿着 tag 组装角色特征；不传则 prompt 需含完整 tag，无角色分栏）" }),
+					),
+				),
+				embed: Type.Optional(Type.Boolean({ description: "是否嵌入最近一条剧情消息正文（默认 true）；用户明确表示不要进正文时传 false" })),
+				aspect: Type.Optional(
+					Type.Union([Type.Literal("portrait"), Type.Literal("landscape"), Type.Literal("square")], {
+						description: "画面比例，缺省不改尺寸",
+					}),
+				),
+				provider: Type.Optional(Type.String({ description: "provider id，缺省用配置默认" })),
+				preset: Type.Optional(Type.String({ description: "参数预设 id" })),
+				styleId: Type.Optional(Type.String({ description: "全局风格预设 id，缺省用默认风格" })),
+				params: Type.Optional(
+					Type.Object({
+						sampler: Type.Optional(Type.String()),
+						scheduler: Type.Optional(Type.String()),
+						steps: Type.Optional(Type.Number()),
+						scale: Type.Optional(Type.Number()),
+						width: Type.Optional(Type.Number()),
+						height: Type.Optional(Type.Number()),
+						seed: Type.Optional(Type.Number()),
+						ucPreset: Type.Optional(Type.Number()),
+						qualityToggle: Type.Optional(Type.Boolean()),
+						autoSmea: Type.Optional(Type.Boolean()),
+						cfgRescale: Type.Optional(Type.Number()),
+						varietyBoost: Type.Optional(Type.Boolean()),
+					}),
+				),
+			}),
+			async execute(_id, params) {
+				try {
+					const r = await generateImage(cwd, {
+						prompt: params.prompt,
+						negativePrompt: params.negativePrompt,
+						aspect: params.aspect,
+						providerId: params.provider,
+						presetId: params.preset,
+						styleId: params.styleId,
+						params: params.params,
+					});
+					// 剧情委托中：与 show_media 一致同步进中间对话流（asstMedia 供右栏显示）
+					if (isAssistantDelegateActive() && bridge.emitStoryMedia) {
+						bridge.emitStoryMedia({ src: r.src, kind: "image" });
+					}
+					const dual = isAssistantDelegateActive() ? "；已同步到剧情对话" : "";
+					// Q15 裁决：默认嵌入最近一条剧情消息正文（除非用户提示不嵌入）
+					if (params.embed !== false && bridge.embedStoryImage) {
+						const e = await bridge.embedStoryImage({
+							src: r.src,
+							scene: params.prompt,
+							characters: params.characters,
+						});
+						if (e.ok) {
+							return {
+								content: [
+									{
+										type: "text" as const,
+										text: `已生成图片（缓存态，保留约 3 天）：${r.src}；已嵌入最近一条剧情消息正文（${e.slotId}）${dual}。`,
+									},
+								],
+								details: { asstMedia: { src: r.src, kind: "image" as const, caption: "生图" } },
+							};
+						}
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `已生成图片（缓存态，保留约 3 天）：${r.src}${dual}。正文嵌入失败：${e.error ?? "未知原因"}（可在绘图面板手动操作）`,
+								},
+							],
+							details: { asstMedia: { src: r.src, kind: "image" as const, caption: "生图" } },
+						};
+					}
+					return {
+						content: [{ type: "text" as const, text: `已生成图片（缓存态，保留约 3 天）：${r.src}${dual}。` }],
+						details: { asstMedia: { src: r.src, kind: "image" as const, caption: "生图" } },
+					};
+				} catch (e) {
+					return text(drawErrorToChinese(e), true);
+				}
+			},
+		}),
+		defineTool({
+			name: "draw_enhance",
+			label: "图片后处理",
+			description:
+				"对已有图片后处理：redraw（换提示词重绘，默认强度 0.55）/ enhance（增强细节，默认 0.15）/ upscale（放大，默认 2x）/ inpaint（mask 局部重绘，mask 为白底黑区 base64，黑区为重绘区）。source 传图片路径（/cache/ 或 /media/ 开头）。",
+			parameters: Type.Object({
+				source: Type.String({ description: "图片路径（/cache/... 或 /media/...）" }),
+				op: Type.Union([Type.Literal("redraw"), Type.Literal("enhance"), Type.Literal("upscale"), Type.Literal("inpaint")]),
+				strength: Type.Optional(Type.Number({ description: "重绘/增强强度（redraw 默认 0.55 / enhance 默认 0.15）" })),
+				scaleBy: Type.Optional(Type.Number({ description: "放大倍数（upscale 默认 2）" })),
+				maskBase64: Type.Optional(Type.String({ description: "inpaint 局部重绘 mask（白底黑区 base64，黑区为重绘区）" })),
+			}),
+			async execute(_id, params) {
+				try {
+					const r = await enhanceImage(cwd, {
+						source: params.source,
+						op: params.op,
+						strength: params.strength,
+						scaleBy: params.scaleBy,
+						maskBase64: params.maskBase64,
+					});
+					// 剧情委托中：与 show_media 一致同步进中间对话流（asstMedia 供右栏显示）
+					if (isAssistantDelegateActive() && bridge.emitStoryMedia) {
+						bridge.emitStoryMedia({ src: r.src, kind: "image" });
+					}
+					const dual = isAssistantDelegateActive() ? "；已同步到剧情对话" : "";
+					return {
+						content: [{ type: "text" as const, text: `已完成${params.op}（缓存态）：${r.src}${dual}` }],
+						details: { asstMedia: { src: r.src, kind: "image" as const, caption: `${params.op} 结果` } },
+					};
+				} catch (e) {
+					return text(drawErrorToChinese(e), true);
+				}
 			},
 		}),
 		defineTool({
@@ -958,6 +1131,23 @@ tools.push(
 	),
 );
 
+	// 能力包工具（插件层）：已由 initPlugins 初始化（createAgentHost 流程内），按 config 启用的插件注册。
+	// 插件工具定义（PluginToolDef）与 defineTool 的 execute 签名一致（content/details/isError/terminate），
+	// 此处透传；参数经 TypeBox schema 校验后以 Record 交给插件纯函数。
+	for (const def of enabledPluginToolDefs()) {
+		tools.push(
+			defineTool({
+				name: def.name,
+				label: def.label,
+				description: def.description,
+				parameters: def.parameters,
+				async execute(_id, params) {
+					return def.execute(params as Record<string, unknown>) as never;
+				},
+			}),
+		);
+	}
+
 	// 自定义 agent 按配置裁剪工具面：只保留白名单内工具（缺省 undefined = 全量 = 内置助手现状）。
 	// 基础工具（return_answer / ask_user / 只读类）由配置方的 toolsAllow 里保证。
 	if (allowTools) {
@@ -1051,6 +1241,17 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 			? join(cwd, opts.sessionDirName)
 			: dir(cwd, "assistant");
 	mkdirSync(sessionDir, { recursive: true });
+
+	// 生图插件（能力包）初始化：必须在 createAgentSession（助手工具创建）之前完成——
+	// createStagehandTools 经 enabledPluginToolDefs() 读取模块级缓存，故 initPlugins 先跑。
+	// 失败（如插件依赖环检测抛错）捕获记 warning 不阻断服务启动，其余功能照常。
+	try {
+		await initPlugins(cwd, loadConfig(cwd));
+	} catch (err) {
+		console.warn(
+			`[liyuan] 生图插件初始化失败（插件工具未注册，其余功能不受影响）：${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 
 	let session: AgentSession;
 	let unsubscribe: (() => void) | undefined;

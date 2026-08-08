@@ -23,6 +23,7 @@ import {
 import type { WireActivity, WireChoice, WireMsg } from "../wire.ts";
 import { estimateTokens, formatTokenCount, type TurnSegment } from "../timeline.ts";
 import { HtmlFrame } from "./HtmlFrame.tsx";
+import { DrawSlotImage } from "./draw-slot-image.tsx";
 
 /** 一档卡皮肤：显示向规则 + 宏名（Task 7 由 App 注入） */
 export type SkinProp = SkinMacros;
@@ -31,6 +32,7 @@ import {
 	IconChevronRight,
 	IconCopy,
 	IconEdit,
+	IconImage,
 	IconPin,
 	IconRedo,
 	IconSpeaker,
@@ -242,7 +244,7 @@ export function RichContent({ text, skin }: { text: string; skin?: SkinProp | nu
 	const parts = splitRichContentParts(text, skin);
 	const first = parts[0];
 	if (parts.length === 1 && first.kind === "text") {
-		return <Paragraphs text={first.text} />;
+		return renderRichTextSegments(first.text);
 	}
 	return (
 		<>
@@ -250,11 +252,40 @@ export function RichContent({ text, skin }: { text: string; skin?: SkinProp | nu
 				if (p.kind === "status") return <StatusPanel key={i} tag={p.tag} body={p.body} />;
 				// 皮肤/正文内嵌 HTML：无痕 seamless；agent show_html 通道不经此路径
 				if (p.kind === "html") return <HtmlFrame key={i} html={p.html} scripts={p.scripts} seamless />;
-				if (p.kind === "text" && p.text.trim()) return <Paragraphs key={i} text={p.text} />;
+				if (p.kind === "text" && p.text.trim()) return renderRichTextSegments(p.text, i);
 				return null;
 			})}
 		</>
 	);
+}
+
+/**
+ * 正文纯文本段渲染：把 `[image:slotId]` 占位符切成 ReactNode 序列，
+ * 占位符段 → DrawSlotImage，其余 → Paragraphs。无占位符时零额外开销（fast path）。
+ */
+function renderRichTextSegments(text: string, keyBase = 0) {
+	if (!text.includes("[image:")) return <Paragraphs text={text} />;
+	// 诊断日志（正文嵌入链路）：命中占位符时打印
+	console.log("[draw-slot] 正文渲染命中占位符:", text.match(/\[image:[^\]]+\]/g));
+	const out: React.ReactNode[] = [];
+	let last = 0;
+	let m: RegExpExecArray | null;
+	const re = /\[image:([A-Za-z0-9-]+)\]/g;
+	re.lastIndex = 0;
+	let idx = 0;
+	while ((m = re.exec(text)) !== null) {
+		if (m.index > last) {
+			const before = text.slice(last, m.index);
+			if (before.trim()) out.push(<Paragraphs key={`${keyBase}-t${idx++}`} text={before} />);
+		}
+		out.push(<DrawSlotImage key={`${keyBase}-s${m[1]}`} slotId={m[1]} />);
+		last = re.lastIndex;
+	}
+	if (last < text.length) {
+		const after = text.slice(last);
+		if (after.trim()) out.push(<Paragraphs key={`${keyBase}-t${idx++}`} text={after} />);
+	}
+	return out.length > 0 ? <>{out}</> : null;
 }
 
 /**
@@ -584,6 +615,9 @@ export interface BubbleProps {
 	/** 为这段正文文生音 */
 	onTts?: (text: string) => void;
 	ttsBusy?: boolean;
+	/** 手动为这条消息配图（生图管线旋钮；REST /api/draw/pipeline/run） */
+	onIllustrate?: (text: string) => void;
+	illustrateBusy?: boolean;
 	/** 开场白切换（仅会话未开聊时） */
 	greetingSwitch?: { index: number; total: number; onPrev: () => void; onNext: () => void };
 	/** 角色回复变体（ST 箭头；与 greetingSwitch 可同时存在于不同消息） */
@@ -607,6 +641,8 @@ export function Bubble({
 	onStore,
 	onTts,
 	ttsBusy,
+	onIllustrate,
+	illustrateBusy,
 	greetingSwitch,
 	swipe,
 	edit,
@@ -776,7 +812,7 @@ export function Bubble({
 					)}
 					{/* 时间线态的工具步骤已内联在各自发生位置，不再末端重挂一份 */}
 					{!timeline && msg.activities && msg.activities.length > 0 && <ActivityBar activities={msg.activities} />}
-					{(onReroll || onEdit || onRewind || onDelete || onCopy || onStore || onTts || greetingSwitch || swipe) && (
+					{(onReroll || onEdit || onRewind || onDelete || onCopy || onStore || onTts || onIllustrate || greetingSwitch || swipe) && (
 						<div className="msg-actions">
 							{/* 开场白快速切换：不进详情页 */}
 							{greetingSwitch && (
@@ -876,6 +912,16 @@ export function Bubble({
 									title="文生音：为这段正文生成语音并显示播放器"
 								>
 									<IconSpeaker size={13} /> {ttsBusy ? "配音中…" : "配音"}
+								</button>
+							)}
+							{onIllustrate && (
+								<button
+									className="act"
+									disabled={illustrateBusy || !msg.text.trim()}
+									onClick={() => onIllustrate(msg.text)}
+									title="为这条消息生成配图（生图管线）"
+								>
+									<IconImage size={13} /> {illustrateBusy ? "配图中…" : "配图"}
 								</button>
 							)}
 						</div>

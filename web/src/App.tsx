@@ -343,6 +343,10 @@ export default function App() {
 	const [storeOpen, setStoreOpen] = useState(false);
 	const [storeDefaultName, setStoreDefaultName] = useState("");
 	const [ttsBusy, setTtsBusy] = useState(false);
+	/** 消息工具栏「配图」防重入（手动管线旋钮，对账裁决 #6） */
+	const [illustrateBusy, setIllustrateBusy] = useState(false);
+	/** 配图防重入同步锁（state 异步更新，快速连点会绕过 busy 判断——用 ref 挡） */
+	const illustrateLockRef = useRef(false);
 	/**
 	 * 欢迎区（学 ST）：嵌在聊天流内，不关顶栏/输入框。
 	 * 久未访问启动显示；点品牌强制打开；开会话/发消息后收起。
@@ -490,6 +494,26 @@ export default function App() {
 			}
 		},
 		[ttsBusy, pushToast],
+	);
+
+	/** 消息工具栏「配图」：手动触发生图管线（POST /api/draw/pipeline/run {text}） */
+	const doIllustrate = useCallback(
+		async (text: string) => {
+			const t = text.trim();
+			if (!t || illustrateLockRef.current) return;
+			illustrateLockRef.current = true;
+			setIllustrateBusy(true);
+			try {
+				await apiPost<{ ok: boolean; ran?: boolean; reason?: string }>("/api/draw/pipeline/run", { text: t });
+				pushToast("info", "配图任务已提交（约需 30–90 秒，完成后自动嵌入正文）");
+			} catch (err) {
+				pushToast("error", err instanceof Error ? err.message : String(err));
+			} finally {
+				illustrateLockRef.current = false;
+				setIllustrateBusy(false);
+			}
+		},
+		[pushToast],
 	);
 
 	const clearStream = () => {
@@ -666,6 +690,14 @@ export default function App() {
 
 	const onFrame = useCallback(
 		(frame: ServerFrame) => {
+			// 诊断日志（正文嵌入链路）：帧入口打印——确认前端收到什么帧
+			if (frame.type === "hello" || frame.type === "message") {
+				console.log(
+					"[ws] 帧",
+					frame.type,
+					frame.type === "hello" ? `messages=${frame.messages?.length ?? 0}` : `channel=${(frame as { message?: { channel?: string } }).message?.channel ?? ""}`,
+				);
+			}
 			// JS Runner 事件桥（M2）：每个 wire 帧先喂给 jsrunnerBus，再做现有分发
 			jsrunnerBus.onWireFrame(frame);
 			switch (frame.type) {
@@ -2076,6 +2108,10 @@ export default function App() {
 														: undefined
 												}
 												ttsBusy={ttsBusy}
+												onIllustrate={
+													!busy && !msgEdit && b.msg.channel === "narrative" ? doIllustrate : undefined
+												}
+												illustrateBusy={illustrateBusy}
 												greetingSwitch={
 													!busy &&
 													!msgEdit &&

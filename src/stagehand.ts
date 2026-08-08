@@ -57,7 +57,7 @@ export function buildStagehandPrompt({ config, skills }: StagehandPromptOptions)
 - 用户要求改稿（如「把上一轮写好一点/改一改」）时：先征得明确同意（必要时 ask_user），再用 story_edit 工具提交改后全文；改稿是显式操作，不可擅自为之。若他要的是新的发挥而非改原文，用 story_command 触发重新生成（/reroll）即可。
 - 剧情走向的正式决策发生在剧情对话里。用户在这里问剧情走向时，可以给场外分析与建议，但要说明这只是参考，定夺请回剧情对话进行。
 - 建面板：写入剧情侧展示区，不是叙事正文。
-- 交付图/音/视频：**必须 show_media**（入库 /media/、右栏可见；**剧情委托时同步中间对话**）。禁止只写本机路径就算完成。`,
+- 交付图/音/视频：**必须 show_media**（入库 /media/、右栏可见；**剧情委托时同步中间对话**）。禁止只写本机路径就算完成。（**draw_generate / draw_enhance 已自动交付，无需再调 show_media**）`,
 	);
 
 	sections.push(
@@ -86,10 +86,9 @@ export function buildStagehandPrompt({ config, skills }: StagehandPromptOptions)
 		`- codex_create / codex_write / codex_mount：建命名知识库 / 写条目 / 挂载到剧情（挂载后其条目并入剧情检索）。`,
 		`- card_create：在 assets/cards/ 建一张新角色卡（JSON），建好告诉用户去角色卡库打开，不自动切换。`,
 		`交付与沉淀：`,
-		`- **show_media（生图/录音后必调）**：source=本机文件路径。复制进项目媒体库、右栏可见；**剧情委托时同时推到中间剧情对话**。禁止只写路径或只 return_answer——用户看不到磁盘文件。`,
-		`- **draw_generate（生图首选）**：按剧情/用户要求生成图片。characters 传角色名会自动套用服装档案（外观 + 当前穿着 tag + 参考图）；prompt 写画面描述；aspect 选 portrait/landscape/square。生成后自动交付（含剧情委托同步），不用再手动 show_media。tag 写法与构图规范见 skill ` + "`novelai-draw`" + `。`,
+		`- **show_media（交付自行下载/生成的媒体）**：source=本机文件路径（也接受 /cache/ /media/ 前缀）。复制进项目媒体库、右栏可见；**剧情委托时同时推到中间剧情对话**。禁止只写路径或只 return_answer——用户看不到磁盘文件。**draw_generate / draw_enhance 已自动交付，不要对它们的输出再调 show_media**。`,
+		`- **draw_generate（生图）**：按需求生成图片。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag）；characters 传**在场角色名**（自动套服装档案 tag，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 整图负面；aspect 选 portrait/landscape/square。生成结果默认缓存态（约 3 天），需长期保存让用户在图库确认；**生成后自动交付（右栏可见、剧情委托同步中间对话），不要再调 show_media**。tag 写法与构图规范见 skill ` + "`novelai-draw`" + `。`,
 		`- **draw_enhance**：对已有图片后处理：redraw（换提示词重绘）/ upscale（放大 2x）/ enhance（增强细节）/ inpaint（mask 局部重绘）。`,
-		`- **wardrobe_list / wardrobe_update**：读/维护当前卡服装档案。剧情发生换装时主动更新（current_outfit 同时写账本，随世界线回档）；用户要求记录/修改服装时维护 outfit tag。`,
 		`- skill_save：把摸通的服务调用方法沉淀为技能笔记（同名保存即更新）。`,
 		`委托交回与协作：`,
 		`- **return_answer**：任务完成（或确认失败）后，把给剧情侧的结论交回去。剧情委托回合**办完必须调**；不要只写在聊天里就停。`,
@@ -105,8 +104,8 @@ export function buildStagehandPrompt({ config, skills }: StagehandPromptOptions)
 	sections.push(
 		`# 完成判据（何时 return_answer）
 你自己判断任务是否可交回，不要等用户催：
-- **可交回**：用户要的结果已产出（**图/音/视频必须已 show_media 交付**、配置已改、面板已写、诊断结论已形成），或已确认无法完成并写清原因。
-- **生图/媒体任务**：curl/脚本落盘成功 ≠ 完成。必须再 **show_media(source=绝对路径)**，看到工具返回「已交付」后才能 return_answer。
+- **可交回**：用户要的结果已产出（**图/音/视频必须已交付**——draw_generate 自动交付或 show_media 手动交付、配置已改、面板已写、诊断结论已形成），或已确认无法完成并写清原因。
+- **生图/媒体任务**：curl/脚本落盘成功 ≠ 完成。必须再 **show_media(source=绝对路径)**，看到工具返回「已交付」后才能 return_answer（**draw_generate 除外——它已自动交付**）。
 - **还不能交回**：还在探索、还缺关键参数、工具仍在失败重试——继续干，或 **ask_user** 问用户。
 - **卡住**：不要静默停住。调用 ask_user，说明卡点，给出 2～4 个可选项；系统会确保有「放弃并返回」。用户选放弃后你再 return_answer(abandoned)。
 
@@ -168,7 +167,7 @@ export function buildStagehandInjection(
 		lines.push(
 			`【委托回合 · 必读】本轮由剧情侧委托。请自己判断是否完成：`,
 			`- 做完 → **return_answer** 把结论交回剧情侧（不要只聊不交）。`,
-			`- **图/音/视频**：落盘后必须 **show_media(本机路径)**（png/mp3/mp4 等），才会进剧情对话与媒体库；禁止只写路径就交回。`,
+			`- **图/音/视频**：落盘后必须 **show_media(本机路径)**（png/mp3/mp4 等），才会进剧情对话与媒体库；禁止只写路径就交回（**draw_generate/draw_enhance 已自动交付，无需再调**）。`,
 			`- 卡住 / 缺信息 → **ask_user** 给选项（含「放弃并返回」），勿静默停住。`,
 			`- 用户放弃 → return_answer 并标明 abandoned。`,
 		);

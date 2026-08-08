@@ -1,0 +1,10 @@
+{
+	"id": "draw-role",
+	"name": "角色管理",
+	"version": "0.1.0",
+	"description": "服装档案、D 标签库、角色特征解析（一期：服装档案工具 + tag_search；特征解析/在场检出接口已就绪）",
+	"tools": ["wardrobe_list", "wardrobe_update", "tag_search"],
+	"panels": ["DrawRolePanel"],
+	"skills": [],
+	"requires": []
+}

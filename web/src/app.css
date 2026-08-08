@@ -1,4 +1,4 @@
-﻿/* ============================================================
+﻿﻿/* ============================================================
    梨园 · 白瓷朱砂(F4 + 二次质感加厚)
    命题:明亮白色;层次与戏文感加强,布局结构不动
    · 宣纸底微纹理 + 暖白浮层,投影更深一档
@@ -1673,6 +1673,53 @@ html[data-theme="dark"] .msg-md-code {
 	height: auto;
 	border-radius: var(--radius);
 	box-shadow: 0 12px 48px rgb(0 0 0 / 40%);
+}
+
+/* ── 占位符图片（插件 C draw-slot）：正文 [image:slotId] ── */
+.draw-slot-wrap {
+	position: relative;
+	display: inline-block;
+	margin: 4px 2px;
+	vertical-align: middle;
+}
+.draw-slot-wrap img.zoomable {
+	max-width: min(420px, 100%);
+	/* 版本切换后不同比例图片按自然比例显示（曾固定 max-height:320px 导致 portrait/异比例版本被压缩变形） */
+	max-height: none;
+	border-radius: var(--radius);
+	display: block;
+}
+.draw-slot-badge {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	padding: 1px 6px;
+	font-size: 11px;
+	line-height: 16px;
+	border-radius: 8px;
+	background: rgb(0 0 0 / 62%);
+	color: #ffe08a;
+	pointer-events: none;
+}
+.draw-slot-gone {
+	display: inline-block;
+	padding: 10px 14px;
+	margin: 4px 2px;
+	border-radius: var(--radius);
+	background: rgb(120 120 120 / 14%);
+	color: var(--muted, #888);
+	font-size: 12px;
+	border: 1px dashed rgb(120 120 120 / 40%);
+	vertical-align: middle;
+}
+.draw-slot-loading {
+	display: inline-block;
+	width: 140px;
+	height: 80px;
+	margin: 4px 2px;
+	border-radius: var(--radius);
+	background: rgb(120 120 120 / 10%);
+	vertical-align: middle;
 }
 
 @keyframes fade-in {
@@ -8175,4 +8222,422 @@ label.drawer-btn {
 
 .varman-edit .panel-row {
 	margin-bottom: 0;
+}
+/* ── D 标签搜索（插件 A draw-role，DrawPanel 内） ── */
+.draw-tags-result {
+	margin-top: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.draw-tag-row {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.draw-tag-name {
+	background: none;
+	border: none;
+	padding: 3px 0;
+	text-align: left;
+	color: var(--text);
+	cursor: pointer;
+	font-size: 13px;
+	line-height: 1.5;
+}
+.draw-tag-name:hover {
+	text-decoration: underline;
+}
+.draw-tag-full {
+	font-size: 12px;
+	color: var(--muted, #999);
+	padding: 4px 8px;
+	border-left: 2px solid var(--hairline);
+	margin-left: 4px;
+	word-break: break-all;
+	line-height: 1.6;
+}
+.draw-tag-meta {
+	margin-top: 8px;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	align-items: center;
+}
+
+/* ── 占位符图片操作条（插件 D draw-edit，draw-slot-image.tsx） ── */
+.draw-slot-wrap {
+	position: relative;
+}
+.draw-slot-actions {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	display: none;
+	gap: 2px;
+	background: rgb(15 12 10 / 82%);
+	border-radius: 8px;
+	padding: 2px;
+	z-index: 5;
+}
+.draw-slot-wrap:hover .draw-slot-actions {
+	display: flex;
+}
+.draw-slot-actions .act {
+	font-size: 11px;
+	line-height: 14px;
+	padding: 2px 5px;
+}
+.draw-tag-edit-textarea {
+	width: 100%;
+	min-height: 110px;
+	resize: vertical;
+	background: var(--surface);
+	color: var(--text);
+	border: 1px solid var(--hairline);
+	border-radius: 6px;
+	padding: 8px;
+	font: inherit;
+	font-size: 13px;
+}
+
+/* ── 画廊版本网格（gallery-section.tsx） ── */
+.upload-ver-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-top: 4px;
+}
+.upload-ver-thumb {
+	width: 46px;
+	height: 46px;
+	border-radius: 6px;
+	overflow: hidden;
+	border: 1px solid var(--hairline);
+	background: rgb(120 120 120 / 10%);
+	cursor: pointer;
+	padding: 0;
+}
+.upload-ver-thumb img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	display: block;
+}
+.upload-ver-thumb.is-discarded {
+	opacity: 0.35;
+	filter: grayscale(0.8);
+}
+.upload-ver-thumb.is-current {
+	border-color: var(--accent, #c8a06a);
+}
+.draw-slot-badge-inline {
+	margin-left: 4px;
+	padding: 0 4px;
+	font-size: 10px;
+	border-radius: 6px;
+	background: rgb(0 0 0 / 62%);
+	color: #ffe08a;
+}
+
+/* ── LWB 黑盒对齐（批次 1）：版本导航胶囊 + 编辑 TAG 分栏弹窗 + 瞬时提示 ── */
+.draw-ver-nav {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	margin-top: 2px;
+	font-size: 11px;
+	color: var(--text-soft);
+}
+.draw-ver-nav .act {
+	padding: 0 6px;
+	font-size: 12px;
+}
+.draw-ver-nav-idx {
+	min-width: 36px;
+	text-align: center;
+	line-height: 1;
+}
+.draw-tag-edit-dialog {
+	width: min(560px, 100%);
+}
+.draw-tag-edit-field {
+	display: block;
+}
+.draw-tag-edit-label {
+	display: block;
+	font-size: 12.5px;
+	color: var(--text-strong);
+	margin: 8px 0 4px;
+}
+.draw-tag-edit-role-ta {
+	min-height: 64px;
+}
+.draw-tag-edit-del {
+	display: inline-block;
+	margin-left: 8px;
+	padding: 0 6px;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--text-strong, inherit);
+	background: transparent;
+	border: 1px solid var(--hairline, #444);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.draw-tag-add-role {
+	margin-top: 10px;
+}
+.draw-tag-edit-err {
+	color: #e06060;
+	font-size: 12.5px;
+	margin-top: 6px;
+}
+.draw-notice {
+	position: fixed;
+	left: 50%;
+	transform: translateX(-50%);
+	bottom: 24px;
+	z-index: 200;
+	background: rgb(0 0 0 / 78%);
+	color: #fff;
+	font-size: 13px;
+	padding: 6px 14px;
+	border-radius: 8px;
+	pointer-events: none;
+}
+.upload-ver-cell {
+	position: relative;
+}
+.upload-ver-thumb.is-selected {
+	border-color: #3b82f6;
+	box-shadow: 0 0 0 1px #3b82f6;
+}
+.upload-ver-current-tag {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	text-align: center;
+	font-size: 9px;
+	line-height: 13px;
+	color: #ffe08a;
+	background: rgb(0 0 0 / 55%);
+	border-radius: 0 0 6px 6px;
+	pointer-events: none;
+}
+
+/* ============================================================
+   生图系统批次 2+3 前端样式（追加于 LWB 黑盒对齐样式之后，2026-08-08）
+   ============================================================ */
+
+/* ── 画廊头部操作区（gallery-section.tsx：保存所有 / 删除所有 / 刷新） ── */
+.gallery-head-acts {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+.gallery-head-acts .drawer-btn {
+	padding: 4px 10px;
+	font-size: 12px;
+	line-height: 1.4;
+	border-radius: 6px;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+/* ── 保存所有进度条（LWB saveAllGalleryImages 的 #nd-gallery-progress 对齐） ── */
+.draw-gallery-progress {
+	position: relative;
+	height: 18px;
+	border: 1px solid var(--hairline-strong);
+	border-radius: 9px;
+	background: var(--surface-dim);
+	overflow: hidden;
+	margin: 6px 0 10px;
+}
+.draw-gallery-progress-fill {
+	height: 100%;
+	background: linear-gradient(90deg, #d8b48a, #c8a06a);
+	border-radius: 9px;
+	transition: width 0.25s ease-out;
+}
+.draw-gallery-progress-text {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	font-size: 11px;
+	color: var(--text-strong);
+	line-height: 18px;
+}
+
+/* ── 槽位 busy 蒙层 + 转圈（draw-slot-image.tsx：蒙住图片区域而非只蒙操作条） ── */
+.draw-slot-busy-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 4;
+	display: grid;
+	place-items: center;
+	border-radius: var(--radius);
+	background: rgb(15 12 10 / 42%);
+	pointer-events: none;
+}
+.draw-slot-busy-overlay::after {
+	content: "";
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	border: 3px solid rgb(255 255 255 / 35%);
+	border-top-color: #fff;
+	animation: draw-spin 0.8s linear infinite;
+}
+@keyframes draw-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ── 失败态（draw-slot-image.tsx：⚠ 生成失败 + 保存并重试） ── */
+.draw-slot-failed {
+	display: inline-block;
+	padding: 10px 14px;
+	margin: 4px 2px;
+	border-radius: var(--radius);
+	background: rgb(224 96 96 / 12%);
+	color: #b04a3a;
+	font-size: 12px;
+	border: 1px dashed rgb(224 96 96 / 45%);
+	vertical-align: middle;
+	text-align: center;
+}
+.draw-slot-failed-msg {
+	display: block;
+	margin-bottom: 6px;
+	word-break: break-all;
+	line-height: 1.5;
+}
+.draw-slot-failed .act {
+	font-size: 12px;
+	padding: 2px 8px;
+}
+
+/* ── 失败徽标（gallery-section.tsx：slot 卡片 hasFailed 显示「生成失败」，警示色） ── */
+.draw-slot-badge-failed {
+	margin-left: 4px;
+	padding: 0 4px;
+	font-size: 10px;
+	border-radius: 6px;
+	background: rgb(224 96 96 / 18%);
+	color: #b04a3a;
+	border: 1px solid rgb(224 96 96 / 40%);
+}
+
+/* ── AI 微调弹窗扩展（draw-slot-image.tsx AiRefineModal，复用 inpaint-modal/dialog） ── */
+.draw-refine-dialog {
+	width: min(560px, 100%);
+}
+.draw-refine-preview {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	background: var(--surface-dim);
+	padding: 8px 10px;
+	max-height: 160px;
+	overflow: auto;
+}
+.draw-refine-seg {
+	display: flex;
+	gap: 8px;
+	font-size: 12.5px;
+	line-height: 1.5;
+}
+.draw-refine-seg-label {
+	flex: 0 0 auto;
+	min-width: 56px;
+	color: var(--text-faint);
+}
+.draw-refine-seg-val {
+	flex: 1;
+	min-width: 0;
+	color: var(--text);
+	word-break: break-all;
+}
+.draw-refine-field {
+	display: block;
+}
+.draw-refine-label {
+	display: block;
+	font-size: 12.5px;
+	color: var(--text-strong);
+	margin: 8px 0 4px;
+}
+.draw-refine-ta {
+	width: 100%;
+	min-height: 110px;
+	resize: vertical;
+	background: var(--surface);
+	color: var(--text);
+	border: 1px solid var(--hairline);
+	border-radius: 6px;
+	padding: 8px;
+	font: inherit;
+	font-size: 13px;
+}
+
+/* ── 增强/放大参数弹窗（gallery-section.tsx DrawEnhanceModal，复用 inpaint-modal/dialog） ── */
+.draw-enhance-dialog {
+	width: min(360px, 100%);
+}
+
+/* ── Lightbox 跨 slot 导航（gallery-section.tsx：« n/total » 胶囊 + 左右按钮） ── */
+.draw-lb-nav {
+	position: absolute;
+	top: 16px;
+	left: 50%;
+	transform: translateX(-50%);
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 10px;
+	border-radius: 999px;
+	background: rgb(0 0 0 / 55%);
+	z-index: 3;
+}
+.draw-lb-nav .act {
+	padding: 0 8px;
+	font-size: 15px;
+	line-height: 20px;
+	background: transparent;
+	color: #fff;
+	border: none;
+	cursor: pointer;
+}
+.draw-lb-nav .act:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+.draw-lb-idx {
+	min-width: 48px;
+	text-align: center;
+	font-size: 12px;
+	color: #ffe08a;
+	line-height: 1;
+}
+
+/* ── 角色特征扩展字段（wardrobe-section.tsx 批次 3：别名/类型/负面/Danbooru/隐藏/选中标签组） ── */
+.char-features {
+	border: 1px dashed var(--hairline-strong);
+	border-radius: var(--radius-s);
+	background: var(--surface-dim);
+	padding: 6px 10px 2px;
+	margin: 6px 0 4px;
+}
+.char-features .field-hint {
+	margin-top: 2px;
 }

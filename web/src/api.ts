@@ -135,7 +135,7 @@ export function apiGetCacheClearForPanel(panelId: string): void {
 		settings: ["/api/config"],
 		// 媒体列表挂在 GET /api/uploads 的 media 字段，无独立 /api/media
 		uploads: ["/api/uploads"],
-		draw: ["/api/draw/providers", "/api/wardrobe", "/api/uploads"],
+		draw: ["/api/draw/providers", "/api/draw/styles", "/api/wardrobe", "/api/draw/slots", "/api/draw/tags/search", "/api/draw/generate", "/api/draw/enhance", "/api/draw/characters/learn-candidates", "/api/draw/tag-groups", "/api/draw/tags/online-status", "/api/uploads"],
 		worldline: ["/api/worldline"],
 		agentmgr: ["/api/config", "/api/models", "/api/agent-tools"],
 	};
@@ -171,6 +171,7 @@ export function prefetchPanelApis(): void {
 		"/api/agent-profiles",
 		"/api/uploads",
 		"/api/draw/providers",
+		"/api/draw/styles",
 		"/api/wardrobe",
 	];
 	for (const p of paths) void apiGet(p).catch(() => {});

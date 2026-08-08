@@ -1,18 +1,20 @@
 /**
- * 绘画面板（生图系统 UI）：三段式
+ * 绘画面板（生图系统 UI）：底座版（分层设计见 docs/DESIGN-draw.md §2.6）
  * - API 管理：生图 provider 注册 / 测试连接 / 默认参数 / 参数预设 / autoConfirm
- * - 服装管理：当前卡角色的外观 tag 与服装档案、当前穿着（状态层）
- * - 画廊：.liyuan-media/ 出图网格 + 点击放大（简单 lightbox）
+ * - 风格预设：全局正/负前缀 tag 串的增删改查、设为默认
+ * - 服装管理 / 画廊已抽为独立组件（wardrobe-section.tsx / gallery-section.tsx），
+ *   供插件层挂载（依赖方向：插件 → 底座），底座面板暂不渲染，代码保留不删。
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPut, type UploadsResponse } from "../api.ts";
-import { attachmentUrl, toAttachmentView } from "../attachments.ts";
+import { useState } from "react";
+import { apiDelete, apiGet, apiPost, apiPut } from "../api.ts";
 import type { WorldState } from "../wire.ts";
-import { IconClose, IconEdit, IconPlus, IconRefresh, IconTrash, IconUploads } from "./icons.tsx";
+import { IconEdit, IconPlus, IconTrash } from "./icons.tsx";
 import { ConfirmButton, Field, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { WardrobeSection } from "./wardrobe-section.tsx";
+import { GallerySection } from "./gallery-section.tsx";
 
-// ---------- 类型（字段与 src/draw-config.ts、src/wardrobe.ts 一致） ----------
+// ---------- 类型（字段与 src/draw-config.ts 一致） ----------
 
 interface DrawParams {
 	sampler: string;
@@ -57,32 +59,18 @@ interface DrawProvidersResponse {
 	providers: DrawProvider[];
 }
 
-interface WardrobeOutfit {
+// ---------- 类型（全局风格预设，字段与 src/draw/config.ts styles 一致） ----------
+
+interface DrawStyleType {
 	id: string;
 	name: string;
-	tags: string;
-	referenceImage?: string;
-	notes?: string;
+	positivePrefix: string;
+	negativePrefix: string;
 }
 
-interface WardrobeCharacter {
-	name: string;
-	appearanceTags: string;
-	outfits: WardrobeOutfit[];
-	defaultOutfit?: string;
-}
-
-interface WardrobeFile {
-	format: "liyuan-wardrobe";
-	version: 1;
-	cardPath: string;
-	characters: WardrobeCharacter[];
-}
-
-interface WardrobeResponse {
-	ok: boolean;
-	card: string;
-	wardrobe: WardrobeFile;
+interface DrawStylesResponse {
+	styles: DrawStyleType[];
+	defaultStyleId: string;
 }
 
 // ---------- 常量 ----------
@@ -115,6 +103,9 @@ const clampNum = (raw: string, min: number, max: number, fallback: number): numb
 
 const clampInt = (raw: string, min: number, max: number, fallback: number): number =>
 	Math.round(clampNum(raw, min, max, fallback));
+
+/** 摘要截断：超长 tag 串折叠显示，悬停 title 看全文 */
+const clip = (s: string, max = 80): string => (s.length > max ? `${s.slice(0, max)}…` : s || "（空）");
 
 /** 下拉选择（当前值不在候选里时追加，保证回显） */
 function Sel({
@@ -513,6 +504,531 @@ function AddProviderForm({
 	);
 }
 
+// ---------- 全局风格预设（增删改查 + 设为默认） ----------
+
+function DrawStylesSection({
+	toast,
+}: {
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const { busy, run } = useAction(toast);
+	const styles = usePanelData(() => apiGet<DrawStylesResponse>("/api/draw/styles"), {
+		cacheKey: "/api/draw/styles",
+	});
+
+	const [editingId, setEditingId] = useState<string | null>(null);
+	const [adding, setAdding] = useState(false);
+	/** 编辑/新增共用表单草稿 */
+	const [draft, setDraft] = useState({ name: "", positivePrefix: "", negativePrefix: "" });
+
+	const defaultStyleId = styles.data?.defaultStyleId ?? "";
+
+	const startAdd = () => {
+		setDraft({ name: "", positivePrefix: "", negativePrefix: "" });
+		setEditingId(null);
+		setAdding(true);
+	};
+	const startEdit = (s: DrawStyleType) => {
+		setDraft({ name: s.name, positivePrefix: s.positivePrefix, negativePrefix: s.negativePrefix });
+		setEditingId(s.id);
+		setAdding(false);
+	};
+	const cancelForm = () => {
+		setEditingId(null);
+		setAdding(false);
+	};
+
+	const saveStyle = () =>
+		run(async () => {
+			if (!draft.name.trim()) throw new Error("名称不能为空");
+			const body = {
+				...(editingId ? { id: editingId } : {}),
+				name: draft.name.trim(),
+				positivePrefix: draft.positivePrefix,
+				negativePrefix: draft.negativePrefix,
+			};
+			await apiPost("/api/draw/styles", body);
+			cancelForm();
+			styles.reload();
+		}, editingId ? "风格预设已保存" : "风格预设已添加");
+
+	const setDefault = (id: string) =>
+		run(async () => {
+			await apiPut(`/api/draw/default-style?id=${encodeURIComponent(id)}`, {});
+			styles.reload();
+		}, "已设为默认风格");
+
+	const delStyle = (id: string) =>
+		run(async () => {
+			await apiDelete(`/api/draw/styles?id=${encodeURIComponent(id)}`);
+			if (editingId === id) setEditingId(null);
+			styles.reload();
+		}, "风格预设已删除");
+
+	const renderForm = () => (
+		<div className="codex-add-form">
+			<Field label="名称">
+				<input
+					className="panel-search"
+					value={draft.name}
+					onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+					placeholder="如：质量词风格"
+				/>
+			</Field>
+			<Field label="positivePrefix（正向质量词前缀）">
+				<textarea
+					className="panel-search ta"
+					rows={3}
+					value={draft.positivePrefix}
+					onChange={(e) => setDraft((d) => ({ ...d, positivePrefix: e.target.value }))}
+					placeholder="如：1.3::best quality, amazing quality, very aesthetic, highres::"
+				/>
+			</Field>
+			<Field label="negativePrefix（负面词前缀）">
+				<textarea
+					className="panel-search ta"
+					rows={3}
+					value={draft.negativePrefix}
+					onChange={(e) => setDraft((d) => ({ ...d, negativePrefix: e.target.value }))}
+					placeholder="如：lowres, worst quality, jpeg artifacts, ..."
+				/>
+			</Field>
+			<div className="panel-row">
+				<button type="button" className="drawer-btn save-btn" disabled={busy || !draft.name.trim()} onClick={() => void saveStyle()}>
+					{editingId ? "保存" : "添加"}
+				</button>
+				<button type="button" className="drawer-btn" disabled={busy} onClick={cancelForm}>
+					取消
+				</button>
+			</div>
+		</div>
+	);
+
+	return (
+		<section className="sp-section">
+			<div className="sp-section-head">
+				<h4>风格预设（{styles.data?.styles.length ?? 0}）</h4>
+				<button type="button" className="drawer-btn" disabled={busy || !!editingId} onClick={startAdd}>
+					<IconPlus size={13} /> 添加风格
+				</button>
+			</div>
+			<div className="field-hint">
+				全局正/负质量词前缀（与角色无关），生图时与角色特征（插件层）分属不同层级，仅作全局前缀合并。设为默认后未指定风格时生效。
+			</div>
+			<PanelStatus loading={styles.loading} error={styles.error} hasData={!!styles.data} />
+			{styles.data && (
+				<>
+					{adding && renderForm()}
+					{styles.data.styles.map((s) => {
+						const isDefault = s.id === defaultStyleId;
+						if (editingId === s.id) {
+							return <div key={s.id}>{renderForm()}</div>;
+						}
+						return (
+							<div key={s.id} className="provider-row">
+								<div className="provider-head">
+									<span className="provider-name">{s.name}</span>
+									{isDefault && <span className="chip chip-cap">默认</span>}
+								</div>
+								<div className="field-hint" title={s.positivePrefix}>
+									正向前缀：{clip(s.positivePrefix)}
+								</div>
+								<div className="field-hint" title={s.negativePrefix}>
+									负向前缀：{clip(s.negativePrefix)}
+								</div>
+								<div className="panel-row">
+									<button type="button" className="act" disabled={busy || isDefault} onClick={() => void setDefault(s.id)}>
+										设为默认
+									</button>
+									<button type="button" className="act" disabled={busy} onClick={() => startEdit(s)}>
+										<IconEdit size={12} /> 编辑
+									</button>
+									<ConfirmButton
+										className="act"
+										disabled={busy}
+										confirmText="确认删除"
+										title="删除风格预设"
+										onConfirm={() => void delStyle(s.id)}
+									>
+										<IconTrash size={12} />
+									</ConfirmButton>
+								</div>
+							</div>
+						);
+					})}
+					{styles.data.styles.length === 0 && !adding && (
+						<div className="sp-empty">还没有全局风格预设。点「添加风格」配置正/负质量词前缀。</div>
+					)}
+				</>
+			)}
+		</section>
+	);
+}
+
+// ---------- D 标签搜索（插件 A draw-role；角色库 7000+ 只读查询） ----------
+
+interface TagSearchHit {
+	name: string;
+	tags: string[];
+}
+
+interface TagSearchResponse {
+	characters: TagSearchHit[];
+	tags: { tag: string; count: number }[];
+}
+
+/** 悬停标题用的完整 tag 串（长列表压成一行） */
+const tagTitle = (tags: string[]): string => tags.join(", ");
+
+function DrawTagsSection({
+	toast,
+}: {
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const [query, setQuery] = useState("");
+	const [result, setResult] = useState<TagSearchResponse | null>(null);
+	const [expanded, setExpanded] = useState<string | null>(null);
+	const [searching, setSearching] = useState(false);
+
+	const doSearch = async () => {
+		const q = query.trim();
+		if (!q) {
+			toast("warning", "请输入角色名或关键词");
+			return;
+		}
+		setSearching(true);
+		try {
+			const r = await apiGet<TagSearchResponse>(`/api/draw/tags/search?q=${encodeURIComponent(q)}`);
+			setResult(r);
+			setExpanded(null);
+		} catch (e) {
+			toast("error", e instanceof Error ? e.message : String(e));
+		} finally {
+			setSearching(false);
+		}
+	};
+
+	// 行内展开：取该角色全部 tag（title 悬停已给全文，这里给可读列表）
+	const toggleExpand = async (name: string) => {
+		if (expanded === name) {
+			setExpanded(null);
+			return;
+		}
+		setExpanded(name);
+	};
+
+	return (
+		<section className="sp-section">
+			<div className="sp-section-head">
+				<h4>D 标签搜索</h4>
+				<span className="field-hint">7000+ Danbooru 角色（下划线格式）</span>
+			</div>
+			<div className="panel-row">
+				<input
+					className="panel-search"
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					onKeyDown={(e) => {
+						if (e.key === "Enter") void doSearch();
+					}}
+					placeholder="角色名或关键词，如 miku / 初音"
+				/>
+				<button type="button" className="act" disabled={searching} onClick={() => void doSearch()}>
+					搜索
+				</button>
+			</div>
+			{result && (
+				<div className="draw-tags-result">
+					{result.characters.length === 0 && result.tags.length === 0 && (
+						<div className="sp-empty">未找到匹配项，可尝试其他拼写。</div>
+					)}
+					{result.characters.map((c) => (
+						<div key={c.name} className="draw-tag-row">
+							<button
+								type="button"
+								className="draw-tag-name"
+								title={tagTitle(c.tags)}
+								onClick={() => void toggleExpand(c.name)}
+							>
+								{c.name}
+								<span className="field-hint"> · {c.tags.length} tags</span>
+							</button>
+							{expanded === c.name && (
+								<div className="draw-tag-full">{c.tags.length > 0 ? c.tags.join(", ") : "（无 tag）"}</div>
+							)}
+						</div>
+					))}
+					{result.tags.length > 0 && (
+						<div className="draw-tag-meta">
+							<span className="field-hint">相关标签：</span>
+							{result.tags.slice(0, 10).map((t) => (
+								<span key={t.tag} className="chip" title={`${t.tag} · ${t.count} 个角色`}>
+									{t.tag} × {t.count}
+								</span>
+							))}
+						</div>
+					)}
+				</div>
+			)}
+
+			<LearnCandidatesArea toast={toast} />
+			<TagGroupsArea toast={toast} />
+			<OnlineTagsArea toast={toast} />
+		</section>
+	);
+}
+
+// ---------- 待学习角色（二期：未知角色自动学习） ----------
+
+interface LearnCandidate {
+	name: string;
+	firstSeenAt: number;
+	source: "pipeline" | "manual";
+	status: "pending" | "learned" | "ignored";
+}
+
+function LearnCandidatesArea({
+	toast,
+}: {
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const candidates = usePanelData(() => apiGet<{ ok: boolean; candidates: LearnCandidate[] }>("/api/draw/characters/learn-candidates"), {
+		cacheKey: "/api/draw/characters/learn-candidates",
+	});
+	const { busy, run } = useAction(toast);
+
+	const pending = candidates.data?.candidates.filter((c) => c.status === "pending") ?? [];
+
+	const confirm = (name: string) =>
+		run(async () => {
+			await apiPost("/api/draw/characters/learn", { name });
+			candidates.reload();
+			toast("info", "已加入服装档案，可在服装管理补外观 tag");
+		});
+	const dismiss = (name: string) =>
+		run(async () => {
+			await apiDelete(`/api/draw/characters/learn?name=${encodeURIComponent(name)}`);
+			candidates.reload();
+		}, "已忽略");
+
+	return (
+		<div className="draw-learn-block">
+			<div className="field-hint" style={{ marginTop: 10 }}>
+				待学习角色（管线检出的未登记角色）：{pending.length === 0 ? "暂无" : `${pending.length} 个`}
+			</div>
+			{pending.length > 0 && (
+				<div className="draw-tag-meta">
+					{pending.map((c) => (
+						<span key={c.name} className="chip">
+							{c.name}
+							<span className="field-hint"> · {new Date(c.firstSeenAt).toLocaleString()}</span>
+							<button type="button" className="act" disabled={busy} onClick={() => void confirm(c.name)}>
+								确认
+							</button>
+							<button type="button" className="act" disabled={busy} onClick={() => void dismiss(c.name)}>
+								忽略
+							</button>
+						</span>
+					))}
+				</div>
+			)}
+		</div>
+	);
+}
+
+// ---------- 自定义标签组（二期） ----------
+
+interface TagGroup {
+	id: string;
+	name: string;
+	tags: string;
+	enabled: boolean;
+	createdAt: number;
+	/** 绑定的角色名（LWB characterId 语义：生图时仅该角色在场时追加；缺省 = 全局） */
+	characterId?: string;
+}
+
+function TagGroupsArea({
+	toast,
+}: {
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const groups = usePanelData(() => apiGet<{ ok: boolean; groups: TagGroup[] }>("/api/draw/tag-groups"), {
+		cacheKey: "/api/draw/tag-groups",
+	});
+	/** 角色名单（「绑定角色」下拉数据源：/api/wardrobe） */
+	const wardrobe = usePanelData(() => apiGet<{ ok: boolean; wardrobe: { characters: { name: string }[] } }>("/api/wardrobe"), {
+		cacheKey: "/api/wardrobe",
+	});
+	const characterNames = wardrobe.data?.wardrobe?.characters?.map((c) => c.name) ?? [];
+	const { busy, run } = useAction(toast);
+	const [name, setName] = useState("");
+	const [tags, setTags] = useState("");
+
+	const save = (id?: string) =>
+		run(
+			async () => {
+				if (!name.trim()) throw new Error("名称不能为空");
+				if (id) await apiPut("/api/draw/tag-groups", { id, name: name.trim(), tags });
+				else await apiPost("/api/draw/tag-groups", { name: name.trim(), tags });
+				setName("");
+				setTags("");
+				groups.reload();
+			},
+			id ? "标签组已保存" : "标签组已添加",
+		);
+
+	const del = (id: string) =>
+		run(async () => {
+			await apiDelete(`/api/draw/tag-groups?id=${encodeURIComponent(id)}`);
+			groups.reload();
+		}, "标签组已删除");
+
+	const toggle = (id: string, enabled: boolean) =>
+		run(async () => {
+			await apiPut("/api/draw/tag-groups/toggle", { id, enabled });
+			groups.reload();
+		});
+
+	/** 绑定角色（空串 = 解除绑定走全局；无 characterId 时 body 不传该字段） */
+	const bind = (g: TagGroup, characterId: string) =>
+		run(async () => {
+			const body: { id: string; name: string; tags: string; characterId?: string } = {
+				id: g.id,
+				name: g.name,
+				tags: g.tags,
+			};
+			if (characterId) body.characterId = characterId;
+			await apiPut("/api/draw/tag-groups", body);
+			groups.reload();
+		}, characterId ? `已绑定角色「${characterId}」` : "已解除绑定（全局）");
+
+	/** 设为全局当前组（PUT /api/draw/tag-groups/select） */
+	const setCurrent = (id: string) =>
+		run(async () => {
+			await apiPut("/api/draw/tag-groups/select", { id });
+			groups.reload();
+		}, "已设为全局当前组");
+
+	const exportGroups = () => {
+		const url = "/api/draw/tag-groups/export";
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = "liyuan-tag-groups.json";
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+	};
+
+	const importFile = (file: File) =>
+		run(async () => {
+			const text = await file.text();
+			const parsed = JSON.parse(text) as unknown;
+			const groupsArr = Array.isArray(parsed) ? parsed : (parsed as { groups?: unknown }).groups;
+			if (!Array.isArray(groupsArr)) throw new Error("文件不是标签组 JSON");
+			const r = await apiPost<{ imported: number }>("/api/draw/tag-groups/import", { groups: groupsArr });
+			toast("info", `已导入 ${r.imported} 个标签组`);
+			groups.reload();
+		});
+
+	return (
+		<div className="draw-tag-groups-block">
+			<div className="field-hint" style={{ marginTop: 10 }}>
+				自定义标签组（生图时自动追加；可绑定角色、设全局当前组）：
+			</div>
+			<div className="panel-row">
+				<input className="panel-search" value={name} onChange={(e) => setName(e.target.value)} placeholder="组名" style={{ maxWidth: 140 }} />
+				<input className="panel-search" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="tag 串（空格分隔）" />
+				<button type="button" className="act" disabled={busy || !name.trim()} onClick={() => void save()}>
+					添加
+				</button>
+			</div>
+			<div className="panel-row">
+				<button type="button" className="act" onClick={exportGroups}>
+					导出
+				</button>
+				<label className="act" style={{ cursor: "pointer" }}>
+					导入
+					<input
+						type="file"
+						accept=".json,application/json"
+						style={{ display: "none" }}
+						onChange={(e) => {
+							const f = e.target.files?.[0];
+							if (f) void importFile(f);
+							e.target.value = "";
+						}}
+					/>
+				</label>
+			</div>
+			{(groups.data?.groups ?? []).map((g) => (
+				<div key={g.id} className="draw-tag-row">
+					<span className="draw-tag-name" title={g.tags}>
+						{g.name}
+						<span className="field-hint"> · {g.tags || "（空）"}</span>
+						{g.characterId && <span className="chip">绑定：{g.characterId}</span>}
+					</span>
+					<div className="panel-row">
+						<Toggle checked={g.enabled} onChange={(v) => void toggle(g.id, v)} title={g.enabled ? "已启用" : "已停用"} />
+						<select
+							className="panel-search"
+							value={g.characterId ?? ""}
+							onChange={(e) => void bind(g, e.target.value)}
+							title="绑定角色：生图时仅该角色在场时自动追加该组 tag"
+							style={{ maxWidth: 150, marginBottom: 0 }}
+						>
+							<option value="">全局</option>
+							{characterNames.map((n) => (
+								<option key={n} value={n}>
+									{n}
+								</option>
+							))}
+						</select>
+						<button type="button" className="act" disabled={busy} onClick={() => void setCurrent(g.id)}>
+							设为当前组
+						</button>
+						<button type="button" className="act" disabled={busy} onClick={() => void del(g.id)}>
+							删除
+						</button>
+					</div>
+				</div>
+			))}
+		</div>
+	);
+}
+
+// ---------- 在线标签库（二期） ----------
+
+function OnlineTagsArea({
+	toast,
+}: {
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const status = usePanelData(() => apiGet<{ ok: boolean; status: { lastUpdatedAt: number | null; entries: number } | null }>("/api/draw/tags/online-status"), {
+		cacheKey: "/api/draw/tags/online-status",
+	});
+	const { busy, run } = useAction(toast);
+
+	const update = () =>
+		run(async () => {
+			const r = await apiPost<{ entries: number }>("/api/draw/tags/online-update", {});
+			toast("info", `在线标签库已更新（${r.entries} 条）`);
+			status.reload();
+		});
+
+	const st = status.data?.status;
+	return (
+		<div className="draw-online-block">
+			<div className="field-hint" style={{ marginTop: 10 }}>
+				在线标签库：{st ? `已更新（${new Date(st.lastUpdatedAt ?? 0).toLocaleString()} · ${st.entries} 条）` : "未更新（离线库 7000+ 角色可用）"}
+			</div>
+			<button type="button" className="act" disabled={busy} onClick={() => void update()}>
+				{busy ? "更新中…" : "更新在线标签库"}
+			</button>
+		</div>
+	);
+}
+
 // ---------- 主组件 ----------
 
 export function DrawPanel({
@@ -528,50 +1044,16 @@ export function DrawPanel({
 	const providers = usePanelData(() => apiGet<DrawProvidersResponse>("/api/draw/providers"), {
 		cacheKey: "/api/draw/providers",
 	});
-	const wardrobe = usePanelData(() => apiGet<WardrobeResponse>("/api/wardrobe"), { cacheKey: "/api/wardrobe" });
-	const media = usePanelData(() => apiGet<UploadsResponse>("/api/uploads"), { watchAgent: true, cacheKey: "/api/uploads" });
+	/** 插件开关：liyuan.config.json plugins.draw-role.enabled（默认关） */
+	const configData = usePanelData(() => apiGet<{ config?: { plugins?: Record<string, { enabled?: boolean }> } }>("/api/config"), {
+		cacheKey: "/api/config",
+	});
+	const roleEnabled = configData.data?.config?.plugins?.["draw-role"]?.enabled === true;
+	const editEnabled = configData.data?.config?.plugins?.["draw-edit"]?.enabled === true;
 
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [adding, setAdding] = useState(false);
 	const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
-	const [appearanceDrafts, setAppearanceDrafts] = useState<Record<string, string>>({});
-	const [outfitDrafts, setOutfitDrafts] = useState<Record<string, { name: string; tags: string }>>({});
-	const [newChar, setNewChar] = useState("");
-	/** 当前穿着（outfit id）：本地点击覆盖 + worldState 同步；null = 已清除 */
-	const [wornMap, setWornMap] = useState<Record<string, string | null>>({});
-	const [lightbox, setLightbox] = useState<string | null>(null);
-	const [refUploading, setRefUploading] = useState(false);
-	/** 后端不托管 .liyuan-wardrobe/refs/ 静态文件：本地上传后用 object URL 缓存做缩略图预览 */
-	const refBlobCache = useRef(new Map<string, string>());
-	const refTarget = useRef<{ c: WardrobeCharacter; o: WardrobeOutfit } | null>(null);
-	const refInputRef = useRef<HTMLInputElement>(null);
-
-	// 服装草稿：首次见到角色/服装时以其当前值初始化（表单改动只在用户输入时覆盖）
-	useEffect(() => {
-		const wb = wardrobe.data?.wardrobe;
-		if (!wb) return;
-		setAppearanceDrafts((m) => {
-			const next = { ...m };
-			for (const c of wb.characters) if (next[c.name] === undefined) next[c.name] = c.appearanceTags;
-			return next;
-		});
-		setOutfitDrafts((m) => {
-			const next = { ...m };
-			for (const c of wb.characters)
-				for (const o of c.outfits)
-					if (next[o.id] === undefined) next[o.id] = { name: o.name, tags: o.tags };
-			return next;
-		});
-	}, [wardrobe.data]);
-
-	// 当前穿着：worldState（账本）里的 outfit 同步进来
-	useEffect(() => {
-		const next: Record<string, string> = {};
-		for (const [name, c] of Object.entries(worldState?.characters ?? {})) {
-			if (c && typeof c.outfit === "string" && c.outfit) next[name] = c.outfit;
-		}
-		if (Object.keys(next).length > 0) setWornMap((m) => ({ ...m, ...next }));
-	}, [worldState]);
 
 	const defaultProvider = providers.data?.config.defaultProvider ?? "";
 	const defaultProviderName =
@@ -632,126 +1114,7 @@ export function DrawPanel({
 			providers.reload();
 		}, "provider 已添加");
 
-	// ---- 服装操作 ----
-
-	const persistWardrobe = async (next: WardrobeFile) => {
-		await apiPut("/api/wardrobe", next);
-		wardrobe.reload();
-	};
-
-	const addCharacter = (name: string) =>
-		run(async () => {
-			const wb = wardrobe.data?.wardrobe;
-			if (!wb) return;
-			if (wb.characters.some((c) => c.name === name)) throw new Error(`角色「${name}」已在档案中`);
-			await persistWardrobe({ ...wb, characters: [...wb.characters, { name, appearanceTags: "", outfits: [] }] });
-			setNewChar("");
-		}, `已建档「${name}」`);
-
-	const deleteCharacter = (name: string) =>
-		run(async () => {
-			const wb = wardrobe.data?.wardrobe;
-			if (!wb) return;
-			await persistWardrobe({ ...wb, characters: wb.characters.filter((c) => c.name !== name) });
-		}, `「${name}」已从档案删除`);
-
-	const saveAppearance = (c: WardrobeCharacter) =>
-		run(async () => {
-			const wb = wardrobe.data?.wardrobe;
-			if (!wb) return;
-			const tags = appearanceDrafts[c.name] ?? c.appearanceTags;
-			await persistWardrobe({
-				...wb,
-				characters: wb.characters.map((x) => (x.name === c.name ? { ...x, appearanceTags: tags } : x)),
-			});
-			setAppearanceDrafts((m) => ({ ...m, [c.name]: tags }));
-		}, `「${c.name}」外观已保存`);
-
-	const saveOutfit = (c: WardrobeCharacter, o: WardrobeOutfit) =>
-		run(async () => {
-			const wb = wardrobe.data?.wardrobe;
-			if (!wb) return;
-			const draft = outfitDrafts[o.id] ?? { name: o.name, tags: o.tags };
-			await persistWardrobe({
-				...wb,
-				characters: wb.characters.map((x) =>
-					x.name === c.name
-						? { ...x, outfits: x.outfits.map((y) => (y.id === o.id ? { ...y, name: draft.name, tags: draft.tags } : y)) }
-						: x,
-				),
-			});
-			setOutfitDrafts((m) => ({ ...m, [o.id]: draft }));
-		}, "服装已保存");
-
-	const addOutfit = (c: WardrobeCharacter) =>
-		run(async () => {
-			const wb = wardrobe.data?.wardrobe;
-			if (!wb) return;
-			await persistWardrobe({
-				...wb,
-				characters: wb.characters.map((x) =>
-					x.name === c.name ? { ...x, outfits: [...x.outfits, { id: newId(), name: "新服装", tags: "" }] } : x,
-				),
-			});
-		}, "已添加服装");
-
-	const deleteOutfit = (c: WardrobeCharacter, oid: string) =>
-		run(async () => {
-			const wb = wardrobe.data?.wardrobe;
-			if (!wb) return;
-			await persistWardrobe({
-				...wb,
-				characters: wb.characters.map((x) =>
-					x.name === c.name ? { ...x, outfits: x.outfits.filter((y) => y.id !== oid) } : x,
-				),
-			});
-		}, "服装已删除");
-
-	const setCurrent = (name: string, outfitId: string | null) =>
-		run(async () => {
-			await apiPost("/api/wardrobe/current", { character: name, outfitId });
-			setWornMap((m) => ({ ...m, [name]: outfitId }));
-		}, outfitId ? `「${name}」已设为当前穿着` : `「${name}」已清除当前穿着`);
-
-	/** 参考图上传：POST 原始字节到 /api/wardrobe/ref（与 PersonaPanel 头像上传同款） */
-	const uploadRef = async (file: File, c: WardrobeCharacter, o: WardrobeOutfit) => {
-		const card = wardrobe.data?.card ?? "";
-		setRefUploading(true);
-		try {
-			const res = await fetch(`/api/wardrobe/ref?card=${encodeURIComponent(card)}&name=${encodeURIComponent(file.name)}`, {
-				method: "POST",
-				headers: { "content-type": "application/octet-stream" },
-				body: file,
-			});
-			const data = (await res.json().catch(() => ({}))) as { error?: string; path?: string };
-			if (!res.ok || data.error) throw new Error(data.error || `上传失败（HTTP ${res.status}）`);
-			if (!data.path) throw new Error("上传未返回路径");
-			refBlobCache.current.set(data.path, URL.createObjectURL(file));
-			const wb = wardrobe.data?.wardrobe;
-			if (wb) {
-				await persistWardrobe({
-					...wb,
-					characters: wb.characters.map((x) =>
-						x.name === c.name
-							? { ...x, outfits: x.outfits.map((y) => (y.id === o.id ? { ...y, referenceImage: data.path } : y)) }
-							: x,
-					),
-				});
-			}
-			toast("info", "参考图已上传");
-		} catch (e) {
-			toast("error", e instanceof Error ? e.message : String(e));
-		} finally {
-			setRefUploading(false);
-		}
-	};
-
 	const editingProvider = providers.data?.providers.find((p) => p.id === editingId) ?? null;
-
-	const galleryList = useMemo(
-		() => (media.data?.media ?? []).filter((u) => toAttachmentView(u.file).image),
-		[media.data],
-	);
 
 	return (
 		<div className="panel-body">
@@ -856,218 +1219,19 @@ export function DrawPanel({
 				)}
 			</section>
 
-			{/* ════════ ② 服装管理 ════════ */}
-			<section className="sp-section">
-				<div className="sp-section-head">
-					<h4>服装管理（{wardrobe.data?.wardrobe.characters.length ?? 0} 角色）</h4>
-				</div>
-				<div className="field-hint">
-					按当前角色卡保存档案：{wardrobe.data?.card || "（读取中…）"}。设「当前穿着」写入本会话状态，随世界线回档。
-				</div>
-				<PanelStatus loading={wardrobe.loading} error={wardrobe.error} hasData={!!wardrobe.data} />
-				{wardrobe.data && (
-					<>
-						{charName && !wardrobe.data.wardrobe.characters.some((c) => c.name === charName) && (
-							<button type="button" className="drawer-btn dp-char-add" disabled={busy} onClick={() => void addCharacter(charName)}>
-								<IconPlus size={13} /> 建档当前角色「{charName}」
-							</button>
-						)}
-						<div className="char-add-row">
-							<input
-								className="panel-search"
-								value={newChar}
-								onChange={(e) => setNewChar(e.target.value)}
-								placeholder="新建角色名…"
-							/>
-							<button
-								type="button"
-								className="drawer-btn"
-								disabled={busy || !newChar.trim()}
-								onClick={() => void addCharacter(newChar.trim())}
-							>
-								新建角色
-							</button>
-						</div>
-						{wardrobe.data.wardrobe.characters.length === 0 && (
-							<div className="sp-empty">还没有建档角色。输入角色名新建，或点上方按钮建档当前角色。</div>
-						)}
-						{wardrobe.data.wardrobe.characters.map((c) => {
-							const wornId = wornMap[c.name] !== undefined ? wornMap[c.name] : c.defaultOutfit ?? null;
-							return (
-								<div key={c.name} className="char-card">
-									<div className="char-card-head">
-										<span className="char-card-name">{c.name}</span>
-										<span className="lore-meta">{c.outfits.length} 套服装</span>
-										<ConfirmButton
-											className="act"
-											disabled={busy}
-											confirmText="确认删除"
-											title="删除角色"
-											onConfirm={() => void deleteCharacter(c.name)}
-										>
-											<IconTrash size={12} />
-										</ConfirmButton>
-									</div>
-									<Field label="基础外观 tags（发型/瞳色/体型，生图时并入）">
-										<textarea
-											className="panel-search ta"
-											rows={2}
-											value={appearanceDrafts[c.name] ?? c.appearanceTags}
-											onChange={(e) => setAppearanceDrafts((m) => ({ ...m, [c.name]: e.target.value }))}
-										/>
-									</Field>
-									<div className="panel-row">
-										<button type="button" className="drawer-btn save-btn" disabled={busy} onClick={() => void saveAppearance(c)}>
-											保存外观
-										</button>
-										<button type="button" className="drawer-btn" disabled={busy} onClick={() => void setCurrent(c.name, null)}>
-											清除当前穿着
-										</button>
-									</div>
-									<div className="outfit-list">
-										{c.outfits.map((o) => {
-											const isCurrent = o.id === wornId;
-											const rurl = o.referenceImage ? refBlobCache.current.get(o.referenceImage) ?? null : null;
-											return (
-												<div key={o.id} className={`outfit-card ${isCurrent ? "current" : ""}`}>
-													<div className="outfit-head">
-														<span className="outfit-name">{o.name}</span>
-														{isCurrent && <span className="chip chip-cap">当前穿着</span>}
-														<div className="outfit-acts">
-															<button type="button" className="act" disabled={busy} onClick={() => void setCurrent(c.name, o.id)}>
-																设为当前穿着
-															</button>
-															<ConfirmButton
-																className="act"
-																disabled={busy}
-																confirmText="确认删除"
-																title="删除服装"
-																onConfirm={() => void deleteOutfit(c, o.id)}
-															>
-																<IconTrash size={12} />
-															</ConfirmButton>
-														</div>
-													</div>
-													<div className="outfit-body">
-														<div className="outfit-ref">
-															{rurl ? (
-																<img className="ref-thumb" src={rurl} alt={o.name} title="点击放大" onClick={() => setLightbox(rurl)} />
-															) : (
-																<div className="ref-thumb ref-thumb-empty" title="暂无参考图">
-																	参考图
-																</div>
-															)}
-															<button
-																type="button"
-																className="drawer-btn"
-																disabled={refUploading}
-																onClick={() => {
-																	refTarget.current = { c, o };
-																	refInputRef.current?.click();
-																}}
-															>
-																<IconUploads size={13} /> {refUploading ? "上传中…" : "上传参考图"}
-															</button>
-														</div>
-														<Field label="名称">
-															<input
-																className="panel-search"
-																value={outfitDrafts[o.id]?.name ?? o.name}
-																onChange={(e) =>
-																	setOutfitDrafts((m) => ({ ...m, [o.id]: { name: e.target.value, tags: m[o.id]?.tags ?? o.tags } }))
-																}
-															/>
-														</Field>
-														<Field label="tags（空格分隔，可带 n::tag:: 权重）">
-															<textarea
-																className="panel-search ta"
-																rows={2}
-																value={outfitDrafts[o.id]?.tags ?? o.tags}
-																onChange={(e) =>
-																	setOutfitDrafts((m) => ({ ...m, [o.id]: { name: m[o.id]?.name ?? o.name, tags: e.target.value } }))
-																}
-															/>
-														</Field>
-														<div className="panel-row">
-															<button type="button" className="drawer-btn save-btn" disabled={busy} onClick={() => void saveOutfit(c, o)}>
-																保存服装
-															</button>
-														</div>
-													</div>
-												</div>
-											);
-										})}
-										<button type="button" className="drawer-btn" disabled={busy} onClick={() => void addOutfit(c)}>
-											<IconPlus size={13} /> 添加服装
-										</button>
-									</div>
-								</div>
-							);
-						})}
-					</>
-				)}
-			</section>
+			{/* ════════ ② 风格预设 ════════ */}
+			<DrawStylesSection toast={toast} />
 
-			{/* ════════ ③ 画廊 ════════ */}
-			<section className="sp-section">
-				<div className="sp-section-head">
-					<h4>画廊（{galleryList.length}）</h4>
-					<button type="button" className="drawer-btn" onClick={media.reload}>
-						<IconRefresh size={13} /> 刷新
-					</button>
-				</div>
-				<div className="field-hint">本地出图（.liyuan-media/）：AI 生图/展示后落盘的图片，点图放大查看。</div>
-				<PanelStatus loading={media.loading} error={media.error} hasData={!!media.data} />
-				{media.data && galleryList.length === 0 && (
-					<div className="sp-empty">还没有出图。在对话里让 AI 生成或展示图片后，会出现在这里。</div>
-				)}
-				{galleryList.length > 0 && (
-					<div className="upload-grid">
-						{galleryList.map((u) => {
-							const view = toAttachmentView(u.file);
-							const src = attachmentUrl(view);
-							return (
-								<div key={u.file} className="upload-cell">
-									<button type="button" className="upload-cell-btn" onClick={() => setLightbox(src)} title="点击放大">
-										<img src={src} alt={view.label} loading="lazy" />
-									</button>
-									<div className="upload-cell-name" title={u.file}>
-										{view.label}
-									</div>
-								</div>
-							);
-						})}
-					</div>
-				)}
-			</section>
-
-			<input
-				ref={refInputRef}
-				type="file"
-				accept="image/*"
-				hidden
-				onChange={(e) => {
-					const file = e.target.files?.[0];
-					const t = refTarget.current;
-					if (file && t) void uploadRef(file, t.c, t.o);
-					e.target.value = "";
-				}}
-			/>
-
-			{lightbox && (
-				<div className="lightbox" role="dialog" aria-modal="true" aria-label="图片预览" onClick={() => setLightbox(null)}>
-					<button
-						type="button"
-						className="icon-btn lightbox-x"
-						title="关闭"
-						aria-label="关闭预览"
-						onClick={() => setLightbox(null)}
-					>
-						<IconClose size={20} />
-					</button>
-					<img src={lightbox} alt="预览" />
-				</div>
+			{/* ════════ ③ 插件 A draw-role（config.plugins.draw-role.enabled 开启后渲染）════════ */}
+			{roleEnabled && (
+				<>
+					<WardrobeSection toast={toast} charName={charName} worldState={worldState} />
+					<DrawTagsSection toast={toast} />
+				</>
 			)}
+
+			{/* ════════ ④ 插件 D draw-edit（config.plugins.draw-edit.enabled 开启后渲染画廊）════════ */}
+			{editEnabled && <GallerySection />}
 		</div>
 	);
 }

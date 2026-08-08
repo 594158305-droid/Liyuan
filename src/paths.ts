@@ -59,6 +59,8 @@ export const DIRS = {
 	audio: ".liyuan-audio",
 	skills: ".liyuan-skills",
 	uploads: ".liyuan-uploads",
+	/** 角色衣橱档案 */
+	wardrobe: ".liyuan-wardrobe",
 	worldline: ".liyuan-worldline",
 	/** 内置向量记忆（正文库 / 外部资料库） */
 	memory: ".liyuan-memory",
@@ -75,6 +77,7 @@ const LEGACY_DIRS: Record<keyof typeof DIRS, string> = {
 	audio: ".rp-audio",
 	skills: ".rp-skills",
 	uploads: ".rp-uploads",
+	wardrobe: ".rp-wardrobe", // 从未存在过（2026-08 新增），迁移恒空转
 	worldline: ".rp-worldline",
 	memory: ".rp-memory", // 未使用过；占位
 };

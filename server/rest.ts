@@ -12,6 +12,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { randomBytes } from "node:crypto";
 
 import {
 	EMPTY_AGENT_CONFIG,
@@ -149,6 +150,58 @@ import { listSkills, saveSkill } from "../src/skills.ts";
 import { DEFAULT_CONFIG, type AgentBridgePermissions, type AgentConfig, type LorebookEntry, type RpConfig } from "../src/types.ts";
 import { readJsonFile } from "../src/jsonio.ts";
 import { formatBytes, listMedia, listUploads, saveUpload } from "../src/uploads.ts";
+import { loadDrawConfig, newProviderId, normalizeDrawProvider, saveDrawConfig } from "../src/draw/config.ts";
+import { testNovelAiConnection } from "../src/draw/novelai.ts";
+import { generateImage, enhanceImage } from "../src/draw/service.ts";
+import { DrawError } from "../src/draw/errors.ts";
+import { EXTDATA_SCOPES, getExtData, putExtData } from "../src/extdata.ts";
+import { loadWardrobe, saveReferenceImage, saveWardrobe, upsertCharacter, type WardrobeFile } from "../src/wardrobe.ts";
+import {
+	appendVersion,
+	cleanupExpired,
+	deleteAllSlots,
+	deleteSlot,
+	extractSlotIds,
+	flushSlotStorePending,
+	getSlotInfo,
+	listSlotSummaries,
+	loadSlotStore,
+	saveAllSlots,
+	saveSlot,
+	saveSlotStoreNow,
+	scanMediaDisk,
+	setSelectedVersionIndex,
+	updateVersionTags,
+} from "../src/draw-plugins/draw-slot/slot-store.ts";
+import { detectPresentCharacters, detectPresentCharactersWithAliases } from "../src/draw-plugins/draw-role/character-detect.ts";
+import { resolveCharacterTags } from "../src/draw-plugins/draw-role/resolver.ts";
+import {
+	confirmLearnCharacter,
+	dismissLearnCandidate,
+	listLearnCandidates,
+	recordUnknownCharacters,
+} from "../src/draw-plugins/draw-role/learn-candidates.ts";
+import {
+	deleteTagGroup,
+	exportTagGroups,
+	getEnabledGroupTags,
+	importTagGroups,
+	loadTagGroups,
+	saveTagGroup,
+	setGlobalSelectedGroup,
+	setTagGroupEnabled,
+	type TagGroup,
+} from "../src/draw-plugins/draw-role/tag-groups.ts";
+import {
+	getOnlineTagDbStatus,
+	searchCharacters,
+	searchTags,
+	searchTagsWithOnline,
+	updateOnlineTagDb,
+} from "../src/draw-plugins/draw-role/tagdb.ts";
+import { defaultPipelineDeps, getPlannerCaller } from "../src/draw-plugins/draw-pipeline/index.ts";
+import { runPipeline } from "../src/draw-plugins/draw-pipeline/pipeline.ts";
+import { buildRefineMessages, decomposeTags, extractRefinedScene } from "../src/draw-plugins/draw-edit/prompt-refine.ts";
 
 // ---------- 宿主接口（由 main.ts 实现；纯平面类型，pi 止步于 main） ----------
 
@@ -284,6 +337,21 @@ export interface RestHost {
 	searchSessions(q: string): Promise<SessionSearchHit[]>;
 	/** 世界状态用户主权编辑（applyPatch 语义，落盘+ await statesync） */
 	applyStatePatch(patch: Record<string, unknown>): Promise<{ applied: string[]; warnings: string[] }>;
+	/** 世界状态只读（当前分支账本；与 applyStatePatch 同源；未就绪返回 null） */
+	worldState(): import("../src/types.ts").WorldState | null;
+	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮）；无宿主能力时缺省（路由回退纯管线结果） */
+	manualPipelineRun?(text: string): Promise<{
+		ok: boolean;
+		error?: string;
+		slots?: { slotId: string; src: string; index: number }[];
+		warnings?: string[];
+		embedded?: boolean;
+	}>;
+	/**
+	 * 从当前分支全部消息正文剥离指定 slotId 的 [image:slotId] 占位符并保存（删除所有图时用）；
+	 * 返回实际改动条数
+	 */
+	stripStoryPlaceholders?(slotIds: string[]): Promise<{ stripped: number; errors?: string[] }>;
 	notify(level: "info" | "warning" | "error", text: string): void;
 	/** 世界线时间线视图（会话树 rp-save + 旁路 meta） */
 	worldlineView(): import("../src/worldline.ts").WorldlineView;
@@ -595,6 +663,7 @@ const BRIDGE_PERM_KEYS = [
 	"emitMedia",
 	"refreshMaterials",
 	"mountCodex",
+	"embedStoryImage",
 ] as const;
 
 /**
@@ -621,6 +690,7 @@ export function normalizeAgents(input: unknown): AgentConfig[] {
 			emitMedia: bridge.emitMedia === true,
 			refreshMaterials: bridge.refreshMaterials === true,
 			mountCodex: bridge.mountCodex === true,
+			embedStoryImage: bridge.embedStoryImage === true,
 		};
 		const m = a.model;
 		const model =
@@ -767,6 +837,7 @@ const CONFIG_EDITABLE = new Set([
 	"creationMode",
 	"assistantModel",
 	"agents",
+	"plugins",
 ]);
 
 export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown>): RpConfig {
@@ -4173,6 +4244,786 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 			}
 
+			// ---- 生图配置（liyuan.draw.json：provider 注册表 + 参数预设 + 全局风格） ----
+			case "GET /api/extdata": {
+				const scope = (query.get("scope") ?? "").trim();
+				const key = (query.get("key") ?? "").trim();
+				if (!(EXTDATA_SCOPES as readonly string[]).includes(scope)) throw new Error("非法 extdata 作用域");
+				if (!key) throw new Error("缺少 key");
+				sendJson(res, 200, { ok: true, value: getExtData(host.cwd, scope as never, key) });
+				return true;
+			}
+			case "PUT /api/extdata": {
+				if (refuseWhileStreaming()) return true;
+				const scope = (query.get("scope") ?? "").trim();
+				const key = (query.get("key") ?? "").trim();
+				if (!(EXTDATA_SCOPES as readonly string[]).includes(scope)) throw new Error("非法 extdata 作用域");
+				if (!key) throw new Error("缺少 key");
+				const body = JSON.parse(await readBody(req)) as { value?: unknown };
+				putExtData(host.cwd, scope as never, key, body.value);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "GET /api/draw/providers": {
+				const cfg = loadDrawConfig(host.cwd);
+				// 返回结构与前端 DrawProvidersResponse 契约一致：{ ok, config, providers }
+				// （styles/defaultStyleId 由独立接口 /api/draw/styles 提供）
+				sendJson(res, 200, {
+					ok: true,
+					config: { version: cfg.version, defaultProvider: cfg.defaultProvider, autoConfirm: cfg.autoConfirm },
+					providers: cfg.providers,
+				});
+				return true;
+			}
+			case "POST /api/draw/providers": {
+				if (refuseWhileStreaming()) return true;
+				const raw = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				// 新增（未带 id）时先生成 id：normalize 对无 id 的 provider 返回 null（契约语义）
+				if (typeof raw.id !== "string" || !raw.id.trim()) raw.id = newProviderId();
+				const provider = normalizeDrawProvider(raw);
+				if (!provider) throw new Error("provider 数据无效");
+				const cfg = loadDrawConfig(host.cwd);
+				const idx = cfg.providers.findIndex((p) => p.id === provider.id);
+				if (idx >= 0) cfg.providers[idx] = provider;
+				else cfg.providers.push(provider);
+				if (!cfg.defaultProvider) cfg.defaultProvider = provider.id;
+				saveDrawConfig(host.cwd, cfg);
+				sendJson(res, 200, { ok: true, providers: cfg.providers });
+				return true;
+			}
+			case "DELETE /api/draw/providers": {
+				if (refuseWhileStreaming()) return true;
+				const id = (query.get("id") ?? "").trim();
+				if (!id) throw new Error("缺少 id");
+				const cfg = loadDrawConfig(host.cwd);
+				const removed = cfg.providers.some((p) => p.id === id);
+				cfg.providers = cfg.providers.filter((p) => p.id !== id);
+				// 被删的是默认 provider：回退第一个 enabled
+				if (removed && cfg.defaultProvider === id) {
+					cfg.defaultProvider = cfg.providers.find((p) => p.enabled)?.id ?? "";
+				}
+				saveDrawConfig(host.cwd, cfg);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "PUT /api/draw/default": {
+				if (refuseWhileStreaming()) return true;
+				const id = (query.get("id") ?? "").trim();
+				if (!id) throw new Error("缺少 id");
+				const cfg = loadDrawConfig(host.cwd);
+				if (!cfg.providers.some((p) => p.id === id)) throw new Error("provider 不存在");
+				cfg.defaultProvider = id;
+				saveDrawConfig(host.cwd, cfg);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/draw/test": {
+				const body = JSON.parse(await readBody(req)) as { id?: string; apiKey?: string; baseUrl?: string };
+				let apiKey = "";
+				let baseUrl: string | undefined;
+				const id = (body.id ?? "").trim();
+				if (id) {
+					const cfg = loadDrawConfig(host.cwd);
+					const p = cfg.providers.find((x) => x.id === id);
+					if (!p) throw new Error("provider 不存在");
+					if (p.type !== "novelai") throw new Error("该后端尚未实现（预留）");
+					apiKey = p.apiKey;
+					baseUrl = p.baseUrl || undefined;
+				} else {
+					apiKey = (body.apiKey ?? "").trim();
+					baseUrl = body.baseUrl?.trim() || undefined;
+				}
+				if (!apiKey) throw new Error("缺少 apiKey");
+				try {
+					await testNovelAiConnection({ apiKey, baseUrl });
+				} catch (e) {
+					throw new Error(drawErrorZh(e));
+				}
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "GET /api/draw/styles": {
+				const cfg = loadDrawConfig(host.cwd);
+				sendJson(res, 200, { styles: cfg.styles, defaultStyleId: cfg.defaultStyleId });
+				return true;
+			}
+			case "POST /api/draw/styles": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					id?: string;
+					name?: string;
+					positivePrefix?: string;
+					negativePrefix?: string;
+				};
+				const name = (body.name ?? "").trim();
+				if (!name) throw new Error("缺少风格名 name");
+				const cfg = loadDrawConfig(host.cwd);
+				const styles = [...cfg.styles];
+				const id = (body.id ?? "").trim();
+				const idx = id ? styles.findIndex((s) => s.id === id) : -1;
+				if (idx >= 0) {
+					// 同名 id：更新既有风格
+					styles[idx] = {
+						...styles[idx],
+						name,
+						positivePrefix: body.positivePrefix ?? "",
+						negativePrefix: body.negativePrefix ?? "",
+					};
+				} else {
+					// 新增（无 id 或 id 不存在则生成新 id）
+					styles.push({
+						id: id || randomBytes(4).toString("hex"),
+						name,
+						positivePrefix: body.positivePrefix ?? "",
+						negativePrefix: body.negativePrefix ?? "",
+					});
+				}
+				const defaultStyleId = cfg.defaultStyleId || styles[0]?.id || "";
+				saveDrawConfig(host.cwd, { ...cfg, styles, defaultStyleId });
+				sendJson(res, 200, { ok: true, styles, defaultStyleId });
+				return true;
+			}
+			case "DELETE /api/draw/styles": {
+				if (refuseWhileStreaming()) return true;
+				const id = (query.get("id") ?? "").trim();
+				if (!id) throw new Error("缺少 id");
+				const cfg = loadDrawConfig(host.cwd);
+				const styles = cfg.styles.filter((s) => s.id !== id);
+				// 删的是默认风格：回退第一套（无则空串）
+				const defaultStyleId = cfg.defaultStyleId === id ? (styles[0]?.id ?? "") : cfg.defaultStyleId;
+				saveDrawConfig(host.cwd, { ...cfg, styles, defaultStyleId });
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "PUT /api/draw/default-style": {
+				if (refuseWhileStreaming()) return true;
+				const id = (query.get("id") ?? "").trim();
+				if (!id) throw new Error("缺少 id");
+				const cfg = loadDrawConfig(host.cwd);
+				if (!cfg.styles.some((s) => s.id === id)) throw new Error("风格不存在");
+				saveDrawConfig(host.cwd, { ...cfg, defaultStyleId: id });
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+
+			// ---- 服装档案（.liyuan-wardrobe/；当前穿着经 /wardrobe/current 写账本 CharacterState.outfit） ----
+			case "GET /api/wardrobe": {
+				// 缺省用当前卡（RestHost 未暴露 card 字段，与其余卡路由一致从 config.card 取）
+				const card = (query.get("card") ?? "").trim() || (loadConfig(host.cwd).card ?? "").trim();
+				if (!card) throw new Error("缺少 card");
+				const wb = loadWardrobe(host.cwd, card);
+				// 返回结构与前端 WardrobeResponse 契约一致：{ ok, card, wardrobe }
+				sendJson(res, 200, { ok: true, card, wardrobe: wb });
+				return true;
+			}
+			case "PUT /api/wardrobe": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as WardrobeFile;
+				if (!(body.cardPath ?? "").trim()) throw new Error("缺少 cardPath");
+				saveWardrobe(host.cwd, body);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/wardrobe/current": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { character?: string; outfitId?: string };
+				const character = (body.character ?? "").trim();
+				const outfitId = (body.outfitId ?? "").trim();
+				if (!character) throw new Error("缺少 character");
+				if (!outfitId) throw new Error("缺少 outfitId");
+				const card = (loadConfig(host.cwd).card ?? "").trim();
+				if (!card) throw new Error("缺少 card（当前未配置角色卡）");
+				// 账本层：applyPatch 已支持 outfit 字段（src/state.ts characters 分支），随世界线回档
+				const r = await host.applyStatePatch({ characters: { [character]: { outfit: outfitId } } });
+				// 定义层：保证该角色存在于服装档案（upsert 后落盘，幂等）
+				const wb = upsertCharacter(loadWardrobe(host.cwd, card), character);
+				saveWardrobe(host.cwd, wb);
+				sendJson(res, 200, { ok: true, applied: r.applied, warnings: r.warnings });
+				return true;
+			}
+			case "POST /api/wardrobe/ref": {
+				if (refuseWhileStreaming()) return true;
+				const card = (query.get("card") ?? "").trim();
+				const name = (query.get("name") ?? "").trim();
+				if (!card) throw new Error("缺少 card");
+				if (!name) throw new Error("缺少 name");
+				const m = /\.([a-z0-9]+)$/i.exec(name);
+				const ext = `.${m ? m[1].toLowerCase() : ""}`;
+				if (![".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"].includes(ext)) {
+					throw new Error("不支持的图片格式");
+				}
+				const data = await readBodyRaw(req, MAX_UPLOAD);
+				if (data.length === 0) throw new Error("文件内容为空");
+				const path = saveReferenceImage(host.cwd, card, data, ext);
+				sendJson(res, 200, { ok: true, path });
+				return true;
+			}
+
+			// ---- 图像存储映射（插件 C draw-slot；占位符 [image:slotId] 进正文） ----
+			// 常驻注册说明：路由本身无副作用（插件关时映射文件不存在 → 返回空数据），
+			// 不依赖插件 init；保存/删除/清理的操作对象是 slot-store 文件与 cache/media 文件，
+			// 与插件开关解耦（渲染层见 web/src/components/draw-slot-image.tsx）。
+			case "GET /api/draw/slots": {
+				const slotId = (query.get("slotId") ?? "").trim();
+				if (slotId) {
+					const info = getSlotInfo(host.cwd, slotId);
+					if (!info) throw new Error("slot 不存在");
+					sendJson(res, 200, info);
+					return true;
+				}
+				const summaries = listSlotSummaries(host.cwd);
+				const total = summaries.length;
+				const unsaved = summaries.filter((s) => !s.saved).length;
+				// 版本摘要：每 slot 全部版本（discarded 也返回，前端弱显示）；经 getSlotInfo 透出
+				// selectedVersionIndex + versions[].tags（LWB 版本切换/编辑 TAG 数据源）
+				const slotView = (s: (typeof summaries)[number]): Record<string, unknown> => {
+					const info = getSlotInfo(host.cwd, s.slotId);
+					if (!info) return { slotId: s.slotId, saved: s.saved, createdAt: s.createdAt, versionCount: s.versionCount, versions: [] };
+					return {
+						slotId: info.slotId,
+						saved: info.saved,
+						createdAt: info.createdAt,
+						versionCount: info.versionCount,
+						...(typeof info.selectedVersionIndex === "number" ? { selectedVersionIndex: info.selectedVersionIndex } : {}),
+						...(info.hasFailed ? { hasFailed: true } : {}),
+						versions: info.versions,
+					};
+				};
+				sendJson(res, 200, {
+					total,
+					unsaved,
+					slots: summaries.map(slotView),
+				});
+				return true;
+			}
+			case "POST /api/draw/slots/save": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { slotId?: string; versionIndex?: number };
+				const slotId = (body.slotId ?? "").trim();
+				if (!slotId) throw new Error("缺少 slotId");
+				const r = saveSlot(host.cwd, slotId, body.versionIndex);
+				if (!r.ok) throw new Error(r.error);
+				sendJson(res, 200, { ok: true, saved: true });
+				return true;
+			}
+			case "POST /api/draw/slots/select": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { slotId?: string; versionIndex?: number };
+				const slotId = (body.slotId ?? "").trim();
+				if (!slotId) throw new Error("缺少 slotId");
+				if (typeof body.versionIndex !== "number") throw new Error("缺少 versionIndex");
+				const r = setSelectedVersionIndex(host.cwd, slotId, body.versionIndex);
+				if (!r.ok) throw new Error(r.error);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "PUT /api/draw/slots/tags": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					slotId?: string;
+					versionIndex?: number;
+					scene?: string;
+					characterPrompts?: { name: string; prompt: string; uc?: string }[];
+				};
+				const slotId = (body.slotId ?? "").trim();
+				if (!slotId) throw new Error("缺少 slotId");
+				if (typeof body.versionIndex !== "number") throw new Error("缺少 versionIndex");
+				// LWB 一致：scene 不能为空（编辑 TAG 保存场景分栏）
+				if (body.scene !== undefined && !body.scene.trim()) throw new Error("场景 TAG 不能为空");
+				const r = updateVersionTags(host.cwd, slotId, body.versionIndex, {
+					...(body.scene !== undefined ? { scene: body.scene } : {}),
+					...(body.characterPrompts !== undefined ? { characterPrompts: body.characterPrompts } : {}),
+				});
+				if (!r.ok) throw new Error(r.error);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/draw/slots/save-all": {
+				if (refuseWhileStreaming()) return true;
+				const r = saveAllSlots(host.cwd);
+				sendJson(res, 200, { ok: true, saved: r.saved, skipped: r.skipped });
+				return true;
+			}
+			case "DELETE /api/draw/slots": {
+				if (refuseWhileStreaming()) return true;
+				const slotId = (query.get("slotId") ?? "").trim();
+				if (!slotId) throw new Error("缺少 slotId");
+				const removedFiles = deleteSlot(host.cwd, slotId);
+				sendJson(res, 200, { ok: true, removedFiles });
+				return true;
+			}
+			case "POST /api/draw/slots/cleanup": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse((await readBody(req)) || "{}") as { retentionDays?: number };
+				const r = cleanupExpired(host.cwd, body.retentionDays);
+				sendJson(res, 200, { ok: true, removedSlots: r.removedSlots, removedFiles: r.removedFiles });
+				return true;
+			}
+			case "POST /api/draw/slots/rebuild": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse((await readBody(req)) || "{}") as {
+					messages?: Array<{ id?: string; text?: string }>;
+				};
+				const result = rebuildSlotIndex(host.cwd, body.messages ?? []);
+				sendJson(res, 200, result);
+				return true;
+			}
+			case "POST /api/draw/slots/retry": {
+				// 失败占位符重试（LWB storeFailedPlaceholder + saveTagsAndRetry）：
+				// 读目标版本 params 的 prompt/scene → generateImage 重新生成 → 追加新版本（失败态被覆盖）
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { slotId?: string; versionIndex?: number };
+				const slotId = (body.slotId ?? "").trim();
+				if (!slotId) throw new Error("缺少 slotId");
+				const info = getSlotInfo(host.cwd, slotId);
+				if (!info) throw new Error("slot 不存在");
+				// 目标版本 index：显式 versionIndex → selectedVersionIndex → 最后一个非 discarded
+				let targetIndex: number;
+				if (
+					typeof body.versionIndex === "number" &&
+					Number.isInteger(body.versionIndex) &&
+					body.versionIndex >= 0 &&
+					body.versionIndex < info.versionCount &&
+					!info.versions[body.versionIndex].discarded
+				) {
+					targetIndex = body.versionIndex;
+				} else if (
+					typeof info.selectedVersionIndex === "number" &&
+					Number.isInteger(info.selectedVersionIndex) &&
+					info.selectedVersionIndex >= 0 &&
+					info.selectedVersionIndex < info.versionCount &&
+					!info.versions[info.selectedVersionIndex].discarded
+				) {
+					targetIndex = info.selectedVersionIndex;
+				} else {
+					const lastActive = info.versions
+						.map((v, i) => ({ v, i }))
+						.filter((x) => !x.v.discarded)
+						.pop();
+					if (!lastActive) throw new Error("该 slot 没有可重试的版本");
+					targetIndex = lastActive.i;
+				}
+				// 取目标版本 params 的 prompt 或 scene（有 scene 用 scene，无则 prompt）
+				const ver = loadSlotStore(host.cwd).slots[slotId]?.versions[targetIndex];
+				if (!ver) throw new Error("slot 不存在");
+				const params = ver.params ?? {};
+				const rawPrompt =
+					(typeof params.scene === "string" && params.scene.trim())
+						? params.scene.trim()
+						: (typeof params.prompt === "string" && params.prompt.trim())
+							? params.prompt.trim()
+							: "";
+				if (!rawPrompt) throw new Error("该版本无可用 prompt");
+				let r: { src: string };
+				try {
+					r = await generateImage(host.cwd, { prompt: rawPrompt });
+				} catch (e) {
+					throw new Error(drawErrorZhFull(e));
+				}
+				// 转相对路径（/cache/ → .liyuan-cache/…，同 /api/draw/generate 内联逻辑）
+				const rel = r.src.startsWith("/cache/")
+					? `.liyuan-cache/${r.src.slice("/cache/".length)}`
+					: r.src.startsWith("/media/")
+						? `.liyuan-media/${r.src.slice("/media/".length)}`
+						: r.src;
+				appendVersion(host.cwd, slotId, { file: rel, params: { scene: rawPrompt, positive: rawPrompt } });
+				sendJson(res, 200, { ok: true, src: r.src });
+				return true;
+			}
+			case "POST /api/draw/slots/delete-all": {
+				// 删除全部（或指定 slotIds）slot + 从当前分支正文剥离对应占位符
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse((await readBody(req)) || "{}") as { slotIds?: string[] };
+				const requested = Array.isArray(body.slotIds)
+					? body.slotIds.map((s) => (typeof s === "string" ? s.trim() : "")).filter(Boolean)
+					: [];
+				const allIds = listSlotSummaries(host.cwd).map((s) => s.slotId);
+				const targets = requested.length > 0 ? requested : allIds;
+				let removed = 0;
+				let removedFiles = 0;
+				if (requested.length > 0) {
+					// 部分删除：逐个 deleteSlot（返回删除文件数；不存在返回 0）
+					for (const id of targets) {
+						const existed = allIds.includes(id);
+						removedFiles += deleteSlot(host.cwd, id);
+						if (existed) removed++;
+					}
+				} else {
+					// 全部删除：deleteAllSlots 返回删除 slot 数
+					removed = deleteAllSlots(host.cwd);
+					removedFiles = removed;
+				}
+				// 剥离正文占位符（只清这次删除的 slotIds；宿主可选实现，未实现则 stripped=0）
+				let stripped = 0;
+				if (host.stripStoryPlaceholders && targets.length > 0) {
+					const r = await host.stripStoryPlaceholders(targets);
+					stripped = r.stripped;
+				}
+				sendJson(res, 200, { ok: true, removed, removedFiles, stripped });
+				return true;
+			}
+
+			// ---- 插件 A draw-role：D 标签搜索 / 在场检出 / 角色特征解析（常驻只读路由） ----
+			// 常驻注册说明：只读查询无副作用（D 标签库是插件自带数据文件，与插件开关解耦）；
+			// resolve 的 worldState 侧：RestHost 无 worldState getter（仅 applyStatePatch 可写），
+			// 此处传 undefined——currentOutfit 缺省回退 defaultOutfit → 第一套（resolveCharacterTags 语义）。
+			case "GET /api/draw/tags/search": {
+				const q = (query.get("q") ?? "").trim();
+				if (!q) throw new Error("缺少 q");
+				const rawLimit = Number.parseInt(query.get("limit") ?? "20", 10);
+				const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(50, rawLimit)) : 20;
+				const characters = searchCharacters(q, limit);
+				const tags = searchTagsWithOnline(host.cwd, q, limit);
+				sendJson(res, 200, {
+					characters: characters.map((c) => ({ name: c.name, tags: c.tags })),
+					tags,
+				});
+				return true;
+			}
+			case "GET /api/draw/tags/character": {
+				const name = (query.get("name") ?? "").trim();
+				if (!name) throw new Error("缺少 name");
+				const hit = searchCharacters(name, 1).find((c) => c.name.toLowerCase() === name.toLowerCase());
+				sendJson(res, 200, hit ? { name: hit.name, tags: hit.tags } : { name, tags: [] });
+				return true;
+			}
+			case "GET /api/draw/characters/detect": {
+				const text = (query.get("text") ?? "").trim();
+				const rawNames = (query.get("names") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+				// 别名检出（LWB 对齐）：读服装档案 aliases 构建 known，用 detectPresentCharactersWithAliases；
+				// 卡读取失败或名单为空 → 回退原 detectPresentCharacters（与旧行为一致）
+				let found: string[] = [];
+				try {
+					const card = (query.get("card") ?? "").trim() || (loadConfig(host.cwd).card ?? "").trim();
+					const wb = loadWardrobe(host.cwd, card);
+					const known = wb.characters
+						.filter((c) => c.hidden !== true)
+						.map((c) => ({ name: c.name, aliases: c.aliases }));
+					if (known.length > 0) {
+						found = detectPresentCharactersWithAliases(text, known);
+					} else {
+						found = detectPresentCharacters(text, rawNames);
+					}
+				} catch {
+					found = detectPresentCharacters(text, rawNames);
+				}
+				sendJson(res, 200, { found });
+				return true;
+			}
+			case "GET /api/draw/characters/resolve": {
+				const card = (query.get("card") ?? "").trim() || (loadConfig(host.cwd).card ?? "").trim();
+				if (!card) throw new Error("缺少 card（当前未配置角色卡）");
+				const names = (query.get("names") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+				if (names.length === 0) throw new Error("缺少 names（逗号分隔）");
+				// worldState：RestHost.worldState()（只读 getter，与 applyStatePatch 同源）；
+				// 旧 host 未实现时可选链兜底 → null（currentOutfit 回退 defaultOutfit）
+				const ws = host.worldState?.() ?? null;
+				const r = resolveCharacterTags(host.cwd, card, names, ws ? { characters: ws.characters } : undefined);
+				sendJson(res, 200, { characters: r.characters, unknown: r.unknown });
+				return true;
+			}
+
+			// ---- 未知角色自动学习（插件 A draw-role 二期） ----
+			case "GET /api/draw/characters/learn-candidates": {
+				const statusRaw = (query.get("status") ?? "").trim();
+				const status =
+					statusRaw === "pending" || statusRaw === "learned" || statusRaw === "ignored"
+						? statusRaw
+						: undefined;
+				sendJson(res, 200, { ok: true, candidates: listLearnCandidates(host.cwd, status) });
+				return true;
+			}
+			case "POST /api/draw/characters/learn": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { name?: string; card?: string };
+				const r = confirmLearnCharacter(host.cwd, body.name ?? "", body.card);
+				if (!r.ok) throw new Error(r.error);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "DELETE /api/draw/characters/learn": {
+				if (refuseWhileStreaming()) return true;
+				const name = (query.get("name") ?? "").trim();
+				if (!name) throw new Error("缺少 name");
+				dismissLearnCandidate(host.cwd, name);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+
+			// ---- 自定义标签组（插件 A draw-role 二期） ----
+			case "GET /api/draw/tag-groups": {
+				sendJson(res, 200, { ok: true, groups: loadTagGroups(host.cwd).groups });
+				return true;
+			}
+			case "POST /api/draw/tag-groups": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as Partial<TagGroup> & { name?: string };
+				if (!body.name || !body.name.trim()) throw new Error("缺少 name");
+				const file = saveTagGroup(host.cwd, { name: body.name, ...(body.id ? { id: body.id } : {}), tags: body.tags, enabled: body.enabled });
+				sendJson(res, 200, { ok: true, groups: file.groups });
+				return true;
+			}
+			case "PUT /api/draw/tag-groups": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as Partial<TagGroup> & { name?: string };
+				if (!body.id || !body.id.trim()) throw new Error("缺少 id");
+				const file = saveTagGroup(host.cwd, { id: body.id, name: body.name ?? "", tags: body.tags, enabled: body.enabled });
+				sendJson(res, 200, { ok: true, groups: file.groups });
+				return true;
+			}
+			case "DELETE /api/draw/tag-groups": {
+				if (refuseWhileStreaming()) return true;
+				const id = (query.get("id") ?? "").trim();
+				if (!id) throw new Error("缺少 id");
+				deleteTagGroup(host.cwd, id);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "PUT /api/draw/tag-groups/toggle": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { id?: string; enabled?: boolean };
+				if (!body.id || !body.id.trim()) throw new Error("缺少 id");
+				if (typeof body.enabled !== "boolean") throw new Error("enabled 必须是布尔值");
+				setTagGroupEnabled(host.cwd, body.id, body.enabled);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "PUT /api/draw/tag-groups/select": {
+				// 全局当前选中组（LWB selectedGroupId 语义）：id 空/null → 清除
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { id?: string };
+				const id = (body.id ?? "").trim();
+				setGlobalSelectedGroup(host.cwd, id || null);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "GET /api/draw/tag-groups/export": {
+				// JSON 下载（attach 头，同 /api/sessions/export 模式）
+				const groups = exportTagGroups(host.cwd);
+				res.writeHead(200, {
+					"content-type": "application/json; charset=utf-8",
+					"content-disposition": 'attachment; filename="liyuan-tag-groups.json"',
+					"cache-control": "no-store",
+				});
+				res.end(`${JSON.stringify(groups, null, "\t")}\n`);
+				return true;
+			}
+			case "POST /api/draw/tag-groups/import": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { groups?: TagGroup[] } | TagGroup[];
+				const groups = Array.isArray(body)
+					? body
+					: Array.isArray((body as { groups?: unknown }).groups)
+						? ((body as { groups: TagGroup[] }).groups)
+						: [];
+				if (groups.length === 0) throw new Error("没有可导入的标签组");
+				const imported = importTagGroups(host.cwd, groups);
+				sendJson(res, 200, { ok: true, imported, groups: loadTagGroups(host.cwd).groups });
+				return true;
+			}
+
+			// ---- 在线标签库（插件 A draw-role 二期） ----
+			case "POST /api/draw/tags/online-update": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse((await readBody(req)) || "{}") as { sourceUrl?: string };
+				const r = await updateOnlineTagDb(host.cwd, { ...(body.sourceUrl ? { sourceUrl: body.sourceUrl } : {}) });
+				if (!r.ok) throw new Error(r.error);
+				sendJson(res, 200, { ok: true, entries: r.entries, lastUpdatedAt: r.lastUpdatedAt });
+				return true;
+			}
+			case "GET /api/draw/tags/online-status": {
+				sendJson(res, 200, { ok: true, status: getOnlineTagDbStatus(host.cwd) });
+				return true;
+			}
+
+			// ---- 生图旁路管线（插件 B draw-pipeline）手动旋钮 ----
+			// 说明：RestHost 无会话树/session 访问，本路由只运行管线并返回 slots + patches（JSON），
+			// **不执行补丁**——补丁由宿主 onTurnEnd 钩子经 appendPatch 执行（与管线索引.ts hooks 同路）。
+			case "POST /api/draw/pipeline/run": {
+				if (refuseWhileStreaming()) return true;
+				const cfg = loadConfig(host.cwd);
+				if (cfg.plugins?.["draw-pipeline"]?.enabled !== true) {
+					throw new Error("生图管线未启用（config.plugins.draw-pipeline.enabled）");
+				}
+				const body = JSON.parse(await readBody(req)) as { entryId?: string; text?: string };
+				const text = (body.text ?? "").trim();
+				if (!text) throw new Error("缺少 text（本路由不访问会话树，需显式传正文）");
+				// 配图按钮/手动触发：宿主执行管线并嵌入当前分支最新剧情消息（Q15 简化通道——
+				// 宿主有 session/场记能力可写正文；无宿主能力（测试/嵌入式）时回退纯管线结果）
+				if (host.manualPipelineRun) {
+					const r = await host.manualPipelineRun(text);
+					if (!r.ok) throw new Error(r.error ?? "管线执行失败");
+					sendJson(res, 200, {
+						ok: true,
+						ran: true,
+						slots: r.slots ?? [],
+						warnings: r.warnings ?? [],
+						embedded: r.embedded === true,
+					});
+					return true;
+				}
+				const settingsRaw = cfg.plugins["draw-pipeline"]?.settings ?? {};
+				const settings = {
+					auto: true, // 手动旋钮：绕过 auto 开关
+					characters: Array.isArray(settingsRaw.characters)
+						? (settingsRaw.characters as unknown[]).filter((x): x is string => typeof x === "string")
+						: [],
+					minIntervalMs:
+						typeof settingsRaw.minIntervalMs === "number" && settingsRaw.minIntervalMs >= 0
+							? settingsRaw.minIntervalMs
+							: 5000,
+					maxImages: typeof settingsRaw.maxImages === "number" && settingsRaw.maxImages >= 1 ? Math.round(settingsRaw.maxImages) : 2,
+					maxCharactersPerImage:
+						typeof settingsRaw.maxCharactersPerImage === "number" && settingsRaw.maxCharactersPerImage >= 1
+							? Math.round(settingsRaw.maxCharactersPerImage)
+							: 3,
+					...(settingsRaw.llm && typeof settingsRaw.llm === "object"
+						? { llm: settingsRaw.llm as { provider?: string; model?: string } }
+						: {}),
+				};
+				const result = await runPipeline(host.cwd, {
+					entryId: body.entryId ?? `manual-${Date.now()}`,
+					chatId: "",
+					messageText: text,
+					settings,
+					deps: defaultPipelineDeps(host.cwd),
+				});
+				sendJson(res, 200, {
+					ok: true,
+					ran: result.ran,
+					reason: result.reason,
+					slots: result.slots,
+					warnings: result.warnings,
+					patches: result.patches, // 宿主执行（本路由不写会话树）
+					note: "补丁由宿主回合钩子执行；本手动路由只返回管线结果",
+				});
+				return true;
+			}
+
+			// ---- 底座生图/增强经 REST 暴露（DESIGN 2.4 工具是 agent 通道，UI 操作条走 REST） ----
+			case "POST /api/draw/generate": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					prompt?: string;
+					negativePrompt?: string;
+					aspect?: "portrait" | "landscape" | "square";
+					providerId?: string;
+					presetId?: string;
+					styleId?: string;
+					params?: Record<string, unknown>;
+					slotId?: string;
+				};
+				const prompt = (body.prompt ?? "").trim();
+				if (!prompt) throw new Error("缺少 prompt");
+				let r: { src: string; slotId: string };
+				try {
+					r = await generateImage(host.cwd, {
+						prompt,
+						...(body.negativePrompt !== undefined ? { negativePrompt: body.negativePrompt } : {}),
+						...(body.aspect ? { aspect: body.aspect } : {}),
+						...(body.providerId ? { providerId: body.providerId } : {}),
+						...(body.presetId ? { presetId: body.presetId } : {}),
+						...(body.styleId !== undefined ? { styleId: body.styleId } : {}),
+						...(body.params ? { params: body.params as never } : {}),
+					});
+				} catch (e) {
+					throw new Error(drawErrorZhFull(e));
+				}
+				// slotId 存在 → 追加版本（file 转相对路径；slot 不存在则忽略 append）
+				// 注：srcToRel 内联（曾以 case 间 const 声明触发 TDZ——跳转命中时声明被跳过抛 ReferenceError）
+				if (body.slotId) {
+					const relSrc = r.src.startsWith("/cache/")
+						? `.liyuan-cache/${r.src.slice("/cache/".length)}`
+						: r.src.startsWith("/media/")
+							? `.liyuan-media/${r.src.slice("/media/".length)}`
+							: r.src;
+					// params 存结构化 scene/positive（LWB 编辑 TAG 数据源；旧 {prompt} 兼容保留）
+					appendVersion(host.cwd, body.slotId, { file: relSrc, params: { prompt, scene: prompt, positive: prompt } });
+				}
+				sendJson(res, 200, { ok: true, src: r.src, slotId: body.slotId ?? r.slotId });
+				return true;
+			}
+			case "POST /api/draw/enhance": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					source?: string;
+					op?: "redraw" | "enhance" | "upscale" | "inpaint";
+					strength?: number;
+					scaleBy?: number;
+					maskBase64?: string;
+					slotId?: string;
+				};
+				const source = (body.source ?? "").trim();
+				if (!source) throw new Error("缺少 source");
+				const op = body.op;
+				if (op !== "redraw" && op !== "enhance" && op !== "upscale" && op !== "inpaint") {
+					throw new Error("op 必须为 redraw / enhance / upscale / inpaint");
+				}
+				let r: { src: string };
+				try {
+					r = await enhanceImage(host.cwd, {
+						source,
+						op,
+						...(body.strength !== undefined ? { strength: body.strength } : {}),
+						...(body.scaleBy !== undefined ? { scaleBy: body.scaleBy } : {}),
+						...(body.maskBase64 ? { maskBase64: body.maskBase64 } : {}),
+					});
+				} catch (e) {
+					throw new Error(drawErrorZhFull(e));
+				}
+				if (body.slotId) {
+					const relSrc = r.src.startsWith("/cache/")
+						? `.liyuan-cache/${r.src.slice("/cache/".length)}`
+						: r.src.startsWith("/media/")
+							? `.liyuan-media/${r.src.slice("/media/".length)}`
+							: r.src;
+					appendVersion(host.cwd, body.slotId, { file: relSrc });
+				}
+				sendJson(res, 200, { ok: true, src: r.src });
+				return true;
+			}
+
+			// ---- 插件 D 二期：AI 微调（DESIGN-draw §3.4） ----
+			// 新语义（LWB applyAiRefineResult 对齐）：只「改写 + 分解预览」，
+			// **不自动重生成、不追加版本**——前端确认后经 /slots/tags 覆写（改 tag 不重绘）。
+			case "POST /api/draw/refine": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { slotId?: string; instruction?: string };
+				const slotId = (body.slotId ?? "").trim();
+				if (!slotId) throw new Error("缺少 slotId");
+				const entry = loadSlotStore(host.cwd).slots[slotId];
+				if (!entry) throw new Error("slot 不存在");
+				// 当前生效版本（最后一个非 discarded）的 params：scene/prompt/characterPrompts/positive/negative
+				const cur = [...entry.versions].reverse().find((v) => !v.discarded);
+				if (!cur) throw new Error("该版本无场景可微调");
+				const params = cur.params ?? {};
+				const decomposed = decomposeTags({
+					scene:
+						typeof params.scene === "string" && params.scene.trim()
+							? params.scene
+							: typeof params.prompt === "string" && params.prompt.trim()
+								? params.prompt
+								: undefined,
+					...(Array.isArray(params.characterPrompts) ? { characterPrompts: params.characterPrompts as { name: string; prompt: string }[] } : {}),
+					...(typeof params.positive === "string" ? { positive: params.positive } : {}),
+					...(typeof params.negative === "string" ? { negative: params.negative } : {}),
+				});
+				if (!decomposed.scene.trim()) throw new Error("该版本无场景可微调");
+				const caller = getPlannerCaller();
+				if (!caller) throw new Error("管线规划模型未就绪");
+				let refined = "";
+				try {
+					refined = await caller(buildRefineMessages(decomposed.scene, body.instruction));
+				} catch (e) {
+					throw new Error(`微调调用失败：${e instanceof Error ? e.message : String(e)}`);
+				}
+				const refinedScene = extractRefinedScene(refined);
+				if (!refinedScene) throw new Error("微调结果解析失败");
+				// 不 generateImage、不 appendVersion：返回分解预览 + 改写结果，由前端决定应用
+				sendJson(res, 200, { ok: true, decomposed, refined: { scene: refinedScene } });
+				return true;
+			}
+
 			default:
 				sendJson(res, 404, { error: `未知接口：${route}` });
 				return true;
@@ -4190,4 +5041,97 @@ function sanitizeSamplers(input: Record<string, number> | undefined): Record<str
 		if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
 	}
 	return out;
+}
+
+/** DrawError → 中文提示（POST /api/draw/test 用）；非 DrawError 原样 message */
+function drawErrorZh(e: unknown): string {
+	if (e && typeof e === "object") {
+		const code = (e as { code?: unknown }).code;
+		if (code === "auth") return "API Key 无效";
+		if (code === "quota") return "Anlas 不足";
+		if (code === "busy") return "当前繁忙，请稍后重试";
+		if (code === "network" || code === "timeout") return "网络错误";
+	}
+	return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * DrawError → 中文提示（POST /api/draw/generate 与 /api/draw/enhance 用，契约映射）：
+ * auth→API Key 无效 / quota→Anlas 不足 / busy→当前繁忙 / timeout→请求超时 /
+ * network→网络错误 / parse→解析失败 / unknown→原消息。
+ */
+function drawErrorZhFull(e: unknown): string {
+	if (e instanceof DrawError) {
+		switch (e.code) {
+			case "auth": return "API Key 无效";
+			case "quota": return "Anlas 不足";
+			case "busy": return "当前繁忙";
+			case "timeout": return "请求超时";
+			case "network": return "网络错误";
+			case "parse": return "解析失败";
+			case "unknown": return e.message;
+			default: return e.message;
+		}
+	}
+	return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * 索引重建（POST /api/draw/slots/rebuild）：
+ * - 对 messages 里每段 text 提取占位符 slotId → 已存在映射的保留；
+ * - 不存在映射的：在 .liyuan-cache/ 与 .liyuan-media/ 找不到对应 slot-*.png 文件 → 登记为孤儿
+ *   （versions 空数组 + saved=false，渲染层显示失效态）；找到同名 slot-*.png → 补登记；
+ * - mediaDisk 的孤儿文件（有文件无 slot）仅统计不自动建 slot（返回 mediaFiles 数）。
+ * 写盘用 saveSlotStoreNow。
+ */
+function rebuildSlotIndex(cwd: string, messages: Array<{ id?: string; text?: string }>): {
+	ok: true;
+	restored: number;
+	orphanPlaceholders: number;
+	mediaFiles: number;
+} {
+	flushSlotStorePending(cwd); // 防抖 pending 先落盘，重建基于最新映射
+	const store = loadSlotStore(cwd);
+	let restored = 0;
+	let orphanPlaceholders = 0;
+
+	for (const m of messages) {
+		const text = m.text ?? "";
+		for (const slotId of extractSlotIds(text)) {
+			if (store.slots[slotId]) continue; // 已存在映射：保留
+			// 找同名文件：cache 或 media 下形如 slot-<id>.png
+			const cacheAbs = join(cwd, ".liyuan-cache", `${slotId}.png`);
+			const mediaAbs = join(cwd, ".liyuan-media", `${slotId}.png`);
+			if (existsSync(cacheAbs)) {
+				store.slots[slotId] = {
+					chatId: m.id ?? "",
+					messageId: m.id ?? "",
+					createdAt: Date.now(),
+					versions: [{ file: `.liyuan-cache/${slotId}.png`, params: {}, savedAt: 0, discarded: false }],
+				};
+				restored++;
+			} else if (existsSync(mediaAbs)) {
+				store.slots[slotId] = {
+					chatId: m.id ?? "",
+					messageId: m.id ?? "",
+					createdAt: Date.now(),
+					versions: [{ file: `.liyuan-media/${slotId}.png`, params: {}, savedAt: Date.now(), discarded: false }],
+				};
+				restored++;
+			} else {
+				// 孤儿占位符：登记空版本（渲染层显示失效态）
+				store.slots[slotId] = {
+					chatId: m.id ?? "",
+					messageId: m.id ?? "",
+					createdAt: Date.now(),
+					versions: [],
+				};
+				orphanPlaceholders++;
+			}
+		}
+	}
+
+	const { files } = scanMediaDisk(cwd);
+	saveSlotStoreNow(cwd, store);
+	return { ok: true, restored, orphanPlaceholders, mediaFiles: files.length };
 }

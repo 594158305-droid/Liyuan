@@ -51,6 +51,16 @@ const textOf = (content: unknown): string => {
 		.join("");
 };
 
+/**
+ * 生图管线占位符（draw-slot 的 `[image:slotId]`）输入侧剥离：
+ * 显示/压缩层已由占位符协议处理，但送模历史不应让模型看到图片标记
+ * （模型只该见正文文字）。幂等：无占位符时原样返回。
+ */
+const DRAW_PLACEHOLDER_RE = /\[image:[A-Za-z0-9-]+\]/g;
+export function stripDrawPlaceholders(text: string): string {
+	return text.replace(DRAW_PLACEHOLDER_RE, "");
+}
+
 /** 叙事向 custom 消息 → 历史角色映射；不在表内的 custom 不进送模流 */
 const CUSTOM_AS_ASSISTANT = new Set(["rp-greeting", "rp-edited-reply"]);
 const CUSTOM_AS_USER = new Set(["rp-import"]);
@@ -158,7 +168,7 @@ export function rebuildHistory(branch: BranchEntryLike[]): RebuiltHistory {
 	const history: BeatMsg[] = [];
 	for (const m of patched) {
 		const role = (m as { _role?: "user" | "assistant" })._role ?? (m.role === "user" ? "user" : "assistant");
-		let text = textOf(m.content);
+		let text = stripDrawPlaceholders(textOf(m.content));
 		if (role === "assistant") text = cleanAssistantText(text);
 		text = text.trim();
 		if (!text) continue;

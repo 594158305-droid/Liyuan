@@ -1,0 +1,10 @@
+{
+	"id": "draw-pipeline",
+	"name": "生图旁路管线",
+	"version": "0.1.0",
+	"description": "AI 回复完成后自动为消息规划并生成插图（图文并茂）：规划 LLM → 图片计划 YAML → 合规 → 底座生图 → 占位符补丁进正文（rp-draft-op 读取时补丁，树上字节不改）",
+	"tools": [],
+	"panels": [],
+	"skills": [],
+	"requires": ["draw-slot", "draw-role"]
+}

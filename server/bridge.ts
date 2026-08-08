@@ -26,6 +26,8 @@ export interface BridgePermissions {
 	refreshMaterials: boolean;
 	/** 知识库挂载桥（/codexmount 命令） */
 	mountCodex: boolean;
+	/** 助手生图嵌入剧情正文（Q15：draw_generate 默认嵌入最近一条剧情消息，rp-draft-op 补丁 + slot 登记） */
+	embedStoryImage: boolean;
 }
 
 /** 全权限：内置助手/剧情侧使用 */
@@ -38,6 +40,7 @@ export const FULL_BRIDGE_PERMISSIONS: BridgePermissions = {
 	emitMedia: true,
 	refreshMaterials: true,
 	mountCodex: true,
+	embedStoryImage: true,
 };
 
 /**
@@ -77,5 +80,7 @@ export function createStoryBridge(base: StoryBridge, perms: BridgePermissions): 
 		resyncStory: base.resyncStory.bind(base),
 		// ---- 知识库挂载桥：独立权限 ----
 		mountCodex: perms.mountCodex ? base.mountCodex.bind(base) : () => deny("mountCodex"),
+		// ---- 助手生图嵌入剧情正文：独立权限（Q15） ----
+		embedStoryImage: perms.embedStoryImage ? base.embedStoryImage.bind(base) : () => deny("embedStoryImage"),
 	};
 }

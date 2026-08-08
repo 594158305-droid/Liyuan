@@ -578,6 +578,21 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 							: seg,
 					)
 				: undefined;
+		// 生图管线占位符（rp-draft-op 补丁应用后，消息正文末尾含 [image:slot]；
+		// timeline 是引擎定稿时的快照不含补丁效果，而前端时间线优先渲染——
+		// 这里把占位符补进 timeline 末尾正文段，保证插图在时间线渲染下也可见）
+		if (timeline && /\[image:/.test(body)) {
+			const phs = body.match(/\[image:[^\]]+\]/g) ?? [];
+			if (phs.length > 0) {
+				for (let i = timeline.length - 1; i >= 0; i--) {
+					const seg = timeline[i];
+					if (seg.kind === "text") {
+						timeline[i] = { ...seg, text: `${seg.text}\n\n${phs.join("\n\n")}` };
+						break;
+					}
+				}
+			}
+		}
 		return {
 			channel,
 			name: names.charName,
@@ -734,7 +749,31 @@ export function toWireHistory(
 		const w = toWireMsg(m, names, { backstage, skin });
 		if (w) out.push(w);
 	}
-	return foldTurnNarratives(out);
+	const folded = foldTurnNarratives(out);
+	// 生图占位符兜底：foldTurnNarratives 会把 rp-edited-reply 与原始回复合并——
+	// 合并后消息带旧版 timeline（引擎定稿快照，不含补丁占位符）而 text 含占位符；
+	// 前端 timeline 优先渲染会漏掉插图——把占位符补进 timeline 末尾正文段
+	for (const m of folded) {
+		if (Array.isArray(m.timeline) && m.timeline.length > 0 && typeof m.text === "string" && /\[image:/.test(m.text)) {
+			const tlText = m.timeline
+				.filter((s) => s.kind === "text")
+				.map((s) => (s.text ?? "") as string)
+				.join("\n");
+			if (!/\[image:/.test(tlText)) {
+				const phs = m.text.match(/\[image:[^\]]+\]/g) ?? [];
+				if (phs.length > 0) {
+					for (let i = m.timeline.length - 1; i >= 0; i--) {
+						const seg = m.timeline[i];
+						if (seg.kind === "text") {
+							m.timeline[i] = { ...seg, text: `${seg.text ?? ""}\n\n${phs.join("\n\n")}` };
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	return folded;
 }
 
 /**
@@ -771,9 +810,14 @@ export function toAssistantHistory(messages: unknown[]): AssistantMsg[] {
 	return out;
 }
 
-/** show_media 工具结果 → 助手媒体消息；非该工具或结构不符返回 null */
+/** show_media / 生图工具 工具结果 → 助手媒体消息；非白名单工具或结构不符返回 null */
 export function assistantMediaOfToolResult(msg: MsgLike): AssistantMsg | null {
-	if (msg.toolName !== "show_media" || msg.isError === true) return null;
+	// 生图工具（draw_generate/draw_enhance）与 show_media 同样交付 details.asstMedia（右栏媒体消息）
+	if (
+		(msg.toolName !== "show_media" && msg.toolName !== "draw_generate" && msg.toolName !== "draw_enhance") ||
+		msg.isError === true
+	)
+		return null;
 	const md =
 		msg.details && typeof msg.details === "object"
 			? (msg.details as { asstMedia?: { src?: unknown; kind?: unknown; caption?: unknown } }).asstMedia

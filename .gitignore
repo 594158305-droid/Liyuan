@@ -89,3 +89,4 @@ scripts/_*
 
 # optional: keep web/dist for easier clone-and-run; uncomment to force rebuild
 # web/dist/
+.liyuan-plugins/
