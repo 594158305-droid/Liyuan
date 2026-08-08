@@ -1,4 +1,4 @@
-﻿﻿/* ============================================================
+﻿/* ============================================================
    梨园 · 白瓷朱砂(F4 + 二次质感加厚)
    命题:明亮白色;层次与戏文感加强,布局结构不动
    · 宣纸底微纹理 + 暖白浮层,投影更深一档
@@ -8640,4 +8640,381 @@ label.drawer-btn {
 }
 .char-features .field-hint {
 	margin-top: 2px;
+}
+
+/* ══════════ 生图设置总览浮动窗口（draw-settings-modal.tsx）══════════
+   左导航 + 右内容；元素排布参考 Novel Draw 总览图，风格用梨园令牌。 */
+.draw-modal {
+	position: fixed;
+	inset: 0;
+	z-index: 130;
+	display: grid;
+	place-items: center;
+	padding: 16px;
+	background: rgb(33 30 27 / 45%);
+}
+.draw-modal-dialog {
+	position: relative;
+	width: max(720px, 80vw);
+	height: max(480px, 80vh);
+	max-width: calc(100vw - 32px);
+	max-height: calc(100vh - 32px);
+	display: flex;
+	flex-direction: column;
+	background: var(--surface);
+	border-radius: var(--radius-l);
+	box-shadow: var(--shadow-3);
+	overflow: hidden;
+}
+.draw-modal-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--hairline);
+	background: var(--surface-dim);
+	flex: none;
+}
+.draw-modal-title {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--text-strong);
+}
+.draw-modal-body {
+	flex: 1;
+	display: flex;
+	min-height: 0;
+}
+.draw-modal-nav {
+	flex: none;
+	width: 168px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 12px 10px;
+	border-right: 1px solid var(--hairline);
+	background: var(--surface-dim);
+	overflow-y: auto;
+}
+.draw-modal-nav-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 9px 12px;
+	border: none;
+	border-radius: var(--radius-s);
+	background: transparent;
+	color: var(--text-soft);
+	font-size: 13.5px;
+	font-family: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background 0.15s, color 0.15s;
+}
+.draw-modal-nav-item:hover {
+	background: var(--surface-deep);
+	color: var(--text);
+}
+.draw-modal-nav-item.active {
+	background: var(--accent-wash);
+	color: var(--accent-strong);
+	font-weight: 600;
+}
+.draw-modal-content {
+	flex: 1;
+	min-width: 0;
+	overflow-y: auto;
+	padding: 16px 18px;
+}
+.draw-modal-section {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.draw-modal-sec-title {
+	margin: 0;
+	font-size: 16px;
+	color: var(--text-strong);
+}
+.draw-modal-tip {
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	background: var(--accent-wash);
+	color: var(--text-soft);
+	font-size: 12.5px;
+	line-height: 1.7;
+	padding: 10px 12px;
+}
+.draw-quick-result {
+	max-width: 100%;
+	max-height: 320px;
+	border-radius: var(--radius-s);
+	border: 1px solid var(--hairline-strong);
+	object-fit: contain;
+	background: var(--surface-dim);
+}
+@media (max-width: 640px) {
+	.draw-modal-body {
+		flex-direction: column;
+	}
+	.draw-modal-nav {
+		width: 100%;
+		flex-direction: row;
+		flex-wrap: wrap;
+		border-right: none;
+		border-bottom: 1px solid var(--hairline);
+	}
+}
+
+/* ══════════ 角色标签双栏（character-tags-section.tsx）══════════ */
+.ct-wrap {
+	display: grid;
+	grid-template-columns: minmax(260px, 340px) 1fr;
+	gap: 14px;
+	align-items: start;
+}
+.ct-left,
+.ct-right {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	min-width: 0;
+}
+.ct-card {
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius);
+	background: var(--surface);
+	padding: 12px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.ct-card-title {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--accent-strong);
+}
+.ct-stats-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 8px;
+}
+.ct-stat {
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	background: var(--surface-dim);
+	padding: 10px 12px;
+}
+.ct-stat-label {
+	font-size: 12px;
+	color: var(--text-soft);
+	margin-bottom: 4px;
+}
+.ct-stat-num {
+	font-size: 22px;
+	font-weight: 700;
+	color: var(--text-strong);
+}
+.ct-stat-num.accent {
+	color: var(--accent);
+}
+.ct-list {
+	display: flex;
+	flex-direction: column;
+}
+.ct-char-row {
+	border-bottom: 1px solid var(--hairline);
+}
+.ct-char-row:last-child {
+	border-bottom: none;
+}
+.ct-char-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	padding: 9px 4px;
+	border: none;
+	background: transparent;
+	color: var(--text);
+	font-size: 13.5px;
+	font-family: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+.ct-char-head:hover {
+	background: var(--surface-dim);
+}
+.ct-char-name {
+	font-weight: 600;
+	color: var(--text-strong);
+}
+.ct-chevron {
+	margin-left: auto;
+	color: var(--text-faint);
+}
+.ct-chip {
+	border: 1px solid var(--hairline-strong);
+	border-radius: 6px;
+	background: var(--surface-deep);
+	color: var(--text-soft);
+	font-size: 11px;
+	padding: 1px 6px;
+}
+.ct-chip.accent {
+	border-color: var(--accent);
+	color: var(--accent-strong);
+	background: var(--accent-wash);
+}
+.ct-badge {
+	color: var(--text-soft);
+	font-size: 11.5px;
+}
+.ct-badge.ok {
+	color: var(--ok);
+}
+.ct-badge.warn {
+	color: #b7791f;
+}
+.ct-char-edit {
+	padding: 4px 4px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: var(--surface-dim);
+	border-radius: var(--radius-s);
+	margin: 0 4px 10px;
+}
+.ct-learn-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 0;
+	border-bottom: 1px dashed var(--hairline);
+}
+.ct-learn-row:last-child {
+	border-bottom: none;
+}
+@media (max-width: 800px) {
+	.ct-wrap {
+		grid-template-columns: 1fr;
+	}
+}
+
+/* ══════════ 模态内表单排版修正（宽屏：对齐 / 字号 / 按钮不换行）══════════
+   旧 .panel-row/.panel-search/.num 是为窄侧栏设计的，在 80vw 模态里会
+   挤压按钮、数字框过窄、字号过小。此处统一覆盖。 */
+.draw-modal .panel-search {
+	font-size: 14px;
+}
+.draw-modal .panel-row {
+	align-items: center;
+}
+.draw-modal .panel-row .panel-search {
+	flex: 1 1 auto;
+	width: auto;
+	min-width: 0;
+	margin-bottom: 0;
+}
+.draw-modal .panel-row .drawer-btn,
+.draw-modal .panel-row .act,
+.draw-modal .panel-row label.drawer-btn {
+	flex: none;
+	white-space: nowrap;
+}
+/* 网格内输入/选择/数字框一律撑满列宽，保证两列对齐 */
+.draw-modal .draw-params-grid .panel-search,
+.draw-modal .draw-params-grid select.panel-search,
+.draw-modal .draw-params-grid input.panel-search.num,
+.draw-modal input.panel-search.num {
+	width: 100%;
+	box-sizing: border-box;
+	flex: 1 1 auto;
+}
+/* 字号整体上调，保证可读 */
+.draw-modal .field-hint {
+	font-size: 13px;
+}
+.draw-modal .draw-sub-title {
+	font-size: 14px;
+}
+.draw-modal .draw-toggle-row {
+	font-size: 14px;
+	justify-content: flex-start;
+	gap: 12px;
+}
+.draw-modal .sp-section-head {
+	justify-content: flex-start;
+	gap: 12px;
+}
+.draw-modal .drawer-btn {
+	font-size: 13.5px;
+	white-space: nowrap;
+}
+.draw-modal .act {
+	font-size: 13px;
+	white-space: nowrap;
+}
+.draw-modal .sp-empty {
+	font-size: 13px;
+}
+
+/* ══════════ 正文内嵌图片重排（draw-slot-image.tsx）══════════
+   参考 Novel Draw：图片居中；右侧竖排悬浮工具条；左下角版本胶囊。
+   内层用 width:fit-content 贴合图片，margin:0 auto 居中，悬浮层相对图片定位。 */
+.draw-slot-wrap {
+	display: block;
+	margin: 6px 0;
+}
+.draw-slot-inner {
+	position: relative;
+	display: block;
+	width: fit-content;
+	max-width: 100%;
+	margin: 0 auto;
+}
+/* 纯 px 上限，避免与 fit-content 容器形成百分比循环依赖导致不居中 */
+.draw-slot-inner img.zoomable {
+	display: block;
+	width: auto;
+	max-width: 520px;
+	border-radius: var(--radius);
+}
+@media (max-width: 560px) {
+	.draw-slot-inner img.zoomable {
+		max-width: 100%;
+	}
+}
+/* 右侧竖排工具条（hover 显示） */
+.draw-slot-actions {
+	flex-direction: column;
+	align-items: stretch;
+	top: 8px;
+	right: 8px;
+	gap: 4px;
+	padding: 4px;
+}
+.draw-slot-actions .act {
+	justify-content: center;
+	text-align: center;
+	white-space: nowrap;
+	font-size: 12px;
+}
+/* 左下角版本胶囊（叠在图上） */
+.draw-ver-nav {
+	position: absolute;
+	bottom: 8px;
+	left: 8px;
+	margin-top: 0;
+	background: rgb(0 0 0 / 62%);
+	border-radius: 999px;
+	padding: 2px 10px;
+	color: #fff;
+}
+.draw-ver-nav .act {
+	color: #fff;
+}
+.draw-ver-nav .act:disabled {
+	opacity: 0.35;
 }

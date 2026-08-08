@@ -496,6 +496,7 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 
 	return (
 		<span className="draw-slot-wrap">
+			<span className="draw-slot-inner">
 			<ZoomImg src={showSrc} alt={`插图 ${slotId}`} title={`插图 ${slotId}`} />
 			{/* busy 蒙层 + 转圈（批次 2.4：蒙住图片区域，不只在操作条） */}
 			{busy && <span className="draw-slot-busy-overlay" />}
@@ -593,6 +594,7 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 				>
 					AI微调
 				</button>
+			</span>
 			</span>
 
 			{inpaintOpen && (

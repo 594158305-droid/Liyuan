@@ -55,6 +55,8 @@ if ($old) { Stop-Process -Id $old.OwningProcess -Force }
 
 ## 架构（改代码前先读这里）
 
+> **完整架构设计文档**：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（分层分域、职责、数据流、外部依赖）
+
 - `src/` — 领域层，纯 TS，**禁止接触 `@liyuan/agent-runtime`（pi）API**。
 - `.liyuan/extensions/roleplay.ts` — 接线层，全仓库**唯一**允许挂载 pi API 的地方（D3 规则，约 2300 行）：组装 system prompt、注册全部剧情工具、会话钩子、每轮记账/一致性审计。加新工具主要改这里。
 - `server/main.ts` — Web 宿主，除接线层外唯一可碰 pi API 的文件，且只许碰会话托管面；REST `/api/*` + 托管 `web/dist` + 健康检查。前端只见 wire 协议：`server/wire.ts` ↔ `web/src/wire.ts`（改协议两端同步）。

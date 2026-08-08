@@ -9,10 +9,9 @@
 import { useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api.ts";
 import type { WorldState } from "../wire.ts";
-import { IconEdit, IconPlus, IconTrash } from "./icons.tsx";
+import { IconEdit, IconPlus, IconSettings, IconTrash } from "./icons.tsx";
 import { ConfirmButton, Field, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
-import { WardrobeSection } from "./wardrobe-section.tsx";
-import { GallerySection } from "./gallery-section.tsx";
+import { DrawSettingsModal } from "./draw-settings-modal.tsx";
 
 // ---------- 类型（字段与 src/draw-config.ts 一致） ----------
 
@@ -30,6 +29,7 @@ interface DrawParams {
 	cfgRescale: number;
 	varietyBoost?: boolean;
 }
+export type { DrawParams, DrawPreset, DrawProvider, DrawProviderType };
 
 interface DrawPreset {
 	id: string;
@@ -131,7 +131,7 @@ function Sel({
 
 // ---------- 默认参数编辑（完整 DrawParams） ----------
 
-function ParamsFields({ value, onChange }: { value: DrawParams; onChange: (v: DrawParams) => void }) {
+export function ParamsFields({ value, onChange }: { value: DrawParams; onChange: (v: DrawParams) => void }) {
 	return (
 		<>
 			<div className="draw-params-grid">
@@ -232,7 +232,7 @@ function ParamsFields({ value, onChange }: { value: DrawParams; onChange: (v: Dr
 
 // ---------- 参数预设的部分覆盖编辑（留空 = 继承默认参数） ----------
 
-function PartialParamsFields({
+export function PartialParamsFields({
 	value,
 	onChange,
 }: {
@@ -506,7 +506,7 @@ function AddProviderForm({
 
 // ---------- 全局风格预设（增删改查 + 设为默认） ----------
 
-function DrawStylesSection({
+export function DrawStylesSection({
 	toast,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
@@ -680,7 +680,7 @@ interface TagSearchResponse {
 /** 悬停标题用的完整 tag 串（长列表压成一行） */
 const tagTitle = (tags: string[]): string => tags.join(", ");
 
-function DrawTagsSection({
+export function DrawTagsSection({
 	toast,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
@@ -1054,6 +1054,7 @@ export function DrawPanel({
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [adding, setAdding] = useState(false);
 	const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+	const [settingsOpen, setSettingsOpen] = useState(false);
 
 	const defaultProvider = providers.data?.config.defaultProvider ?? "";
 	const defaultProviderName =
@@ -1122,6 +1123,9 @@ export function DrawPanel({
 			<section className="sp-section">
 				<div className="sp-section-head">
 					<h4>API 管理（{providers.data?.providers.length ?? 0}）</h4>
+					<button type="button" className="drawer-btn" title="打开生图设置总览" onClick={() => setSettingsOpen(true)}>
+						<IconSettings size={13} /> 设置
+					</button>
 					<button
 						type="button"
 						className="drawer-btn"
@@ -1219,19 +1223,17 @@ export function DrawPanel({
 				)}
 			</section>
 
-			{/* ════════ ② 风格预设 ════════ */}
-			<DrawStylesSection toast={toast} />
-
-			{/* ════════ ③ 插件 A draw-role（config.plugins.draw-role.enabled 开启后渲染）════════ */}
-			{roleEnabled && (
-				<>
-					<WardrobeSection toast={toast} charName={charName} worldState={worldState} />
-					<DrawTagsSection toast={toast} />
-				</>
+			{/* ════════ 生图设置总览（浮动窗口；其余板块已迁入） ════════ */}
+			{settingsOpen && (
+				<DrawSettingsModal
+					toast={toast}
+					charName={charName}
+					worldState={worldState}
+					roleEnabled={roleEnabled}
+					editEnabled={editEnabled}
+					onClose={() => setSettingsOpen(false)}
+				/>
 			)}
-
-			{/* ════════ ④ 插件 D draw-edit（config.plugins.draw-edit.enabled 开启后渲染画廊）════════ */}
-			{editEnabled && <GallerySection />}
 		</div>
 	);
 }
