@@ -75,6 +75,10 @@ if ($old) { Stop-Process -Id $old.OwningProcess -Force }
 ## 产品红线
 
 - 剧情正文：**允许系统组件/旁侧模型修改正文**——2026-08-08 用户裁决移除「绝不改写/补写正文」红线（文章多次润色属常态），如生图管线向正文附加 `[image:slotId]` 占位符锚点、未来润色等均获授权。修改保留可追溯性：原文保留在会话树分支、可回滚（沿用 `docs/DESIGN-story-edit.md` 的 rp-edited 分支机制）；显式改稿（用户手改 / 助手经 story_edit 且征得用户同意）仍走原通道。
+
+## 排查纪律
+
+- **定位 bug 禁止猜测用户的操作路径**（按了哪个按钮 / 走的哪条入口 / 具体流程步骤）——同一现象可能来自完全不同的路径（如「配图按钮」「助手生图」「管线 auto」各有独立实现）。必须先向用户确认实际操作步骤，再据此排查；已确认的路径明确记录，未确认的不做任何假设。2026-08-08 用户裁决。
 - 用户原始世界书只读；agent 新写设定进 `.liyuan-lore/`，不改用户文件。
 - 发布流程：`packages/` 内 `npm-shrinkwrap.json` 由 `scripts/generate-coding-agent-shrinkwrap.mjs` 生成，改依赖后需重跑；每版本发布说明在 `docs/RELEASE-vX.Y.Z.md`。
 
