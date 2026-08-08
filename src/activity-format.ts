@@ -61,7 +61,8 @@ export function formatToolStartDetail(toolName: string, args: unknown): string {
 			const summary = str(a.summary) || str(a.note) || str(a.reason);
 			return summary ? `记账：${clip(summary, 60)}` : "更新世界状态账本";
 		}
-		case "ask_director": {
+		case "ask_director":
+		case "ask": {
 			const q = str(a.question) || str(a.title) || str(a.prompt);
 			return q ? clip(q, 100) : "请用户定夺剧情走向";
 		}

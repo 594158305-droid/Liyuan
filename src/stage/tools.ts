@@ -76,8 +76,7 @@ export function writingGuideTool(language: string, topics: string[]): StageTool 
 		name: "writing_guide",
 		description:
 			`读取本预设附带的写作方法论（${language}）。可用主题：${topics.join(" / ")}。` +
-			`动笔前按本拍场景读相关主题一次，照着写即可。这是**参考不是验收清单**——` +
-			`字数/禁词/格式等机械纪律由验收器在交稿时程序化把关，不要在思考里逐条自查。`,
+			`演到相关段落时读对应主题一次，照着写即可——这是**参考不是验收清单**，机械纪律由剧场在交稿时程序化把关。`,
 		parameters: {
 			type: "object",
 			properties: { topic: { type: "string", enum: topics, description: "要读取的方法论主题" } },
@@ -93,30 +92,68 @@ export function writingGuideTool(language: string, topics: string[]): StageTool 
 export function writeTools(language: string): StageTool[] {
 	return [
 		{
-			name: "draft_write",
+			name: "beat_plan",
 			description:
-				`提交本拍正文（${language}）。这是**唯一交稿方式**——不调用写工具即无正文产出。` +
-				`全量替换语义：每次提交完整正文，覆盖上一稿。` +
-				`不要在思考里反复排练——先落笔，再按验收报告改。` +
-				`可以一次性写完整篇；也可以先写一部分，之后用 draft_append 接着写。` +
-				`**已有稿之后的局部修改一律用 draft_edit 定点改，不要重交全文。**`,
+				`列出这一拍要演的几步（${language}）——落笔前先在这里构思。` +
+				`每条写**这一步发生什么**，一句话的路标（如「被值守弟子拦下」「亮出师门信物」），` +
+				`不是这一步的正文，也不写字数。2~8 条，几条就写几段。` +
+				`这是草图不是剧本：演到中途剧情走岔了，随时重调本工具改写剩下的步骤。`,
 			parameters: {
 				type: "object",
-				properties: { content: { ...STR, description: "完整正文（纯剧情文字，不含状态栏等格式区块）" } },
-				required: ["content"],
+				properties: {
+					steps: {
+						type: "array",
+						description: "本拍的步骤清单，每条一句话路标（不超过 60 字）",
+						items: { ...STR, description: "一步：一个动作或一个转折" },
+					},
+				},
+				required: ["steps"],
+			},
+		},
+		{
+			name: "beat_step_done",
+			description:
+				"勾掉计划里已经演完的一条（写完一段就勾一条）。" +
+				"返回更新后的清单与剩余条数——照着剩下的往下演。",
+			parameters: {
+				type: "object",
+				properties: {
+					step: { type: "number", description: "要勾掉的步骤序号（从 1 开始）" },
+				},
+				required: ["step"],
 			},
 		},
 		{
 			name: "draft_append",
 			description:
-				`在现稿末尾**追加**一段正文（${language}），不覆盖已写部分。` +
-				`适合边写边推进：写完一段就交一段，已写的就是已经发生的事，不会被打回。` +
-				`追加后自动给出当前状态（字数/禁词/是否正站在分岔口）。` +
-				`全部写完后调用 draft_seal 封笔，按完整稿验收。`,
+				`往下演一段（${language}）——你落笔的方式。` +
+				`在现稿末尾追加，不覆盖已写部分：交出去的就是已经发生的事，不会被打回。` +
+				`落笔前先在思考里想清这段的戏（人物此刻的状态、动作、对白、情绪），并回看已写内容重新评估：` +
+				`接下来要不要 ask 用户、剩余路标是否需要重拟、戏是否到停点。` +
+				`一段大约一个自然段就交。全部演完调用 draft_seal 收笔。`,
 			parameters: {
 				type: "object",
-				properties: { segment: { ...STR, description: "要续写的正文段落（自然段，不含状态栏等格式区块）" } },
+				properties: {
+					segment: {
+						...STR,
+						description: "这一段正文（一个自然段，不含状态栏等格式区块）",
+					},
+				},
 				required: ["segment"],
+			},
+		},
+		{
+			name: "draft_write",
+			description:
+				`一次交完整拍正文（${language}），全量替换语义（覆盖上一稿）。` +
+				`只用于**这一拍没有戏**的时候：用户只是寒暄、确认、应一声，场面没有动。` +
+				`有戏的一拍用 draft_append 一段一段演。` +
+				`先落笔，再按验收报告改。` +
+				`**已有稿之后的局部修改一律用 draft_edit 定点改，不要重交全文。**`,
+			parameters: {
+				type: "object",
+				properties: { content: { ...STR, description: "完整正文（纯剧情文字，不含状态栏等格式区块）" } },
+				required: ["content"],
 			},
 		},
 		{
@@ -195,6 +232,30 @@ export function writeTools(language: string): StageTool[] {
 					},
 				},
 				required: ["patch"],
+			},
+		},
+		{
+			name: "ask",
+			description:
+				"剧情共创决策（P7 接回）：这一拍要分岔、或需要用户拍板时，停下来把选择交给用户。\n" +
+				"用这个工具的三类情况：① 用户求方向/递笔（「怎么办」「给个选项」「让我选」）；" +
+				"② 用户要生成/定型身份人设（禁止代写完整档案）；③ 剧情岔路 2+ 条且选哪条会明显改变后续。" +
+				"判据：此刻不定下来剧情就走不下去——不是「新不新、重不重要」。\n" +
+				"给出 2~4 个具体、可落地、彼此不同的选项（${language}），用户作答后按答案继续演。\n" +
+				"用户点了停止 = 笔还给用户，本拍就此收束。\n" +
+				"**选择框分流**：用户预设自带选择框格式（如 <w2g>）时，岔路与回合末选项**按预设格式写进正文**，" +
+				"不要调本工具；只有预设没有选择框格式时才用 ask。",
+			parameters: {
+				type: "object",
+				properties: {
+					question: { ...STR, description: "要交给用户定夺的问题（一句话说清当前局面）" },
+					options: {
+						type: "array",
+						description: "2~4 个具体选项（可落地、彼此不同）",
+						items: { ...STR, description: "一个选项" },
+					},
+				},
+				required: ["question", "options"],
 			},
 		},
 	];

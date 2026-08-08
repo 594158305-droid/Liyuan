@@ -633,6 +633,15 @@ export function extractDraftBody(turnText: string): string {
 	return t.trim();
 }
 
+/**
+ * 引号内区域抹平——只看叙述层。
+ *
+ * 主权检查用它（角色在对白里说「你决定吧」是合法的）；比喻词规则同样需要
+ * （见 checkDraft 内的 metaphorRule）。
+ */
+const stripQuotedSpans = (t: string): string =>
+	t.replace(/「[^」\n]*」|『[^』\n]*』|“[^”\n]*”|"[^"\n]*"/g, "〔对白〕");
+
 /** 机械项核验：violations=必须修；notes=提示性（不拦） */
 export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 	const violations: string[] = [];
@@ -675,7 +684,11 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 	}
 
 	if (rules.metaphorRule) {
-		const words = body.match(/像|仿佛|如同|宛如|好似|犹如/g) ?? [];
+		// 只扫叙述层：对白里的「像吗？」是人物在说话，不是作者在打比方。
+		// 8/08 实弹——自然对白被计成 5 次比喻，模型两段思考全花在跟计数搏斗上，
+		// 最后把对白改僵。可精确计数的文风判决会被当成待优化的分数（与字数螺旋同构）。
+		const narrationOnly = stripQuotedSpans(body);
+		const words = narrationOnly.match(/像|仿佛|如同|宛如|好似|犹如/g) ?? [];
 		const paras = body.split(/\n\s*\n|\n/).filter((s) => s.trim().length > 0).length || 1;
 		const limit = Math.max(1, Math.ceil(paras / 5));
 		if (words.length > limit) {
@@ -700,12 +713,20 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 }
 
 /** 核验报告 → 回喂模型的文本 */
-export function formatDraftReport(r: DraftReport): string {
+/**
+ * 核验报告转可读回喂。
+ *
+ * `showChars=false`（未封笔）时不报字数：整拍字数目标 + 每段回传实测值会闭成误差环，
+ * 实弹里模型的反思整段变成「还差 19 字」的算术，不再想戏（8/08 定案）。
+ * 封笔后是验收场合，读数可见无害。
+ */
+export function formatDraftReport(r: DraftReport, showChars = true): string {
+	const chars = showChars ? `（正文 ${r.bodyChars} 字）` : "";
 	if (r.pass) {
-		return `核验通过（正文 ${r.bodyChars} 字）。${r.notes.length ? `\n${r.notes.join("\n")}` : ""}\n机械项无违规——不要再回头自查这些；若无其他修订，直接停笔收轮。`;
+		return `核验通过${chars}。${r.notes.length ? `\n${r.notes.join("\n")}` : ""}\n机械项无违规——不要再回头自查这些；若无其他修订，直接停笔收轮。`;
 	}
 	const lines = [
-		`核验发现 ${r.violations.length} 处待修（正文 ${r.bodyChars} 字）：`,
+		`核验发现 ${r.violations.length} 处待修${chars}：`,
 		...r.violations.map((v, i) => `${i + 1}. ${v}`),
 		...r.notes,
 		`逐处用 draft_edit 定点替换修正（old 逐字引用现稿原文、须唯一，可一次给多处）——不要重交全文；套用后会自动复验。`,
@@ -714,10 +735,6 @@ export function formatDraftReport(r: DraftReport): string {
 }
 
 // ---------------- 用户主权红线（R5 第二层不变量，规则先行） ----------------
-
-/** 引号内区域抹平——主权检查只看叙述层（角色在对白里说"你决定吧"是合法的） */
-const stripQuotedSpans = (t: string): string =>
-	t.replace(/「[^」\n]*」|『[^』\n]*』|“[^”\n]*”|"[^"\n]*"/g, "〔对白〕");
 
 /** 命中点前若是建议/假设语气则放行（"你可以选择…"不是代做决定） */
 const SOV_GUARD_RE = /(?:可以|可|能|能否|是否|要不要|不妨|请|建议|若|如果|假如|要是|除非|万一|无论)\s*$/;

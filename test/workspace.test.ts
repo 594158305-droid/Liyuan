@@ -5,6 +5,9 @@ import { emptyDraftRules } from "../src/draft.ts";
 import { defaultState } from "../src/state.ts";
 import {
 	createWorkspace,
+	formatPlan,
+	MAX_STEPS,
+	MAX_STEP_LEN,
 	projectedState,
 	runWriteTool,
 	type WorkspaceDeps,
@@ -18,23 +21,135 @@ const deps = (): WorkspaceDeps => ({
 	baseState: defaultState(),
 });
 
-test("writeTools：写侧八件在清单里，两种落笔写法并列、draft_edit 声明批量原子", () => {
+test("writeTools：写侧十一件在清单里，beat_plan 列首为落笔前构思、draft_edit 声明批量原子", () => {
 	const names = writeTools("中文").map((t) => t.name);
+	// 顺序本身就是导流：先构思成清单（beat_plan），再一段一段演（append 在 write 之前）
 	assert.deepEqual(names, [
-		"draft_write",
+		"beat_plan",
+		"beat_step_done",
 		"draft_append",
+		"draft_write",
 		"draft_seal",
 		"draft_edit",
 		"draft_read",
 		"draft_search",
 		"draft_check",
 		"world_state_update",
+		"ask",
 	]);
 	const byName = new Map(writeTools("中文").map((t) => [t.name, t.description]));
 	assert.match(byName.get("draft_write") ?? "", /全量/);
+	// draft_write 收窄为「这一拍没有戏」，描述须自证其适用面
+	assert.match(byName.get("draft_write") ?? "", /没有戏|寒暄/);
 	assert.match(byName.get("draft_append") ?? "", /追加|续写/);
 	assert.match(byName.get("draft_seal") ?? "", /封笔/);
 	assert.match(byName.get("draft_edit") ?? "", /整批不套用/);
+	// beat_plan 的描述必须自证「路标不是正文」——粒度是这个工具的全部价值
+	assert.match(byName.get("beat_plan") ?? "", /路标/);
+	assert.match(byName.get("beat_plan") ?? "", /不是.*正文/);
+	// 计划是草图：描述须声明可改写，否则模型会把它当成必须演完的剧本
+	assert.match(byName.get("beat_plan") ?? "", /草图|改写/);
+});
+
+test("beat_plan：记下路标清单，渲染为方框待办；重拟保留已勾条目的进度", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	const r = runWriteTool(ws, d, "beat_plan", {
+		steps: ["推门进院", "被值守弟子拦下", "亮出师门信物"],
+	});
+	assert.equal(r.ok, true);
+	assert.equal(ws.plan.length, 3);
+	assert.equal(ws.planWrites, 1);
+	assert.ok(ws.plan.every((s) => !s.done), "新计划默认全未完成");
+	assert.match(r.text, /□ 推门进院/, "未完成条目渲染成方框待办");
+
+	runWriteTool(ws, d, "beat_step_done", { step: 1 });
+	// 重拟：走岔了改写后两条，但已经演过的第一条不该因此丢掉进度
+	const again = runWriteTool(ws, d, "beat_plan", {
+		steps: ["推门进院", "院里空无一人", "听见后堂有响动"],
+	});
+	assert.equal(again.ok, true);
+	assert.equal(ws.planWrites, 2);
+	assert.equal(ws.plan[0]?.done, true, "文字未变的已完成步保留勾选");
+	assert.equal(ws.plan[1]?.done, false, "改写出来的新步未完成");
+	assert.match(again.text, /重拟/);
+});
+
+test("beat_plan 粒度门禁：条目写成正文即拒收（构思与排练的结构性分界）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	const prose = "她推开院门，晨雾还没散尽，青石板上凝着一层薄薄的水汽，脚步踩上去几乎没有声音，" +
+		"远处传来隐约的诵经声，像是从很久以前的时光里飘过来的。";
+	assert.ok(prose.length > MAX_STEP_LEN, "用例前提：这条确实超长");
+	const r = runWriteTool(ws, d, "beat_plan", { steps: ["推门进院", prose] });
+	assert.equal(r.ok, false, "计划里写正文必须走不通");
+	assert.equal(ws.plan.length, 0, "拒收即一条不记");
+	assert.match(r.text, new RegExp(`${MAX_STEP_LEN}`), "回喂说明粒度上限");
+	assert.match(r.text, /正文留给 draft_append/, "把正文导回稿纸");
+
+	// 条数上限：一拍是一小段戏，不是整章大纲
+	const many = Array.from({ length: MAX_STEPS + 1 }, (_, i) => `第${i + 1}步`);
+	const tooMany = runWriteTool(ws, d, "beat_plan", { steps: many });
+	assert.equal(tooMany.ok, false);
+	assert.match(tooMany.text, /整章大纲/);
+
+	// 非数组 / 空数组都拒收，且不抛
+	assert.equal(runWriteTool(ws, d, "beat_plan", { steps: [] }).ok, false);
+	assert.equal(runWriteTool(ws, d, "beat_plan", {}).ok, false);
+});
+
+test("beat_step_done：按序号勾掉并回报剩余；越界/重复勾/无计划都拒收", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 1 }).ok, false, "没有计划时无从勾起");
+
+	runWriteTool(ws, d, "beat_plan", { steps: ["推门进院", "被弟子拦下"] });
+	const ok = runWriteTool(ws, d, "beat_step_done", { step: 1 });
+	assert.equal(ok.ok, true);
+	assert.equal(ws.plan[0]?.done, true);
+	assert.match(ok.text, /还剩 1 条/);
+	assert.match(ok.text, /☑ ~~推门进院~~/, "已完成条目打勾划掉");
+
+	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 1 }).ok, false, "重复勾拒收");
+	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 9 }).ok, false, "越界拒收");
+	assert.equal(runWriteTool(ws, d, "beat_step_done", {}).ok, false, "缺参数拒收");
+
+	// 全部勾完：导向通读与封笔，而不是继续催段
+	const last = runWriteTool(ws, d, "beat_step_done", { step: 2 });
+	assert.equal(last.ok, true);
+	assert.match(last.text, /draft_seal/);
+});
+
+test("续写回执不含字数读数：目标可持有，测量值不回传（8/08 定案）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "beat_plan", { steps: ["推门进院", "被弟子拦下"] });
+	const r = runWriteTool(ws, d, "draft_append", { segment: "她推开院门，晨雾还没散尽。" });
+	assert.equal(r.ok, true);
+	// 「正文 N 字」这类读数会与目标闭成误差环，把思考吃成算术（8/08 实弹 829→797）
+	assert.ok(!/正文 \d+ 字/.test(r.text), "未封笔回执不报正文字数");
+	assert.ok(!/\d+ 字/.test(r.activity ?? ""), "过程条也不报字数");
+	assert.match(r.text, /计划还剩 2 条/, "改以计划进度代替字数进度（此时尚未勾选）");
+
+	// 未封笔的定点改稿同样不带读数
+	const e = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "晨雾", new: "薄雾" }] });
+	assert.equal(e.ok, true);
+	assert.ok(!/正文 \d+ 字/.test(e.text), "未封笔改稿回执不报正文字数");
+
+	// 封笔后是验收场合：字数可见无害，验收报告照常给
+	const sealed = runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(sealed.ok, true);
+	assert.equal(ws.sealed, true);
+});
+
+test("formatPlan：空计划有可读兜底，混合状态各按其形渲染", () => {
+	assert.match(formatPlan([]), /还没有计划/);
+	const rendered = formatPlan([
+		{ text: "推门进院", done: true },
+		{ text: "被弟子拦下", done: false },
+	]);
+	assert.match(rendered, /1\. ☑ ~~推门进院~~/);
+	assert.match(rendered, /2\. □ 被弟子拦下/);
 });
 
 test("draft_write：收稿落工作区并自动验收；空 content 拒收", () => {
@@ -50,6 +165,53 @@ test("draft_write：收稿落工作区并自动验收；空 content 拒收", () 
 	assert.equal(ws.writes, 1);
 	assert.equal(ws.checks, 1); // 收稿即验，省一轮往返
 	assert.match(r.text, /已收稿（第 1 稿/);
+});
+
+test("draft_write 门禁：查过世界＝这拍有戏，一次交完被拒收并导向 draft_append", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	ws.lookups = 2; // 引擎在读侧工具执行后打点（lorebook / memory / world_state_get）
+
+	const r = runWriteTool(ws, d, "draft_write", { content: "山门外的雪落了一夜。" });
+	assert.equal(r.ok, false, "拒收而不是放行后再劝");
+	assert.equal(ws.draft, "", "拒收不留痕：稿子没被写进去");
+	assert.equal(ws.writes, 0);
+	assert.match(r.text, /draft_append/, "把正确的路回喂给模型");
+	assert.match(r.text, /查过 2 次世界/, "回喂里带上判据本身");
+});
+
+test("draft_write 门禁：没查过世界（寒暄拍）照常收稿", () => {
+	const ws = createWorkspace();
+	const r = runWriteTool(ws, deps(), "draft_write", { content: "山门外的雪落了一夜。" });
+	assert.equal(r.ok, true);
+	assert.equal(ws.writes, 1);
+});
+
+test("draft_write 门禁：writing_guide 不计入 lookups，故读过方法论仍可一次交完", () => {
+	// lookups 只认「查世界」；读写作方法论不是遇到了要处理的事
+	const ws = createWorkspace();
+	assert.equal(ws.lookups, 0, "新工作区从 0 起");
+	const r = runWriteTool(ws, deps(), "draft_write", { content: "山门外的雪落了一夜。" });
+	assert.equal(r.ok, true);
+});
+
+test("draft_write 门禁：续写到一半改用全量重交不拦（另有 draft_edit 的劝导）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	ws.lookups = 1;
+	runWriteTool(ws, d, "draft_append", { segment: "第一段。" });
+	const r = runWriteTool(ws, d, "draft_write", { content: "整篇重写过的正文。" });
+	assert.equal(r.ok, true, "appends>0 时门禁让路");
+	assert.equal(ws.draft, "整篇重写过的正文。");
+});
+
+test("draft_write 门禁：internal 代收绕过门禁——兜底路径不能把正文丢掉", () => {
+	// 宽进严出：模型直出正文由引擎代收为 draft_write。被门禁拦下就等于这拍白演。
+	const ws = createWorkspace();
+	ws.lookups = 3;
+	const r = runWriteTool(ws, deps(), "draft_write", { content: "直出的正文。" }, true);
+	assert.equal(r.ok, true);
+	assert.equal(ws.draft, "直出的正文。");
 });
 
 // ---------------- M-E：draft_append / draft_seal（分段续写） ----------------

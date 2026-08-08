@@ -339,34 +339,15 @@ ${
 	);
 
 	if (tools !== false) {
-		const skillLine =
-			skillTopics && skillTopics.length > 0
-				? `\n- \`writing_guide\`：本预设附有写作方法论（主题：${skillTopics.join(" / ")}）——动笔前按本拍场景读一遍相关主题，照着写；它是参考不是验收清单`
-				: "";
 		sections.push(
-			`# 工作方式：像写手用编辑器一样用工具（硬性）
-你的一拍是一个工作循环：**想清楚要写什么 → 用工具查证 → 落笔 → 看验收报告 → 需要就 \`draft_edit\` 定点改 → \`world_state_update\` 记账 → 收笔**。
+			`# 怎么演这一拍
+你正在和用户共同进行角色扮演。
 
-落笔有两种写法，按本拍需要自己选：
-- **边写边推进**（\`draft_append\` 续写，写完 \`draft_seal\` 封笔）：写一段交一段，已写的就是已经发生的事、不会被推翻。适合这一拍中途会遇到需要查证的事实、要记的账、或剧情有真岔口的时候——写到那里停下来处理，再接着往下写。
-- **一次写完**（\`draft_write\` 全量交稿）：适合走向已经明确、一气呵成的短拍。
+一拍 = 演一段 → 回看刚写下的 → 重新评估计划 → 再演一段，直到戏到停点。具体的每一步由每轮注入的【第 1 步·规划】【开工】【演段回看】指示，以注入为准。
 
-只读工具（动笔前查资料）：
-- \`lorebook_search\`：设定集（地点/族群/历史/法术等世界细节）——要写没有十足把握的设定事实，先查，查不到才算「未被写下」
-- \`memory_search\`：剧情库（被压缩出上下文的早期正文、往期摘要、导入资料）——重新带回【登场名录】里记不清的人物/物品/剧情线之前必须先查
-- \`world_state_get\`：当前账本（时间/地点/好感/物品/标记/剧情线）——拿不准既定事实先查${skillLine}
-把握十足、纯感官与情绪描写、角色内心戏——直接写，不必为用而用。
-
-写侧七件（本拍的产出全部经它们交付）：
-- \`draft_write\`：全量交稿（每次提交完整正文，覆盖上一稿）。收稿立刻返回验收报告（字数/禁词/格式由代码判定）。**不要在思考里反复排练和自检**——那是验收器的工作，落了笔才有报告。
-- \`draft_append\`：在现稿末尾续写一段，不覆盖已写部分。中途可以随时插入查证/记账/其他工具，再接着续。
-- \`draft_seal\`：封笔（声明正文写完，按完整稿全量验收）。用 \`draft_append\` 写的必须封笔，否则本拍没有最终正文。
-- \`draft_edit\`：**改稿的首选**。按报告逐处定点替换（old 逐字引用现稿且唯一，可一次给多处），改完自动复验。**不要为改几句话重交全文。**
-- \`draft_read\`：读回现稿全文与验收口径字数（改了多轮拿不准时用）。
-- \`draft_search\`：在现稿里定位文字，取 draft_edit 要用的精确原文。
-- \`draft_check\`：额外复验（交稿与改稿时都已自动验过）。
-- \`world_state_update\`：世界状态记账。本拍剧情改变了世界（时间流逝/移动/关系变化/物品得失/剧情推进）就在收笔前提交补丁——你是唯一在现场的人，不提交账本就会漂移。
-全绿且账已记，停止调用工具即完成本拍。`,
+两条铁律：
+- **正文只在稿纸上诞生**：稿纸工具是正文唯一入口，不要直接输出正文。
+- **计划是假设不是剧本**：每演完一段都要回看，已经写下的戏比计划更算数；剧情走岔了就重拟计划，不要硬演早先的设想。`,
 		);
 	}
 
@@ -404,7 +385,7 @@ ${index}`,
 		}
 		if (styleTexts.length > 0) {
 			sections.push(
-				`# 文风与写法（用户预设）\n以下是本场演出的文风与写法要求——写作时照此执行。字数、禁词、句式等机械纪律由剧场在交稿时程序化核验，不要在思考里逐条自查。\n\n${styleTexts.join("\n\n")}`,
+				`# 文风与写法（用户预设）\n以下是本场演出的文风与写法要求，写作时照此执行：\n\n${styleTexts.join("\n\n")}`,
 			);
 		}
 		if (boundaryTexts.length > 0) {
@@ -535,15 +516,16 @@ export function buildStageInjection({
 		}
 		if (presetTail.styleTexts.length > 0) {
 			blocks.push(
-				`【文风与写法】写作时照此执行（机械纪律由验收器把关，不要自查）：\n${presetTail.styleTexts.join("\n\n")}`,
+				`【文风与写法】写作时照此执行（从落笔起生效）：\n${presetTail.styleTexts.join("\n\n")}`,
 			);
 		}
 		if (presetTail.boundaryTexts.length > 0) {
-			blocks.push(`【行为边界】写作时刻刻要守：\n${presetTail.boundaryTexts.join("\n\n")}`);
+			blocks.push(`【行为边界】写作时刻刻要守（从落笔起生效）：\n${presetTail.boundaryTexts.join("\n\n")}`);
 		}
 	}
 
-	// 末端导演备注：上下文末尾权重最大，语言与主权纪律钉在这里
+	// 末端导演备注：上下文末尾权重最大，语言与主权纪律钉在这里。
+	// P9：一个提醒一件事——状态栏/思考用法各自成块，不挤在导演备注里互相稀释。
 	const notes: string[] = [];
 	if (card.postHistoryInstructions) {
 		notes.push(applyMacros(card.postHistoryInstructions, macro));
@@ -553,44 +535,56 @@ export function buildStageInjection({
 	} else {
 		notes.push(`以${config.language}写叙事与对白（专有名词可保留原文）；不替 ${config.userName} 行动、说话或代述想法。`);
 	}
-	notes.push(`演完本拍即停，停在 ${config.userName} 可接话处；不连演多拍，不写总结式收场白。`);
+	// 篇幅：一次性任务信息，不是待通过的考试。
+	//
+	// 旧文案「由验收器核验，写作时朝这个量落笔即可」把篇幅变成了落笔前必须对准的
+	// 总量目标，而它又坐在末端注入（权重最高、紧贴用户话）的位置上——8/08 实弹里
+	// 模型逐字引用这一行后当场在思考里写完整篇初稿（13587 字思考），清单退化成
+	// 事后补登记。故：去掉验收暗示与「朝这个量落笔」的规划指令，只留一句背景信息，
+	// 并让它排在导演备注靠前的位置，把末尾权重留给语言/主权/状态栏这些真纪律。
 	if (wordRange) {
-		notes.push(
-			`本拍正文目标 ${wordRange.min}–${wordRange.max} 字（不含状态栏等格式区块）——由验收器核验，写作时朝这个量落笔即可。`,
-		);
+		notes.push(`这一拍大约 ${wordRange.min}–${wordRange.max} 字（不含状态栏等格式区块），心里有数即可，不必核算。`);
 	} else if (presetActive) {
 		notes.push(`篇幅与格式优先遵循上方预设要求（若有）。`);
 	} else {
-		notes.push(`本拍可见正文约 800–1500 字（短打约 400）。`);
+		notes.push(`这一拍可见正文约 800–1500 字（短打约 400），心里有数即可。`);
 	}
+	notes.push(`演完本拍即停，停在 ${config.userName} 可接话处；不连演多拍，不写总结式收场白。`);
+	blocks.push(`【导演备注】\n${notes.join("\n")}`);
+
+	// 状态栏独立成块（P9：一个提醒一件事，不挤进导演备注）
 	if (statusBarFormats && statusBarFormats.length > 0) {
 		const placeholders = statusBarFormats.filter(isPlaceholderStatusFormat);
 		const panels = statusBarFormats.filter((f) => !isPlaceholderStatusFormat(f));
 		if (placeholders.length > 0 && panels.length === 0) {
-			notes.push(
-				`⚠ 状态栏是本卡扮演的一部分：正文之后原样输出 ${placeholders.join(" 或 ")}（自闭合占位符，界面由卡渲染）；漏写即未完成本拍。`,
+			blocks.push(
+				`【状态栏】本卡扮演的一部分：正文之后原样输出 ${placeholders.join(" 或 ")}（自闭合占位符，界面由卡渲染）；漏写即未完成本拍。`,
 			);
 		} else {
-			notes.push(
-				`⚠ 状态栏是本卡扮演的一部分：正文之后必须输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本拍剧情更新；漏写状态栏即未完成本拍。`,
+			blocks.push(
+				`【状态栏】本卡扮演的一部分：正文之后必须输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本拍剧情更新；漏写状态栏即未完成本拍。`,
 			);
 		}
 	}
 	if (languageMismatch) {
-		notes.push(
-			`⚠ 你上一拍使用了错误的语言。从本拍起，全部叙事与对白必须使用${config.language}（专有名词可保留原文）。这是硬性要求，立即纠正。`,
+		blocks.push(
+			`【语言纠正】你上一拍使用了错误的语言。从本拍起，全部叙事与对白必须使用${config.language}（专有名词可保留原文）。这是硬性要求，立即纠正。`,
 		);
 	}
 	// M4.5 给排练断粮（慢因 A）：思考通道的职能被 harness 逐项接管后，明示它只剩读题与决定。
-	// 「写完自检」类工作已归验收层（代码判）与精修阶段，模型在思考里重做一遍纯属白烧墙钟时间。
+	// 8/08 修正：旧文案连「构思」一起禁了，与「先 beat_plan 列路标」的协议自相矛盾——
+	// 网页版对照实验证明，分步骤+抽象配额是模型写命题作文的天然健康策略，该留；
+	// 病的是把构思写成成段正文。故此处只禁起草文字。
+	// 8/08 晚二次修正：本块是**每拍都在的静态注入**（规划轮也在场）——分轮职责
+	// （当前段怎么演/要不要 ask/路标是否重拟/戏是否到停点）只准出现在演段回看卡
+	// （roundCardFor，appends>0 才注入）。写在这里会泄漏给第 1 轮，把规划轮思考
+	// 撑到 3k 字（20:13 实弹 3034 字复现）。本块只留轮次无关的纯纪律。
 	if (rehearsalGuard) {
-		notes.push(
-			`【思考的用法】思考只用于两件事：读懂本拍处境（谁在场、上文到哪、用户要什么），以及决定本拍演什么。` +
-				`不要在思考里起草、预写或逐句打磨正文——想清楚就直接动笔写。` +
+		blocks.push(
+			`【思考的用法】思考与正文的分界：不要在思考里起草或逐句打磨任何一段正文——正文只在稿纸上写。` +
 				`也不要在思考里逐条复核禁词、句式、字数：这些由剧场在你收笔后程序化核验，需要改会把原文和违规清单一并交给你定点修订。`,
 		);
 	}
-	blocks.push(`【导演备注】\n${notes.join("\n")}`);
 
 	return blocks.join("\n\n");
 }

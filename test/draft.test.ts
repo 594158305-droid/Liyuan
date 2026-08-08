@@ -221,6 +221,24 @@ test("checkDraft：自闭合占位符状态栏（<StatusPlaceHolderImpl/>）命�
 	assert.ok(r3.violations.some((v) => v.includes("状态栏")), "真缺了才报");
 });
 
+test("checkDraft：比喻词只扫叙述层——对白里的「像」不计数（8/08 实弹回归）", () => {
+	const rules = extractDraftRules(["比喻使用原则：频率：5个段落内只允许使用1次比喻。"]);
+	// 实弹原形：三句对白全是人物在说「像」，叙述层一个比喻都没有。
+	// 旧规则计成 3 次并判违规，模型两段思考全花在跟计数搏斗、最后把对白改僵。
+	const dialogue = "“像吗？真的像吗？”她问。\n\n“像。”我说，“挺像回事的。”\n\n她笑了。";
+	const r = checkDraft(dialogue, rules);
+	assert.equal(r.violations.length, 0, "对白里的像不是作者在打比方");
+	assert.ok(!r.notes.some((n) => n.includes("比喻词")), "既不计数也不提示");
+
+	// 叙述层的真比喻照旧受管——修的是误判，不是把规则关掉
+	const narration = "夜像墨。\n\n风像刀。\n\n人像影。";
+	assert.ok(checkDraft(narration, rules).violations.some((v) => v.includes("比喻词 3 次")));
+
+	// 混合稿：只数叙述层那一处，对白不计入
+	const mixed = "夜像墨。\n\n“像吗？”她问。\n\n“像。”我说。";
+	assert.equal(checkDraft(mixed, rules).violations.length, 0);
+});
+
 test("checkDraft：比喻频率超限报违规，限内只进 notes", () => {
 	const rules = extractDraftRules(["比喻使用原则：频率：5个段落内只允许使用1次比喻。"]);
 	const over = "夜像墨。\n\n风像刀。\n\n人像影。";

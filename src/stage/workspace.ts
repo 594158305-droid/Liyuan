@@ -26,9 +26,28 @@ import {
 import { applyPatch, canonicalizeCharacterKeys } from "../state.ts";
 import type { WorldState } from "../types.ts";
 
+/** 拍内计划的一条：一个动作/一个转折，不是正文 */
+export interface BeatStep {
+	text: string;
+	done: boolean;
+}
+
 export interface TurnWorkspace {
 	/** 当前稿（draft_write 全量替换语义；draft_append 追加语义） */
 	draft: string;
+	/**
+	 * 本拍计划清单（beat_plan）——首轮构思的落点。
+	 *
+	 * 构思若只活在思考里，要么被逐轮回放固化成剧本，要么在切断回放后蒸发；
+	 * 落成清单则是工件：模型每轮面对的是「现稿 + 剩余待办」而非旧思考。
+	 * 条目粒度由 MAX_STEP_LEN 挡住——写得下路标，写不下正文，
+	 * 于是「构思」与「脑内排练整拍初稿」在结构上被分开。
+	 *
+	 * 拍内临时：随工作区谢幕即弃，不跨拍（跨拍大纲＝长期剧本，是另一种病）。
+	 */
+	plan: BeatStep[];
+	/** beat_plan 调用次数（KPI：构思是否真被推翻重拟过） */
+	planWrites: number;
 	/**
 	 * 已封笔（M-E）：正文写完了，可以按完整稿验收。
 	 *
@@ -43,6 +62,13 @@ export interface TurnWorkspace {
 	appends: number;
 	/** draft_edit 成功套用的次数（M-B KPI：定点改稿是否真替代了全文重交） */
 	edits: number;
+	/**
+	 * 本拍查过几次世界（lorebook / memory / world_state_get；不含 writing_guide）。
+	 *
+	 * 用作「这一拍有没有戏」的外部事实：查过世界＝中途确实遇到了需要停下来处理的
+	 * 事，那这一拍本该一段一段演。draft_write 的门禁据此判定（见 runWriteTool）。
+	 */
+	lookups: number;
 	/** world_state_update 已验证入队的 patch（定稿后按序统一套用） */
 	patches: Record<string, unknown>[];
 	/** 最近一次验收是否全绿（谢幕判定用；未验收过 = false） */
@@ -74,7 +100,20 @@ export type TurnSegment =
 	| { kind: "tool"; activities: Array<{ kind: string; name: string; detail?: string; isError?: boolean }> };
 
 export function createWorkspace(): TurnWorkspace {
-	return { draft: "", sealed: false, writes: 0, appends: 0, edits: 0, patches: [], lastGreen: false, checks: 0, timeline: [] };
+	return {
+		draft: "",
+		plan: [],
+		planWrites: 0,
+		sealed: false,
+		writes: 0,
+		appends: 0,
+		edits: 0,
+		lookups: 0,
+		patches: [],
+		lastGreen: false,
+		checks: 0,
+		timeline: [],
+	};
 }
 
 /** 时间线追加：同类并入末段（连续工具聚成一组），异类开新段 */
@@ -184,6 +223,24 @@ export interface WriteToolResult {
 	ok: boolean;
 }
 
+/** 单条计划的长度上限：路标写得下，正文写不下（构思／排练的结构性分界） */
+export const MAX_STEP_LEN = 60;
+/** 一拍的计划条数上限：够铺一拍，多了就是在写大纲 */
+export const MAX_STEPS = 8;
+
+/** 渲染清单：方框 + 待办，已完成的打勾划掉（□/☑ 与删除线同构于用户看到的任务列表） */
+export function formatPlan(plan: BeatStep[]): string {
+	if (plan.length === 0) return "（本拍还没有计划）";
+	return plan
+		.map((s, i) => (s.done ? `${i + 1}. ☑ ~~${s.text}~~` : `${i + 1}. □ ${s.text}`))
+		.join("\n");
+}
+
+/** 剩余未完成条数 */
+function pendingSteps(plan: BeatStep[]): number {
+	return plan.filter((s) => !s.done).length;
+}
+
 /** 验收现稿：报告文本 + 是否全绿（draft_write 收稿后与 draft_check 共用） */
 function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green: boolean } {
 	const report = checkDraft(ws.draft, deps.rules);
@@ -199,13 +256,21 @@ function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green
 		: report.violations;
 	const green = violations.length === 0 && sov.length === 0;
 	ws.lastGreen = green && !pending;
-	const lines = [formatDraftReport({ ...report, violations })];
+	// 未封笔：连同 notes 里的「正文 N 字，预设建议上/下限」一并滤掉——
+	// 那是最直接的误差信号（目标 − 实测），留着等于把游标卡尺塞回模型手里。
+	const notes = pending ? report.notes.filter((n) => !/^正文 \d+ 字/.test(n)) : report.notes;
+	const lines = [formatDraftReport({ ...report, violations, notes }, !pending)];
 	if (sov.length > 0) lines.push(sov.map((s) => `- [主权] ${s}`).join("\n"));
 	if (pending) {
-		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;
+		// 未封笔阶段不回传字数读数（8/08 定案）：模型可以持有「这拍大约多长」的目标，
+		// 但系统一旦回传测量值，目标−测量就闭成误差环，思考会被「还差 19 字」这类
+		// 机械核算吃掉（8/08 实弹逐字复现）。改回传计划进度：是路标，不是可逼近的量。
+		const left = ws.plan.length > 0 ? pendingSteps(ws.plan) : -1;
 		lines.push(
-			`续写中（已 ${ws.appends} 段，正文 ${body} 字，未封笔）：` +
-				`接着 draft_append 往下写；写到头了用 draft_seal 封笔并按完整稿验收。`,
+			`续写中（已 ${ws.appends} 段，未封笔）：` +
+				(left > 0
+					? `计划还剩 ${left} 条——勾掉刚演完的那条（beat_step_done），再往下演。`
+					: `接着 draft_append 往下写；写到头了用 draft_seal 封笔并按完整稿验收。`),
 		);
 	} else if (green) {
 		lines.push("验收通过：可定稿（停止调用工具即交付此稿），或继续打磨。");
@@ -222,10 +287,100 @@ export function runWriteTool(
 	deps: WorkspaceDeps,
 	name: string,
 	args: Record<string, unknown>,
+	/**
+	 * 内部代收（宽进严出）：跳过 draft_write 门禁。
+	 *
+	 * 引擎把模型直出的正文代收为 draft_write 时，那不是模型的选择而是兜底——
+	 * 若被门禁拦下，这拍的正文就凭空丢了。只有 engine #agentLoop 传 true。
+	 */
+	internal = false,
 ): WriteToolResult {
+	if (name === "beat_plan") {
+		const raw = args.steps;
+		if (!Array.isArray(raw) || raw.length === 0) {
+			return { text: 'steps 需为非空字符串数组，如 ["推门进院","被值守弟子拦下","亮出师门信物"]。', ok: false };
+		}
+		const texts = raw.map((s) => (typeof s === "string" ? s.trim() : "")).filter((s) => s.length > 0);
+		if (texts.length === 0) return { text: "steps 里没有有效条目。", ok: false };
+		if (texts.length > MAX_STEPS) {
+			return {
+				text: `计划最多 ${MAX_STEPS} 条（收到 ${texts.length} 条）——一拍是一小段戏，不是整章大纲。合并成几个关键动作。`,
+				ok: false,
+			};
+		}
+		// 粒度门禁：条目是路标不是正文。超长就是在清单里排练，拒收并说明——
+		// 让错的路走不通（承 draft_write 门禁同一手法）。
+		const tooLong = texts.filter((t) => t.length > MAX_STEP_LEN);
+		if (tooLong.length > 0) {
+			return {
+				text:
+					`未记计划。有 ${tooLong.length} 条超过 ${MAX_STEP_LEN} 字——计划写的是**这一步要发生什么**` +
+					`（如「被值守弟子拦下」），不是这一步的正文。把它们压成一句话的路标；正文留给 draft_append。`,
+				activity: "计划过细被拦下",
+				ok: false,
+			};
+		}
+		// 重拟保留已完成条目的勾选状态：文字一致者视为同一步，不因改写后半段而丢进度。
+		// 重拟是常态不是走岔：每演完一段，上文就变了，原计划剩余几步是否还成立
+		// 必须重新评估——计划只是起点假设，服务于当前上文，随时可改。
+		const doneTexts = new Set(ws.plan.filter((s) => s.done).map((s) => s.text));
+		ws.plan = texts.map((t) => ({ text: t, done: doneTexts.has(t) }));
+		ws.planWrites++;
+		const verb = ws.planWrites > 1 ? "计划已更新（重拟）" : "已记下计划";
+		return {
+			text:
+				`${verb}（${ws.plan.length} 条）：\n${formatPlan(ws.plan)}\n\n` +
+				`这是起点假设，不是剧本：每演完一段都要回看刚写的，重新评估剩余几步还成立吗——` +
+				`成立就勾掉继续，不成立就重拟 beat_plan，剧情到岔路就 ask 用户。` +
+				`接着按第一条未完成的演：draft_append 落这一段。`,
+			activity: `${verb} · ${ws.plan.length} 条`,
+			ok: true,
+		};
+	}
+
+	if (name === "beat_step_done") {
+		if (ws.plan.length === 0) return { text: "本拍还没有计划——先用 beat_plan 列出这一拍要演的几步。", ok: false };
+		const idx = typeof args.step === "number" ? args.step : Number.NaN;
+		if (!Number.isInteger(idx) || idx < 1 || idx > ws.plan.length) {
+			return { text: `step 需为 1~${ws.plan.length} 的序号（当前计划 ${ws.plan.length} 条）。`, ok: false };
+		}
+		const target = ws.plan[idx - 1]!;
+		if (target.done) {
+			return { text: `第 ${idx} 条已经勾过了。当前计划：\n${formatPlan(ws.plan)}`, ok: false };
+		}
+		target.done = true;
+		const left = pendingSteps(ws.plan);
+		return {
+			text:
+				`已勾掉第 ${idx} 条「${target.text}」，还剩 ${left} 条。当前计划：\n${formatPlan(ws.plan)}\n\n` +
+				`回看刚写下的这段，再决定下一步：` +
+				`· 剩余计划还成立 → 接着演下一条（draft_append）；` +
+				`· 不成立 → beat_plan 重拟剩下几步；` +
+				`· 剧情到岔路 → ask 用户拍板；` +
+				`· 戏已经到停点（${deps.userName} 能接话）→ 直接 draft_seal 收笔，清单没勾完也没关系——` +
+				`计划是草稿，戏演到哪算哪。`,
+			activity: `勾掉「${target.text}」· 剩 ${left} 条`,
+			ok: true,
+		};
+	}
+
 	if (name === "draft_write") {
 		const content = typeof args.content === "string" ? args.content : "";
 		if (!content.trim()) return { text: "content 为空——请提交完整正文。", ok: false };
+		// 门禁：draft_write 只留给「这一拍没有戏」。查过世界（设定/旧账/账本）
+		// 说明中途确实遇到了要停下来处理的事——那这拍本该一段一段演。
+		// 拒收而不是放行后再劝：让错的路走不通，把原因回喂（承 Codex plan.rs 的手法）。
+		// 已经在续写中（appends>0）则不拦：那是分段写到一半改用全量重交，另有 draft_edit 的劝导。
+		if (!internal && ws.lookups > 0 && ws.appends === 0 && ws.draft === "") {
+			return {
+				text:
+					`未收稿。这一拍你查过 ${ws.lookups} 次世界——有要停下来处理的事，就是有戏的一拍，` +
+					`用 draft_append 一段一段演（一段约一个自然段，交完读一遍再决定下一段往哪走），演完 draft_seal 收笔。\n` +
+					`draft_write 只用于这一拍没有戏的时候：用户只是寒暄、确认、应一声，场面没有动。`,
+				activity: "一次交完被拦下（这拍有戏）",
+				ok: false,
+			};
+		}
 		ws.draft = content;
 		ws.writes++;
 		ws.sealed = true; // 全量交稿即完整稿，天然封笔
@@ -247,14 +402,13 @@ export function runWriteTool(
 		const sep = ws.draft.trim().length > 0 ? "\n\n" : "";
 		ws.draft += sep + seg;
 		ws.appends++;
-		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;
 		// 续写的正文入时间线：追加一段（不是替换——已写的部分是已经发生的事，不推翻）
 		ws.timeline.push({ kind: "text", text: seg, draft: true });
-		// 收段即验：报告当前状态（字数/禁词），但未封笔不判字数违规
+		// 收段即验：报告当前状态（禁词/主权），但未封笔不判字数违规、也不回传字数读数
 		const c = runCheck(ws, deps);
 		return {
-			text: `已续写（第 ${ws.appends} 段，正文 ${body} 字）。当前状态：\n${c.text}`,
-			activity: `续写第 ${ws.appends} 段 · ${body} 字`,
+			text: `已续写（第 ${ws.appends} 段）。当前状态：\n${c.text}`,
+			activity: `续写第 ${ws.appends} 段`,
 			ok: true,
 		};
 	}
@@ -296,9 +450,12 @@ export function runWriteTool(
 		else replaceDraftSegment(ws, ws.draft);
 		// 改稿即验（与 draft_write 收稿即验同理）：省一轮往返
 		const c = runCheck(ws, deps);
+		// 未封笔时不带字数读数（同 draft_append 口径）；封笔后是验收场合，字数可见无害
+		const pending = ws.appends > 0 && !ws.sealed;
 		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;
+		const head = pending ? `已改 ${edits.length} 处` : `已改 ${edits.length} 处（正文 ${body} 字）`;
 		return {
-			text: `已改 ${edits.length} 处（正文 ${body} 字）：\n${r.details.join("\n")}\n\n验收报告：\n${c.text}`,
+			text: `${head}：\n${r.details.join("\n")}\n\n验收报告：\n${c.text}`,
 			activity: `定点改稿 ${edits.length} 处${c.green ? " · 验收通过" : ""}`,
 			ok: true,
 		};
