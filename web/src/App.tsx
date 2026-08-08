@@ -504,8 +504,24 @@ export default function App() {
 			illustrateLockRef.current = true;
 			setIllustrateBusy(true);
 			try {
-				await apiPost<{ ok: boolean; ran?: boolean; reason?: string }>("/api/draw/pipeline/run", { text: t });
-				pushToast("info", "配图任务已提交（约需 30–90 秒，完成后自动嵌入正文）");
+				// 宿主同步执行管线：HTTP 返回即管线执行完毕（ran/reason/slots/warnings 透传），按结果分级反馈
+				const r = await apiPost<{
+					ok: boolean;
+					ran?: boolean;
+					reason?: string;
+					slots?: { slotId: string }[];
+					warnings?: string[];
+					embedded?: boolean;
+				}>("/api/draw/pipeline/run", { text: t });
+				if (r.ran === false) {
+					pushToast("warning", `配图未执行：${r.reason ?? "未知原因"}`);
+				} else if (r.embedded === false) {
+					pushToast("warning", `配图完成 ${r.slots?.length ?? 0} 张，但未能嵌入正文（请在画廊查看）`);
+				} else if (r.warnings && r.warnings.length > 0) {
+					pushToast("warning", `配图完成 ${r.slots?.length ?? 0} 张，但有警告：${r.warnings[0]}`);
+				} else {
+					pushToast("info", `配图完成（${r.slots?.length ?? 0} 张，已嵌入正文）`);
+				}
 			} catch (err) {
 				pushToast("error", err instanceof Error ? err.message : String(err));
 			} finally {

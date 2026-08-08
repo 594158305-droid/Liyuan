@@ -3,6 +3,8 @@
  * 纯函数：组装 system + user 提示词；LLM 调用经注入（便于测试）。
  */
 
+import { DEFAULT_DRAW_ASPECTS, type DrawAspects } from "../../draw/config.ts";
+
 export interface PlannerInput {
 	/** 当前 AI 消息正文 */
 	messageText: string;
@@ -18,19 +20,26 @@ export interface PlannerInput {
 	loreText: string;
 	/** 在场角色档案摘要（resolveCharacterTags 结果的紧凑文本，缺省 ""） */
 	characterNotes: string;
+	/** 三档构图分辨率（动态分辨率；缺省回退默认表）——注入提示词让模型按真实比例构图 */
+	aspects?: DrawAspects;
 	maxImages: number;
 	maxCharactersPerImage: number;
 }
 
-/** 输出格式规范（严格只输出 YAML 块） */
-const OUTPUT_FORMAT_SPEC = `你负责为一段剧情正文规划配图。严格只输出一个 <image_gen> YAML 块，不要输出任何其它文字、解释或围栏外内容。
+/**
+ * 输出格式规范（严格只输出 YAML 块）。
+ * aspect 行注入三档实际分辨率（动态分辨率）：LLM 只选档位，但构图描述按真实比例写。
+ */
+function buildOutputFormatSpec(aspects: DrawAspects): string {
+	const { portrait, landscape, square } = aspects;
+	return `你负责为一段剧情正文规划配图。严格只输出一个 <image_gen> YAML 块，不要输出任何其它文字、解释或围栏外内容。
 
 <image_gen> 块格式（YAML）：
 \`\`\`
 <image_gen>
   - index: 1
     anchor: "正文锚点原文片段"        # 选填；缺省=消息末尾
-    aspect: landscape                  # portrait | landscape | square
+    aspect: landscape                  # portrait(${portrait.width}x${portrait.height}) | landscape(${landscape.width}x${landscape.height}) | square(${square.width}x${square.height})
     scene: "1girl, tavern interior, warm candlelight, ..."   # 完整画面描述（Danbooru tag 或自然语言，70-100 个 tag/词）
     negative: ""                       # 选填：整图补充负面
     characters:                        # 选填：需要角色特征时
@@ -45,6 +54,7 @@ const OUTPUT_FORMAT_SPEC = `你负责为一段剧情正文规划配图。严格�
 - 分级：sfw 内容直接写；轻度擦边用 0.5::nsfw:: 前缀；重度 nsfw 在 scene 里显式写 nsfw 标签（NAI 会拒绝越界内容）
 - 5×5 网格说明（每图可选，默认中心）：画面重心默认居中，多角色时注意构图平衡
 - 每张图的画面描述 tag 配额 70-100 个（danbooru 下划线格式或自然语言混合，宁多勿少）`;
+}
 
 /** 组装规划提示词 */
 export function buildPlannerPrompt(input: PlannerInput): { system: string; user: string } {
@@ -55,7 +65,7 @@ export function buildPlannerPrompt(input: PlannerInput): { system: string; user:
 	const system = [
 		skillSection,
 		"",
-		OUTPUT_FORMAT_SPEC,
+		buildOutputFormatSpec(input.aspects ?? DEFAULT_DRAW_ASPECTS),
 	].join("\n");
 
 	const user = [

@@ -6,7 +6,7 @@
  *   供插件层挂载（依赖方向：插件 → 底座），底座面板暂不渲染，代码保留不删。
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api.ts";
 import type { WorldState } from "../wire.ts";
 import { IconEdit, IconPlus, IconSettings, IconTrash } from "./icons.tsx";
@@ -665,6 +665,155 @@ export function DrawStylesSection({
 	);
 }
 
+// ---------- 全局分辨率（liyuan.draw.json 顶层 aspects：横/纵/方三档宽高） ----------
+
+type AspectKey = "portrait" | "landscape" | "square";
+
+interface DrawAspect {
+	width: number;
+	height: number;
+}
+
+type DrawAspects = Record<AspectKey, DrawAspect>;
+
+interface DrawAspectsResponse {
+	ok: boolean;
+	aspects: DrawAspects;
+}
+
+/** 三档默认分辨率（后端缺省回退值） */
+const DEFAULT_ASPECTS: DrawAspects = {
+	portrait: { width: 832, height: 1216 },
+	landscape: { width: 1216, height: 832 },
+	square: { width: 1024, height: 1024 },
+};
+
+/** 分辨率合法范围（与 DrawParams 宽高的 clampInt 一致） */
+const ASPECT_MIN = 64;
+const ASPECT_MAX = 2048;
+
+const ASPECT_ROWS: { key: AspectKey; label: string; hint: string }[] = [
+	{ key: "landscape", label: "横图", hint: "landscape" },
+	{ key: "portrait", label: "纵图", hint: "portrait" },
+	{ key: "square", label: "方图", hint: "square" },
+];
+
+/** 分辨率配置区：三档宽高 读取 / 保存 / 恢复默认 */
+function DrawAspectsSection({
+	toast,
+}: {
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const { busy, run } = useAction(toast);
+	const aspects = usePanelData(() => apiGet<DrawAspectsResponse>("/api/draw/aspects"), {
+		cacheKey: "/api/draw/aspects",
+	});
+
+	/** 编辑草稿：GET 数据到达后回填；用户改动后不再被数据覆盖 */
+	const [draft, setDraft] = useState<DrawAspects | null>(null);
+	const touched = useRef(false);
+
+	useEffect(() => {
+		const d = aspects.data?.aspects;
+		if (d && !touched.current) setDraft(d);
+	}, [aspects.data]);
+
+	const setSize = (key: AspectKey, dim: "width" | "height", raw: string) => {
+		touched.current = true;
+		setDraft((prev) => {
+			if (!prev) return prev;
+			return { ...prev, [key]: { ...prev[key], [dim]: clampInt(raw, ASPECT_MIN, ASPECT_MAX, prev[key][dim]) } };
+		});
+	};
+
+	/** 保存前校验：输入框已即时夹取到 64–2048，此处兜底后端回填的异常值并给提示 */
+	const checkInvalid = (): string | null => {
+		if (!draft) return "分辨率数据未就绪";
+		for (const { key, label } of ASPECT_ROWS) {
+			for (const dim of ["width", "height"] as const) {
+				const v = draft[key][dim];
+				const dimName = dim === "width" ? "宽度" : "高度";
+				if (!Number.isInteger(v)) return `${label}${dimName}不是整数`;
+				if (v < ASPECT_MIN || v > ASPECT_MAX) return `${label}${dimName}需在 ${ASPECT_MIN}–${ASPECT_MAX} 之间`;
+			}
+		}
+		return null;
+	};
+
+	const save = () =>
+		run(async () => {
+			const err = checkInvalid();
+			if (err) {
+				toast("warning", err);
+				return;
+			}
+			const r = await apiPut<DrawAspectsResponse>("/api/draw/aspects", { aspects: draft });
+			setDraft(r.aspects);
+			aspects.reload();
+		}, "分辨率已保存");
+
+	const restore = () =>
+		run(async () => {
+			touched.current = true;
+			setDraft(DEFAULT_ASPECTS);
+			const r = await apiPut<DrawAspectsResponse>("/api/draw/aspects", { aspects: DEFAULT_ASPECTS });
+			setDraft(r.aspects);
+			aspects.reload();
+		}, "已恢复默认分辨率");
+
+	return (
+		<section className="sp-section">
+			<div className="sp-section-head">
+				<h4>分辨率</h4>
+				<span className="field-hint">动态分辨率（横图 / 纵图 / 方图三档，LLM 出图按档位替换）</span>
+			</div>
+			<div className="field-hint">修改后点「保存」立即生效；数值范围 64–2048。</div>
+			<PanelStatus loading={aspects.loading} error={aspects.error} hasData={!!aspects.data} />
+			{draft && (
+				<>
+					{ASPECT_ROWS.map(({ key, label, hint }) => (
+						<div key={key} className="draw-aspect-row">
+							<span className="draw-aspect-label">
+								{label}
+								<small>{hint}</small>
+							</span>
+							<input
+								className="panel-search num"
+								type="number"
+								min={ASPECT_MIN}
+								max={ASPECT_MAX}
+								step={64}
+								value={draft[key].width}
+								onChange={(e) => setSize(key, "width", e.target.value)}
+								aria-label={`${label}宽度`}
+							/>
+							<span className="draw-aspect-x">×</span>
+							<input
+								className="panel-search num"
+								type="number"
+								min={ASPECT_MIN}
+								max={ASPECT_MAX}
+								step={64}
+								value={draft[key].height}
+								onChange={(e) => setSize(key, "height", e.target.value)}
+								aria-label={`${label}高度`}
+							/>
+						</div>
+					))}
+					<div className="panel-row" style={{ marginTop: 8 }}>
+						<button type="button" className="drawer-btn save-btn" disabled={busy} onClick={() => void save()}>
+							保存
+						</button>
+						<button type="button" className="drawer-btn" disabled={busy} onClick={() => void restore()}>
+							恢复默认
+						</button>
+					</div>
+				</>
+			)}
+		</section>
+	);
+}
+
 // ---------- D 标签搜索（插件 A draw-role；角色库 7000+ 只读查询） ----------
 
 interface TagSearchHit {
@@ -1222,6 +1371,9 @@ export function DrawPanel({
 					</>
 				)}
 			</section>
+
+			{/* ════════ ② 全局分辨率（三档宽高） ════════ */}
+			<DrawAspectsSection toast={toast} />
 
 			{/* ════════ 生图设置总览（浮动窗口；其余板块已迁入） ════════ */}
 			{settingsOpen && (

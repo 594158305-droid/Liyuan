@@ -916,12 +916,13 @@ export function Bubble({
 							)}
 							{onIllustrate && (
 								<button
-									className="act"
+									className={`act${illustrateBusy ? " btn-spin" : ""}`}
 									disabled={illustrateBusy || !msg.text.trim()}
 									onClick={() => onIllustrate(msg.text)}
 									title="为这条消息生成配图（生图管线）"
 								>
-									<IconImage size={13} /> {illustrateBusy ? "配图中…" : "配图"}
+									{!illustrateBusy && <IconImage size={13} />}
+									{illustrateBusy ? "配图中…" : "配图"}
 								</button>
 							)}
 						</div>

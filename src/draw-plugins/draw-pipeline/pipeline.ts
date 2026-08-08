@@ -14,6 +14,7 @@ import { buildPlannerPrompt } from "./planner.ts";
 import { enforceLimits, parseImagePlan, type ImagePlan } from "./scene-plan.ts";
 import { createPlaceholder } from "../draw-slot/slot-store.ts";
 import { classifyError } from "../../draw/errors.ts";
+import { DEFAULT_DRAW_ASPECTS, type DrawAspects } from "../../draw/config.ts";
 import { randomUUID } from "node:crypto";
 
 export interface PipelineSettings {
@@ -48,6 +49,8 @@ export interface PipelineDeps {
 	) => void;
 	/** lore 检索（选填；不可用/失败时 loreText=""；host 注入真实实现） */
 	searchLore?: (query: string, limit?: number) => string;
+	/** 三档构图分辨率（选填；缺省回退默认表——默认实现读 liyuan.draw.json 顶层 aspects） */
+	getAspects?: () => DrawAspects;
 }
 
 export interface PipelineResult {
@@ -178,6 +181,7 @@ export async function runPipeline(cwd: string, opts: RunPipelineOpts): Promise<P
 		skillText: null, // skill 读取在 index.ts deps 里注入（本模块零文件依赖）
 		loreText,
 		characterNotes,
+		aspects: deps.getAspects?.() ?? DEFAULT_DRAW_ASPECTS,
 		maxImages: settings.maxImages ?? 2,
 		maxCharactersPerImage: settings.maxCharactersPerImage ?? 3,
 	});

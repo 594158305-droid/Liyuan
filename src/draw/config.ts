@@ -56,6 +56,48 @@ export interface DrawStyle {
 	negativePrefix: string;
 }
 
+/** 单档分辨率尺寸 */
+export interface DrawAspectSize {
+	width: number;
+	height: number;
+}
+
+/**
+ * 三档构图分辨率（动态分辨率）：LLM 只输出 portrait|landscape|square，
+ * 生图时（generateImage 经 resolveAspectSize）替换为这里的实际尺寸。
+ * liyuan.draw.json 顶层 aspects 全局一份，所有 provider / 管线 / 助手共用。
+ */
+export interface DrawAspects {
+	portrait: DrawAspectSize;
+	landscape: DrawAspectSize;
+	square: DrawAspectSize;
+}
+
+/** 默认三档分辨率（NovelAI 常用档；用户可在 liyuan.draw.json 顶层 aspects 覆盖） */
+export const DEFAULT_DRAW_ASPECTS: DrawAspects = {
+	portrait: { width: 832, height: 1216 },
+	landscape: { width: 1216, height: 832 },
+	square: { width: 1024, height: 1024 },
+};
+
+/** 规范化单档尺寸（非法/缺失回退默认；合法值取整） */
+function normalizeAspectSize(raw: unknown, fallback: DrawAspectSize): DrawAspectSize {
+	const o = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+	const width = typeof o.width === "number" && Number.isFinite(o.width) && o.width > 0 ? Math.round(o.width) : fallback.width;
+	const height = typeof o.height === "number" && Number.isFinite(o.height) && o.height > 0 ? Math.round(o.height) : fallback.height;
+	return { width, height };
+}
+
+/** 规范化三档分辨率（每档非法/缺失回退默认；永远返回完整三档） */
+export function normalizeDrawAspects(raw: unknown): DrawAspects {
+	const o = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+	return {
+		portrait: normalizeAspectSize(o.portrait, DEFAULT_DRAW_ASPECTS.portrait),
+		landscape: normalizeAspectSize(o.landscape, DEFAULT_DRAW_ASPECTS.landscape),
+		square: normalizeAspectSize(o.square, DEFAULT_DRAW_ASPECTS.square),
+	};
+}
+
 /** SD WebUI 专属配置（type="sd-webui" 时生效） */
 export interface SdWebUiConfig {
 	host: string;
@@ -106,6 +148,8 @@ export interface DrawConfig {
 	styles: DrawStyle[];
 	/** 默认风格 id（"" 表示无默认） */
 	defaultStyleId: string;
+	/** 三档构图分辨率（动态分辨率；缺省/非法档位回退 DEFAULT_DRAW_ASPECTS） */
+	aspects: DrawAspects;
 }
 
 /** V4.5 Full 默认参数（移植 LittleWhiteBox DEFAULT_PARAMS_PRESET，Apache 2.0） */
@@ -131,7 +175,15 @@ export const DEFAULT_NEGATIVE_3D =
 export const DEFAULT_MODEL = "nai-diffusion-4-5-full";
 
 export function emptyDrawConfig(): DrawConfig {
-	return { version: 1, defaultProvider: "", providers: [], autoConfirm: false, styles: [], defaultStyleId: "" };
+	return {
+		version: 1,
+		defaultProvider: "",
+		providers: [],
+		autoConfirm: false,
+		styles: [],
+		defaultStyleId: "",
+		aspects: { ...DEFAULT_DRAW_ASPECTS },
+	};
 }
 
 export function drawConfigPath(cwd: string): string {
@@ -283,6 +335,7 @@ export function loadDrawConfig(cwd: string): DrawConfig {
 			autoConfirm: raw.autoConfirm === true,
 			styles,
 			defaultStyleId,
+			aspects: normalizeDrawAspects(raw.aspects),
 		};
 	} catch {
 		return emptyDrawConfig();

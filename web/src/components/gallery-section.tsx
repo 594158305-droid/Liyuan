@@ -66,11 +66,13 @@ interface LightboxState {
 function DrawEnhanceModal({
 	op,
 	busy,
+	error,
 	onCancel,
 	onConfirm,
 }: {
 	op: "enhance" | "upscale";
 	busy: boolean;
+	error?: string | null;
 	onCancel: () => void;
 	onConfirm: (params: { strength?: number; scaleBy?: number }) => void;
 }) {
@@ -119,11 +121,16 @@ function DrawEnhanceModal({
 						/>
 					</Field>
 				)}
+				{error && (
+					<p className="draw-enhance-error" role="alert">
+						生成失败：{error}
+					</p>
+				)}
 				<div className="panel-row inpaint-actions">
 					<button type="button" className="drawer-btn" disabled={busy} onClick={onCancel}>
 						取消
 					</button>
-					<button type="button" className="drawer-btn save-btn" disabled={busy} onClick={confirm}>
+					<button type="button" className={`drawer-btn save-btn${busy ? " btn-spin" : ""}`} disabled={busy} onClick={confirm}>
 						{busy ? "生成中…" : "确定"}
 					</button>
 				</div>
@@ -141,6 +148,8 @@ export function GallerySection() {
 	const [selected, setSelected] = useState<{ slotId: string; versionIndex: number } | null>(null);
 	/** 增强/放大参数弹窗的目标 */
 	const [enhanceModal, setEnhanceModal] = useState<{ slotId: string; src: string; op: "enhance" | "upscale" } | null>(null);
+	/** 增强/放大请求失败信息（弹窗内展示；成功或关闭时清空） */
+	const [enhanceErr, setEnhanceErr] = useState<string | null>(null);
 	/** 保存所有进度：{ 总量, 已完成 }；null = 不在进行中 */
 	const [saveAll, setSaveAll] = useState<{ total: number; done: number } | null>(null);
 	/** 瞬时提示（无全局 toast 通道时的轻量替代） */
@@ -164,14 +173,15 @@ export function GallerySection() {
 		[slots.data, selected],
 	);
 
-	/** 防重入：操作中禁用全部按钮 */
-	const run = async (fn: () => Promise<void>) => {
+	/** 防重入：操作中禁用全部按钮；onError 供弹窗等调用方就地展示失败信息 */
+	const run = async (fn: () => Promise<void>, onError?: (e: unknown) => void) => {
 		if (busy) return;
 		setBusy(true);
 		try {
 			await fn();
 		} catch (e) {
 			console.error(e);
+			onError?.(e);
 		} finally {
 			setBusy(false);
 		}
@@ -371,7 +381,10 @@ export function GallerySection() {
 									title="增强自定义（参数弹窗）"
 									onClick={() => {
 										const shown = slotShownSrc(s, selected);
-										if (shown) setEnhanceModal({ slotId: s.slotId, src: shown, op: "enhance" });
+										if (shown) {
+											setEnhanceErr(null);
+											setEnhanceModal({ slotId: s.slotId, src: shown, op: "enhance" });
+										}
 									}}
 								>
 									增强
@@ -383,7 +396,10 @@ export function GallerySection() {
 									title="放大自定义（参数弹窗）"
 									onClick={() => {
 										const shown = slotShownSrc(s, selected);
-										if (shown) setEnhanceModal({ slotId: s.slotId, src: shown, op: "upscale" });
+										if (shown) {
+											setEnhanceErr(null);
+											setEnhanceModal({ slotId: s.slotId, src: shown, op: "upscale" });
+										}
 									}}
 								>
 									放大
@@ -443,19 +459,27 @@ export function GallerySection() {
 				<DrawEnhanceModal
 					op={enhanceModal.op}
 					busy={busy}
-					onCancel={() => setEnhanceModal(null)}
+					error={enhanceErr}
+					onCancel={() => {
+						setEnhanceModal(null);
+						setEnhanceErr(null);
+					}}
 					onConfirm={(params) =>
-						void run(async () => {
-							await apiPost("/api/draw/enhance", {
-								source: enhanceModal.src,
-								op: enhanceModal.op,
-								...params,
-								slotId: enhanceModal.slotId,
-							});
-							setEnhanceModal(null);
-							slots.reload();
-							flash(enhanceModal.op === "enhance" ? "增强完成" : "放大完成");
-						})
+						void run(
+							async () => {
+								await apiPost("/api/draw/enhance", {
+									source: enhanceModal.src,
+									op: enhanceModal.op,
+									...params,
+									slotId: enhanceModal.slotId,
+								});
+								setEnhanceErr(null);
+								setEnhanceModal(null);
+								slots.reload();
+								flash(enhanceModal.op === "enhance" ? "增强完成" : "放大完成");
+							},
+							(e) => setEnhanceErr(e instanceof Error ? e.message : String(e)),
+						)
 					}
 				/>
 			)}

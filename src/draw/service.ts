@@ -126,9 +126,9 @@ export async function generateImage(cwd: string, opts: GenerateImageOptions): Pr
 	if (!provider) throw new DrawError("unknown", "未配置画图后端");
 	if (provider.type !== "novelai") throw new DrawError("unknown", `${provider.type} 尚未实现（预留）`);
 
-	// 生效参数：preset → opts.params 覆盖 → aspect
+	// 生效参数：preset → opts.params 覆盖 → aspect（动态分辨率：档位取自配置 cfg.aspects，缺省回退默认表）
 	const { params, seed } = mergeOverrides(provider, opts.presetId, opts.params);
-	const resolved = opts.aspect ? resolveAspectSize(opts.aspect, params) : params;
+	const resolved = opts.aspect ? resolveAspectSize(opts.aspect, params, cfg.aspects) : params;
 
 	// 全局风格合并（positive 前缀 + negative 前缀）
 	const style = resolveStyle(cfg, opts.styleId);

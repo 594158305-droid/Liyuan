@@ -150,7 +150,7 @@ import { listSkills, saveSkill } from "../src/skills.ts";
 import { DEFAULT_CONFIG, type AgentBridgePermissions, type AgentConfig, type LorebookEntry, type RpConfig } from "../src/types.ts";
 import { readJsonFile } from "../src/jsonio.ts";
 import { formatBytes, listMedia, listUploads, saveUpload } from "../src/uploads.ts";
-import { loadDrawConfig, newProviderId, normalizeDrawProvider, saveDrawConfig } from "../src/draw/config.ts";
+import { loadDrawConfig, newProviderId, normalizeDrawAspects, normalizeDrawProvider, saveDrawConfig } from "../src/draw/config.ts";
 import { testNovelAiConnection } from "../src/draw/novelai.ts";
 import { generateImage, enhanceImage } from "../src/draw/service.ts";
 import { DrawError } from "../src/draw/errors.ts";
@@ -343,6 +343,10 @@ export interface RestHost {
 	manualPipelineRun?(text: string): Promise<{
 		ok: boolean;
 		error?: string;
+		/** 管线是否实际执行（false = 被跳过/未执行，reason 说明） */
+		ran?: boolean;
+		/** 未执行或失败的原因 */
+		reason?: string;
 		slots?: { slotId: string; src: string; index: number }[];
 		warnings?: string[];
 		embedded?: boolean;
@@ -4406,6 +4410,22 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 			}
 
+			// ---- 动态分辨率（liyuan.draw.json 顶层 aspects：三档构图分辨率，管线/助手共用） ----
+			case "GET /api/draw/aspects": {
+				const cfg = loadDrawConfig(host.cwd);
+				sendJson(res, 200, { ok: true, aspects: cfg.aspects });
+				return true;
+			}
+			case "PUT /api/draw/aspects": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { aspects?: unknown };
+				const cfg = loadDrawConfig(host.cwd);
+				cfg.aspects = normalizeDrawAspects(body.aspects);
+				saveDrawConfig(host.cwd, cfg);
+				sendJson(res, 200, { ok: true, aspects: cfg.aspects });
+				return true;
+			}
+
 			// ---- 服装档案（.liyuan-wardrobe/；当前穿着经 /wardrobe/current 写账本 CharacterState.outfit） ----
 			case "GET /api/wardrobe": {
 				// 缺省用当前卡（RestHost 未暴露 card 字段，与其余卡路由一致从 config.card 取）
@@ -4855,7 +4875,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					if (!r.ok) throw new Error(r.error ?? "管线执行失败");
 					sendJson(res, 200, {
 						ok: true,
-						ran: true,
+						ran: r.ran === true,
+						reason: r.reason,
 						slots: r.slots ?? [],
 						warnings: r.warnings ?? [],
 						embedded: r.embedded === true,

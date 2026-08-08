@@ -1480,6 +1480,7 @@ const restHost: RestHost = {
 	 *  runPipeline + patches 应用到最新 assistant 全文 → editEntryViaStoryChannel（rp-edited-reply） */
 	async manualPipelineRun(text: string) {
 		try {
+			console.log(`[draw-pipeline] 手动配图触发（text 前 40 字：${text.slice(0, 40).replace(/\s+/g, " ")}）`);
 			const { runPipeline } = await import("../src/draw-plugins/draw-pipeline/pipeline.ts");
 			const { defaultPipelineDeps } = await import("../src/draw-plugins/draw-pipeline/index.ts");
 			// 最新 assistant（嵌入目标：当前分支倒序第一条非空 assistant 文本）
@@ -1498,11 +1499,30 @@ const restHost: RestHost = {
 					if (entryText.trim()) break;
 				}
 			}
+			// 手动触发用独立 entryId（manual-{ts}）——不与 auto 管线（onTurnEnd 用消息 entryId）
+			// 共享 processedEntries 去重：auto 已处理过的消息，用户仍可手动再配图
 			const result = await runPipeline(cwd, {
-				entryId: entryId || `manual-${Date.now()}`,
+				entryId: `manual-${Date.now()}`,
 				chatId: session.sessionId,
 				messageText: text,
-				settings: { auto: true, characters: [], minIntervalMs: 0, maxImages: 2, maxCharactersPerImage: 3 },
+				// 手动触发：绕过 auto 开关与角色白名单（用户显式要求配图），但沿用配置的
+				// llm / maxImages / maxCharactersPerImage（与 auto 管线同源，规划模型一致）
+				settings: (() => {
+					const ps = (loadConfig(cwd).plugins?.["draw-pipeline"]?.settings ?? {}) as Record<string, unknown>;
+					return {
+						auto: true,
+						characters: [],
+						minIntervalMs: 0,
+						maxImages: typeof ps.maxImages === "number" && ps.maxImages >= 1 ? Math.round(ps.maxImages) : 2,
+						maxCharactersPerImage:
+							typeof ps.maxCharactersPerImage === "number" && ps.maxCharactersPerImage >= 1
+								? Math.round(ps.maxCharactersPerImage)
+								: 3,
+						...(ps.llm && typeof ps.llm === "object"
+							? { llm: ps.llm as { provider?: string; model?: string } }
+							: {}),
+					};
+				})(),
 				deps: defaultPipelineDeps(cwd),
 			});
 			// 嵌入：patches 依次应用到最新 assistant 全文 → storyEdit 通道（rp-edited-reply）
@@ -1513,8 +1533,20 @@ const restHost: RestHost = {
 				const r = await editEntryViaStoryChannel(entryId, newText);
 				embedded = r.ok;
 			}
-			return { ok: true, slots: result.slots, warnings: result.warnings, embedded };
+			// ran/reason 透传给前端（HTTP 返回即管线执行完毕，非「已提交」）
+			if (!result.ran) {
+				console.log(`[draw-pipeline] 手动配图跳过：${result.reason ?? "未知原因"}`);
+			} else {
+				if (result.warnings.length > 0) {
+					for (const w of result.warnings) console.log(`[draw-pipeline] 手动配图警告：${w}`);
+				}
+				console.log(
+					`[draw-pipeline] 手动配图完成：slots=${result.slots.length} embedded=${embedded} patches=${result.patches.length}`,
+				);
+			}
+			return { ok: true, ran: result.ran, reason: result.reason, slots: result.slots, warnings: result.warnings, embedded };
 		} catch (e) {
+			console.log(`[draw-pipeline] 手动配图异常：${e instanceof Error ? e.message : String(e)}`);
 			return { ok: false, error: e instanceof Error ? e.message : String(e) };
 		}
 	},
@@ -2334,7 +2366,11 @@ registerPlannerCaller(async (prompt, llm) => {
 		return session.model as never;
 	})();
 	if (!model) throw new Error("尚无可用模型（未配置剧情模型）");
-	const { apiKey, headers } = session.modelRegistry.getApiKeyAndHeaders(model);
+	// 必须 await：getApiKeyAndHeaders 返回 Promise<ResolvedRequestAuth>，缺 await 会解构到
+	// Promise 实例 → apiKey/headers 恒为 undefined → 底层报 "No API key for provider"（配图规划空转根因）
+	const auth = await session.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) throw new Error(auth.error ?? `无法解析 ${String((model as { provider?: string }).provider)} 的 API key`);
+	const { apiKey, headers } = auth;
 	const s = streamSimple(
 		model,
 		{

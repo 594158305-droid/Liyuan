@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { dir, resolveConfigPath } from "../../paths.ts";
 import { DEFAULT_CONFIG, type RpConfig } from "../../types.ts";
 import { generateImage } from "../../draw/service.ts";
+import { loadDrawConfig } from "../../draw/config.ts";
 import { createSlot, discardSlot } from "../draw-slot/slot-store.ts";
 import { resolveCharacterTags } from "../draw-role/resolver.ts";
 import { recordUnknownCharacters } from "../draw-role/learn-candidates.ts";
@@ -214,6 +215,8 @@ export function defaultPipelineDeps(cwd: string): PipelineDeps {
 				return "";
 			}
 		},
+		// 动态分辨率：读 liyuan.draw.json 顶层 aspects（归一化后永远完整三档，缺省回退默认表）
+		getAspects: () => loadDrawConfig(cwd).aspects,
 	};
 }
 
