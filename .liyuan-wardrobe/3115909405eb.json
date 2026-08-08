@@ -5,25 +5,337 @@
 	"characters": [
 		{
 			"name": "伊利亚斯",
-			"appearanceTags": "",
+			"appearanceTags": "3::Ilias::, huge breasts,",
 			"outfits": [
 				{
 					"id": "abd59862",
 					"name": "光之神降临白袍",
 					"tags": "1.2::white dress::, off-shoulder dress, high slit, slit dress, long dress, silk dress, gold trim, bare shoulders, angel wings, golden halo, long golden hair, blue eyes, pale skin, glowing"
 				}
-			]
+			],
+			"aliases": [
+				"Ilias"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"id": "char-1777960292573-kzmn"
 		},
 		{
 			"name": "凯尔",
-			"appearanceTags": "",
+			"appearanceTags": "1.3::faceless::, bald",
 			"outfits": [
 				{
 					"id": "8495bcfe",
 					"name": "裸体",
 					"tags": "nude, naked, male, muscular, short dark hair, average build"
 				}
-			]
+			],
+			"type": "man",
+			"useDanbooruTag": false,
+			"id": "char-1777961310219-h9l0"
+		},
+		{
+			"name": "阿罗娜",
+			"appearanceTags": "Arona (Blue Archive)",
+			"outfits": [],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"id": "char-1777960323209-k2iy"
+		},
+		{
+			"name": "加藤惠",
+			"appearanceTags": "katou megumi, medium breasts",
+			"outfits": [],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"id": "char-1777960339450-akqu"
+		},
+		{
+			"name": "泽村·斯宾塞·英梨梨",
+			"appearanceTags": "Sawamura Spencer Eriri",
+			"outfits": [],
+			"aliases": [
+				"英梨梨"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"id": "char-1777960353292-48lq"
+		},
+		{
+			"name": "霞之丘诗羽",
+			"appearanceTags": "Kasumigaoka Utaha",
+			"outfits": [],
+			"aliases": [
+				"诗羽"
+			],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"id": "char-1777960370249-qq8q"
+		},
+		{
+			"name": "水原千鹤",
+			"appearanceTags": "mizuhara chizuru(kanojo okarishimasu)",
+			"outfits": [],
+			"aliases": [
+				"千鹤",
+				"水原"
+			],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"id": "char-1777960382272-88xy"
+		},
+		{
+			"name": "木之下和也",
+			"appearanceTags": "Kinoshita Kazuya",
+			"outfits": [],
+			"aliases": [
+				"和也"
+			],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"id": "char-1777960402889-59pb"
+		},
+		{
+			"name": "更科瑠夏",
+			"appearanceTags": "Sarashina Ruka",
+			"outfits": [],
+			"aliases": [
+				"瑠夏"
+			],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"id": "char-1777960413989-5akt"
+		},
+		{
+			"name": "丰川祥子",
+			"appearanceTags": "togawa_sakiko",
+			"outfits": [],
+			"aliases": [
+				"祥子"
+			],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"hidden": true,
+			"id": "char-1777960424974-wql5"
+		},
+		{
+			"name": "周防有希",
+			"appearanceTags": "suou yuki (anime) (tokidoki bosotto roshia-go de dereru tonari no alya-san), small breasts",
+			"outfits": [],
+			"aliases": [
+				"有希有希v"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"id": "char-1777960436188-vexo"
+		},
+		{
+			"name": "玛丽亚·米哈伊洛夫娜·九条",
+			"appearanceTags": "mariya mikhailovna kujou",
+			"outfits": [],
+			"aliases": [
+				"玛丽亚",
+				"玛夏"
+			],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"id": "char-1777960449591-qwza"
+		},
+		{
+			"name": "艾莉莎·米哈伊洛夫纳·九条",
+			"appearanceTags": "alisa mikhailovna kujou",
+			"outfits": [],
+			"aliases": [
+				"艾莉莎",
+				"艾莉"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"id": "char-1777960465240-afzi"
+		},
+		{
+			"name": "安艺伦也",
+			"appearanceTags": "short hair, black hair, black eyes, glasses, slim",
+			"outfits": [],
+			"type": "boy",
+			"useDanbooruTag": true,
+			"id": "slot-1778386146647-ucnl"
+		},
+		{
+			"name": "黎维塔",
+			"appearanceTags": "3::Liberta (Brown Dust 2)::, small breasts, hair ribbon, black ribbon, side braid",
+			"outfits": [
+				{
+					"id": "fd58c742",
+					"name": "修女服",
+					"tags": "black dress, hair bow,  black capelet, black bow, capelet, sleeve cuffs",
+					"referenceImage": ".liyuan-wardrobe/refs/3115909405eb-ebb1f981.png"
+				}
+			],
+			"aliases": [
+				"Liberta"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"id": "char-1780595168564-1i75"
+		},
+		{
+			"name": "宇崎花",
+			"appearanceTags": "",
+			"outfits": [],
+			"type": "girl",
+			"danbooruTag": "uzaki_hana_(uzaki-chan_wa_asobitai!)",
+			"useDanbooruTag": true,
+			"id": "slot-1781322405474-gd0h"
+		},
+		{
+			"name": "宇崎月",
+			"appearanceTags": "",
+			"outfits": [],
+			"type": "girl",
+			"danbooruTag": "uzaki_tsuki_(uzaki-chan_wa_asobitai!)",
+			"useDanbooruTag": true,
+			"id": "slot-1781322405474-j1oz"
+		},
+		{
+			"name": "宇崎柳",
+			"appearanceTags": "big breasts,",
+			"outfits": [],
+			"type": "girl",
+			"danbooruTag": "uzaki_yanagi_(uzaki-chan_wa_asobitai!)",
+			"useDanbooruTag": true,
+			"id": "slot-1781322405474-nhxo"
+		},
+		{
+			"name": "能代",
+			"appearanceTags": "noshiro /(azur lane/),",
+			"outfits": [],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1781869616787-79ah"
+		},
+		{
+			"name": "圣路易斯",
+			"appearanceTags": "1.5:: st. louis(azur lane) ::",
+			"outfits": [
+				{
+					"id": "a9a2bf6a",
+					"name": "礼服",
+					"tags": "(luxurious wheels) (azur lane)"
+				}
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1781880424903-a1r0"
+		},
+		{
+			"name": "藤田",
+			"appearanceTags": "short, black hair, round glasses",
+			"outfits": [],
+			"type": "boy",
+			"useDanbooruTag": true,
+			"hidden": true,
+			"id": "slot-1781901996934-sc1x"
+		},
+		{
+			"name": "谢菲尔德",
+			"appearanceTags": "sheffield (azur lane), small breasts,",
+			"outfits": [],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1782571776248-lanv"
+		},
+		{
+			"name": "调月莉音",
+			"appearanceTags": "rio (blue archive)",
+			"outfits": [],
+			"aliases": [
+				"莉音"
+			],
+			"type": "girl",
+			"danbooruTag": "rio_(blue_archive)",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1782664242732-a11e"
+		},
+		{
+			"name": "普拉娜",
+			"appearanceTags": "Plana(Blue Archive)",
+			"outfits": [],
+			"aliases": [
+				"Plana"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1783138565485-4gmn"
+		},
+		{
+			"name": "大凤",
+			"appearanceTags": "3::taihou (azur lane)::",
+			"outfits": [],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1783262541103-5kr6"
+		},
+		{
+			"name": "克莉丝",
+			"appearanceTags": "Eris (konosuba)",
+			"outfits": [],
+			"aliases": [
+				"Eris"
+			],
+			"type": "girl",
+			"useDanbooruTag": true,
+			"hidden": true,
+			"id": "char-1783309643427-q4gr"
+		},
+		{
+			"name": "赫斯緹雅",
+			"appearanceTags": "hestia (danmachi), heart-shaped eyes",
+			"outfits": [],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1783337793169-buxi"
+		},
+		{
+			"name": "锦木千束",
+			"appearanceTags": "nishikigi chisato, middle breasts,",
+			"outfits": [
+				{
+					"id": "4150c64c",
+					"name": "战斗服",
+					"tags": "side ponytail, red hair ribbon, bangs, red jacket, white collar, blue necktie, gold buttons, puffed sleeves, red skirt, pleated skirt, belt"
+				},
+				{
+					"id": "25852c44",
+					"name": "咖啡店员工作服",
+					"tags": "bob cut, bangs, red eyes, gentle smile, looking at viewer, red shirt, long sleeves, cross collar, black collar, black trim, ribbed cuffs, pleated skirt, red skirt,"
+				}
+			],
+			"aliases": [
+				"千束"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"hidden": true,
+			"id": "char-1783830963806-h2ze"
+		},
+		{
+			"name": "樱泽墨",
+			"appearanceTags": "sakurasawa_sumi, medium breasts",
+			"outfits": [],
+			"aliases": [
+				"墨"
+			],
+			"type": "girl",
+			"useDanbooruTag": false,
+			"id": "char-1784364861753-0hxh"
 		}
 	]
 }
