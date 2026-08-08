@@ -452,6 +452,35 @@ const extractEntryText = (content: unknown): string => {
 };
 
 /**
+ * 取消息条目的「当前显示全文」：该 message 之后最近的 rp-edited-reply（custom_message 覆盖，
+ * 含占位符/改稿内容）优先，无覆盖回退 message 原始 content。
+ * 背景：占位符经 storyEdit 通道（rp-edited-reply 分支注入）写入，message 原始 content 不含；
+ * 二次嵌入若基于原文构造新文本会把旧 rp-edited-reply 裁剪掉 → 旧占位符丢失（旧图消失）。
+ * 分支裁剪后目标之后至多保留一条覆盖；遇到下一 message 条目即停止（覆盖不再属于目标）。
+ */
+function currentDisplayTextOf(
+	branch: Array<{ id?: string; type?: string; customType?: string; message?: { content?: unknown }; content?: unknown }>,
+	entryId: string,
+): string {
+	let raw = "";
+	let seen = false;
+	for (const e of branch) {
+		if (e.id === entryId) {
+			seen = true;
+			raw = extractEntryText(e.type === "message" ? e.message?.content : e.content);
+			continue;
+		}
+		if (!seen) continue;
+		if (e.type === "message") break; // 已到下一消息：覆盖不再属于目标
+		if (e.type === "custom_message" && e.customType === "rp-edited-reply") {
+			const t = extractEntryText(e.content);
+			if (t) return t; // 分支顺序即时间顺序，取最近一条覆盖
+		}
+	}
+	return raw;
+}
+
+/**
  * reroll/编辑输入的「回退叶」：branch 前记录旧叶；生成失败或停止无产出时
  * 回退到它（8/05：reroll 链上停止，当前分支只剩 user、旧回复全部消失）。
  * onTurnEnd 消费后清空。
@@ -1495,7 +1524,9 @@ const restHost: RestHost = {
 				const e = branch[i];
 				if (e?.type === "message" && e.message?.role === "assistant") {
 					entryId = e.id ?? "";
-					entryText = extractEntryText(e.message.content);
+					// 当前显示全文：优先取该消息后的 rp-edited-reply 覆盖（含旧占位符），
+					// 否则原始 content——二次配图不丢旧图（旧占位符只存在覆盖条目里）
+					entryText = entryId ? currentDisplayTextOf(branch, entryId) : extractEntryText(e.message.content);
 					if (entryText.trim()) break;
 				}
 			}
@@ -2032,7 +2063,9 @@ const storyBridgeBase: StoryBridge = {
 				const e = branch[i];
 				if (e?.type === "message" && e.message?.role === "assistant") {
 					targetId = e.id ?? "";
-					targetText = extractEntryText(e.message.content);
+					// 当前显示全文：优先取该消息后的 rp-edited-reply 覆盖（含旧占位符），
+					// 否则原始 content——重复嵌入不覆盖丢失旧图
+					targetText = targetId ? currentDisplayTextOf(branch, targetId) : extractEntryText(e.message.content);
 					if (targetText.trim()) break;
 				}
 			}
@@ -2945,7 +2978,9 @@ const stage = new StageEngine({
 			})();
 
 			// 生图管线钩子（能力包插件注册；后台执行不阻塞回合）
-			// 取本回合最新 assistant 定稿文本（供管线规划；与向量记忆同源取法）
+			// 取本回合最新 assistant 定稿文本（供管线规划；与向量记忆同源取法）。
+			// 用 currentDisplayTextOf 取「当前显示全文」：该消息已有 rp-edited-reply 覆盖
+			// （含旧占位符）时以其为基准，二次配图不丢旧图（否则补丁基于原文 → 覆盖丢占位符）
 			const pipelineHooks = turnEndHooks();
 			if (pipelineHooks.length > 0 && info.entryId) {
 				const msgs2 = branchMessages() as Array<{ role?: string; content?: unknown }>;
@@ -2965,6 +3000,17 @@ const stage = new StageEngine({
 							.join("");
 					}
 					if (pipelineText.trim()) break;
+				}
+				{
+					const b = session.sessionManager.getBranch() as Array<{
+						id?: string;
+						type?: string;
+						customType?: string;
+						message?: { content?: unknown };
+						content?: unknown;
+					}>;
+					const covered = currentDisplayTextOf(b, info.entryId!);
+					if (covered.trim()) pipelineText = covered;
 				}
 				const chatId = session.sessionId;
 				// 前文（最近 3 条 assistant/user 消息，不含当前 entry——补丁/摘要/账本等 custom 不算）
