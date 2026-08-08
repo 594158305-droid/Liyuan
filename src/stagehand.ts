@@ -87,7 +87,7 @@ export function buildStagehandPrompt({ config, skills }: StagehandPromptOptions)
 		`- card_create：在 assets/cards/ 建一张新角色卡（JSON），建好告诉用户去角色卡库打开，不自动切换。`,
 		`交付与沉淀：`,
 		`- **show_media（交付自行下载/生成的媒体）**：source=本机文件路径（也接受 /cache/ /media/ 前缀）。复制进项目媒体库、右栏可见；**剧情委托时同时推到中间剧情对话**。禁止只写路径或只 return_answer——用户看不到磁盘文件。**draw_generate / draw_enhance 已自动交付，不要对它们的输出再调 show_media**。`,
-		`- **draw_generate（生图）**：按需求生成图片。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag）；characters 传**在场角色名**（自动套服装档案 tag，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 整图负面；aspect 选 portrait/landscape/square。生成结果默认缓存态（约 3 天），需长期保存让用户在图库确认；**生成后自动交付（右栏可见、剧情委托同步中间对话），不要再调 show_media**。tag 写法与构图规范见 skill ` + "`novelai-draw`" + `。`,
+		`- **draw_generate（生图）**：按需求生成图片。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag；**必须英文 Danbooru tag 或英文描述，NAI 不认中文 tag**）；characters 传**在场角色名**（自动套服装档案 tag，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 整图负面；aspect 选 portrait/landscape/square。生成后默认嵌入最近一条剧情消息正文——**anchor 必填：先用 story_read 读剧情正文，从正文逐字摘录 8-15 字短原文片段（图片挂在该片段所在段落而不是消息末尾）；仅用户明确不要进正文时用 embed:false（此时 anchor 可不填）**。生成结果默认缓存态（约 3 天），需长期保存让用户在图库确认；**生成后自动交付（右栏可见、剧情委托同步中间对话），不要再调 show_media**。tag 写法与构图规范见 skill ` + "`novelai-draw`" + `。`,
 		`- **draw_enhance**：对已有图片后处理：redraw（换提示词重绘）/ upscale（放大 2x）/ enhance（增强细节）/ inpaint（mask 局部重绘）。`,
 		`- skill_save：把摸通的服务调用方法沉淀为技能笔记（同名保存即更新）。`,
 		`委托交回与协作：`,

@@ -29,6 +29,8 @@ export interface PlannerInput {
 /**
  * 输出格式规范（严格只输出 YAML 块）。
  * aspect 行注入三档实际分辨率（动态分辨率）：LLM 只选档位，但构图描述按真实比例写。
+ * anchor 必填：LLM 从正文逐字摘录短原文片段（LWB 原始设计——anchor + 四重定位保底
+ * 把占位符挂接到正文任意位置；缺省会退化回消息末尾 append）。
  */
 function buildOutputFormatSpec(aspects: DrawAspects): string {
 	const { portrait, landscape, square } = aspects;
@@ -38,7 +40,7 @@ function buildOutputFormatSpec(aspects: DrawAspects): string {
 \`\`\`
 <image_gen>
   - index: 1
-    anchor: "正文锚点原文片段"        # 选填；缺省=消息末尾
+    anchor: "他推开酒馆的门"        # 必填：从当前正文逐字摘录 8-15 字短片段（不改写/概括；系统四重定位保底）
     aspect: landscape                  # portrait(${portrait.width}x${portrait.height}) | landscape(${landscape.width}x${landscape.height}) | square(${square.width}x${square.height})
     scene: "1girl, tavern interior, warm candlelight, ..."   # 完整画面描述（Danbooru tag 或自然语言，70-100 个 tag/词）
     negative: ""                       # 选填：整图补充负面
@@ -49,11 +51,15 @@ function buildOutputFormatSpec(aspects: DrawAspects): string {
 \`\`\`
 
 要求：
-- 多张图时按正文出现顺序给 index: 1,2,3…
+- 每张图必须填 anchor：从「当前剧情正文」逐字摘录 8-15 字的短原文片段（不要改写、不要概括、
+  不要加标点变体），图片将挂接在该片段所在段落；锚点用于定位，摘录稍有出入系统会用
+  子串/模糊匹配四重保底找回
+- **scene 必须用英文 Danbooru tag 或英文画面描述，禁止中文（NovelAI 不认中文 tag，写中文会出无效图）**
+- 多张图时按正文出现顺序给 index: 1,2,3…，各图 anchor 对应正文不同位置（段落对应）
 - scene 里的角色 tag 不要重复写（角色特征由系统从服装档案自动组装）——scene 只写场景、动作、氛围
 - 分级：sfw 内容直接写；轻度擦边用 0.5::nsfw:: 前缀；重度 nsfw 在 scene 里显式写 nsfw 标签（NAI 会拒绝越界内容）
 - 5×5 网格说明（每图可选，默认中心）：画面重心默认居中，多角色时注意构图平衡
-- 每张图的画面描述 tag 配额 70-100 个（danbooru 下划线格式或自然语言混合，宁多勿少）`;
+- 每张图的画面描述 tag 配额 70-100 个（danbooru 下划线格式或英文自然语言，宁多勿少）`;
 }
 
 /** 组装规划提示词 */

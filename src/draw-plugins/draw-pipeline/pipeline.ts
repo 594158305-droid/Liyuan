@@ -72,6 +72,9 @@ export interface RunPipelineOpts {
 	historyText?: string;
 	/** 压缩摘要（rp-summary 内容；注入「前情提要」段） */
 	summaryText?: string;
+	/** 用户指定锚点（正文短原文片段）：第一张图的插入位置用它（LWB 原始设计——
+	 *  手动/配图按钮指定位置时覆盖 LLM 规划的第一个 anchor；缺省 = 全按 LLM 规划） */
+	userAnchor?: string;
 	settings: PipelineSettings;
 	deps: PipelineDeps;
 }
@@ -299,14 +302,20 @@ export async function runPipeline(cwd: string, opts: RunPipelineOpts): Promise<P
 	const anchored: { index: number; slotId: string; src: string; anchor: string }[] = [];
 	const tailPlaceholders: string[] = [];
 
+	// 第一张图的插入位置：用户锚点优先（配图按钮/REST 指定；LWB 原始设计——
+	// 短原文 anchor + 四重定位保底，挂接正文任意位置）；其余仍按 LLM 规划的 anchor
+	let firstPlaced = false;
 	for (const task of plan.tasks) {
 		const slot = ordered.find((s) => s.index === task.index);
 		if (!slot) continue;
-		if (task.anchor && task.anchor.trim()) {
+		const anchorFor =
+			!firstPlaced && opts.userAnchor && opts.userAnchor.trim() ? opts.userAnchor.trim() : task.anchor;
+		firstPlaced = true;
+		if (anchorFor && anchorFor.trim()) {
 			// 同一 anchor 只插一次（多图共享锚点：把占位符合并进同一补丁）
-			const exist = anchored.find((a) => a.anchor === task.anchor!.trim());
+			const anchor = anchorFor.trim();
+			const exist = anchored.find((a) => a.anchor === anchor);
 			if (exist) {
-				exist.slotId = exist.slotId;
 				// 追加占位符到该锚点补丁的 new 尾部（实现上在下方统一重建）
 				anchored.splice(anchored.indexOf(exist), 1);
 				anchored.push({
@@ -316,7 +325,7 @@ export async function runPipeline(cwd: string, opts: RunPipelineOpts): Promise<P
 					anchor: exist.anchor,
 				});
 			} else {
-				anchored.push({ index: task.index, slotId: createPlaceholder(slot.slotId), src: slot.src, anchor: task.anchor.trim() });
+				anchored.push({ index: task.index, slotId: createPlaceholder(slot.slotId), src: slot.src, anchor });
 			}
 		} else {
 			tailPlaceholders.push(createPlaceholder(slot.slotId));

@@ -341,8 +341,9 @@ export interface RestHost {
 	applyStatePatch(patch: Record<string, unknown>): Promise<{ applied: string[]; warnings: string[] }>;
 	/** 世界状态只读（当前分支账本；与 applyStatePatch 同源；未就绪返回 null） */
 	worldState(): import("../src/types.ts").WorldState | null;
-	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮）；无宿主能力时缺省（路由回退纯管线结果） */
-	manualPipelineRun?(text: string): Promise<{
+	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮）；无宿主能力时缺省（路由回退纯管线结果）。
+	 *  anchor（选填）：用户指定的正文短原文片段——第一张图挂接位置用它（LWB anchor 设计） */
+	manualPipelineRun?(text: string, anchor?: string): Promise<{
 		ok: boolean;
 		error?: string;
 		/** 管线是否实际执行（false = 被跳过/未执行，reason 说明） */
@@ -4894,13 +4895,15 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (cfg.plugins?.["draw-pipeline"]?.enabled !== true) {
 					throw new Error("生图管线未启用（config.plugins.draw-pipeline.enabled）");
 				}
-				const body = JSON.parse(await readBody(req)) as { entryId?: string; text?: string };
+				const body = JSON.parse(await readBody(req)) as { entryId?: string; text?: string; anchor?: string };
 				const text = (body.text ?? "").trim();
 				if (!text) throw new Error("缺少 text（本路由不访问会话树，需显式传正文）");
+				// 用户锚点（选填）：正文短原文片段，第一张图挂接位置用它（LWB anchor 设计）
+				const anchor = (body.anchor ?? "").trim() || undefined;
 				// 配图按钮/手动触发：宿主执行管线并嵌入当前分支最新剧情消息（Q15 简化通道——
 				// 宿主有 session/场记能力可写正文；无宿主能力（测试/嵌入式）时回退纯管线结果）
 				if (host.manualPipelineRun) {
-					const r = await host.manualPipelineRun(text);
+					const r = await host.manualPipelineRun(text, anchor);
 					if (!r.ok) throw new Error(r.error ?? "管线执行失败");
 					sendJson(res, 200, {
 						ok: true,

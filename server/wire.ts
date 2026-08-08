@@ -752,7 +752,9 @@ export function toWireHistory(
 	const folded = foldTurnNarratives(out);
 	// 生图占位符兜底：foldTurnNarratives 会把 rp-edited-reply 与原始回复合并——
 	// 合并后消息带旧版 timeline（引擎定稿快照，不含补丁占位符）而 text 含占位符；
-	// 前端 timeline 优先渲染会漏掉插图——把占位符补进 timeline 末尾正文段
+	// 前端 timeline 优先渲染会漏掉插图——按占位符在 text 中的相对位置映射到 timeline
+	// 对应正文段末尾插入（2026-08-08 修：原实现整体追加到 timeline 末尾段，
+	// 锚点挂接在正文中段的图会被挪到消息末尾显示）
 	for (const m of folded) {
 		if (Array.isArray(m.timeline) && m.timeline.length > 0 && typeof m.text === "string" && /\[image:/.test(m.text)) {
 			const tlText = m.timeline
@@ -760,20 +762,34 @@ export function toWireHistory(
 				.map((s) => (s.text ?? "") as string)
 				.join("\n");
 			if (!/\[image:/.test(tlText)) {
-				const phs = m.text.match(/\[image:[^\]]+\]/g) ?? [];
-				if (phs.length > 0) {
-					for (let i = m.timeline.length - 1; i >= 0; i--) {
-						const seg = m.timeline[i];
-						if (seg.kind === "text") {
-							m.timeline[i] = { ...seg, text: `${seg.text ?? ""}\n\n${phs.join("\n\n")}` };
-							break;
-						}
-					}
-				}
+				splicePlaceholdersIntoTimeline(m);
 			}
 		}
 	}
 	return folded;
+}
+
+/**
+ * 生图占位符兜底：foldTurnNarratives 会把 rp-edited-reply 与原始回复合并——
+ * 合并后消息带旧版 timeline（引擎定稿快照，不含占位符）而 text 是编辑后全文（占位符位置正确）；
+ * 前端 timeline 优先渲染会漏掉插图——用 text 全文重建正文段：第一个 text 段替换为
+ * text，其余 text 段移除（保留 thinking 等非正文段）。前端 timeline 渲染即看到 text 原文，
+ * 图片显示在锚点对应位置。（2026-08-08 修：原实现把占位符整体追加到 timeline 末尾段，
+ * 锚点挂接在正文中段的图会被挪到消息末尾显示；也曾试按 text 相对比例映射段落——text 与
+ * timeline 段间分隔符不同（\n\n vs \n）导致偏移误差，弃用。）
+ */
+function splicePlaceholdersIntoTimeline(m: { timeline: Array<{ kind?: string; text?: string }>; text: string }): void {
+	let replaced = false;
+	m.timeline = m.timeline
+		.map((s) => {
+			if (s.kind !== "text") return s;
+			if (!replaced) {
+				replaced = true;
+				return { ...s, text: m.text };
+			}
+			return null;
+		})
+		.filter((s): s is { kind?: string; text?: string } => s !== null);
 }
 
 /**

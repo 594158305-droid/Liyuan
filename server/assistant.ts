@@ -758,16 +758,17 @@ function createStagehandTools(
 			name: "draw_generate",
 			label: "生成图片",
 			description:
-				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**生成后默认嵌入最近一条剧情消息正文**（图文并茂）；用户明确不要进正文时传 embed:false。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。tag 写法与构图规范见 skill novelai-draw。",
+				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；**prompt 必须用英文 Danbooru tag 或英文画面描述（NovelAI 不认中文 tag，写中文会出无效图）**；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**anchor 必填**：图片默认嵌入最近一条剧情消息正文，必须给 anchor（从正文**逐字摘录** 8-15 字短原文片段，图片挂在该片段所在段落而不是消息末尾；正文内容用 story_read 读取后再摘录）；仅用户明确不要进正文时传 embed:false（此时 anchor 可不填）。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。tag 写法与构图规范见 skill novelai-draw。",
 			parameters: Type.Object({
-				prompt: Type.String({ description: "画面描述/场景构图（不含角色特征 tag）" }),
-				negativePrompt: Type.Optional(Type.String({ description: "整图负面 tag" })),
+				prompt: Type.String({ description: "画面描述/场景构图（**必须英文 Danbooru tag 或英文描述，NAI 不认中文 tag**；不含角色特征 tag）" }),
+				negativePrompt: Type.Optional(Type.String({ description: "整图负面 tag（英文）" })),
 				characters: Type.Optional(
 					Type.Array(
 						Type.String({ description: "在场角色名列表（自动套用服装档案外观+当前穿着 tag 组装角色特征；不传则 prompt 需含完整 tag，无角色分栏）" }),
 					),
 				),
-				embed: Type.Optional(Type.Boolean({ description: "是否嵌入最近一条剧情消息正文（默认 true）；用户明确表示不要进正文时传 false" })),
+				anchor: Type.String({ description: "挂接位置（**必填**）：从最近剧情消息正文**逐字摘录** 8-15 字短原文片段（图片将挂接在该片段所在段落，而非消息末尾；正文先用 story_read 读取再摘录；仅用户明确 embed:false 不进正文时可不填）" }),
+				embed: Type.Optional(Type.Boolean({ description: "是否嵌入最近一条剧情消息正文（默认 true）；用户明确表示不要进正文时传 false（此时 anchor 可不填）" })),
 				aspect: Type.Optional(
 					Type.Union([Type.Literal("portrait"), Type.Literal("landscape"), Type.Literal("square")], {
 						description: "画面比例，缺省不改尺寸",
@@ -815,6 +816,8 @@ function createStagehandTools(
 							src: r.src,
 							scene: params.prompt,
 							characters: params.characters,
+							// 用户指定的挂接位置（正文短原文片段；缺省=消息末尾）
+							...(params.anchor && params.anchor.trim() ? { anchor: params.anchor.trim() } : {}),
 						});
 						if (e.ok) {
 							return {

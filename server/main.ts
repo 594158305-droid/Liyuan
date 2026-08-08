@@ -1506,10 +1506,11 @@ const restHost: RestHost = {
 		}
 	},
 	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮；Q15 简化通道——
-	 *  runPipeline + patches 应用到最新 assistant 全文 → editEntryViaStoryChannel（rp-edited-reply） */
-	async manualPipelineRun(text: string) {
+	 *  runPipeline + patches 应用到最新 assistant 全文 → editEntryViaStoryChannel（rp-edited-reply）。
+	 *  anchor（选填）：用户指定的正文短原文片段——第一张图挂接位置用它（LWB anchor 设计） */
+	async manualPipelineRun(text: string, anchor?: string) {
 		try {
-			console.log(`[draw-pipeline] 手动配图触发（text 前 40 字：${text.slice(0, 40).replace(/\s+/g, " ")}）`);
+			console.log(`[draw-pipeline] 手动配图触发（text 前 40 字：${text.slice(0, 40).replace(/\s+/g, " ")}${anchor ? `；anchor=${anchor.slice(0, 20)}` : ""}）`);
 			const { runPipeline } = await import("../src/draw-plugins/draw-pipeline/pipeline.ts");
 			const { defaultPipelineDeps } = await import("../src/draw-plugins/draw-pipeline/index.ts");
 			// 最新 assistant（嵌入目标：当前分支倒序第一条非空 assistant 文本）
@@ -1536,6 +1537,8 @@ const restHost: RestHost = {
 				entryId: `manual-${Date.now()}`,
 				chatId: session.sessionId,
 				messageText: text,
+				// 用户锚点：第一张图挂接位置（LWB anchor 设计；缺省全按 LLM 规划）
+				...(anchor && anchor.trim() ? { userAnchor: anchor.trim() } : {}),
 				// 手动触发：绕过 auto 开关与角色白名单（用户显式要求配图），但沿用配置的
 				// llm / maxImages / maxCharactersPerImage（与 auto 管线同源，规划模型一致）
 				settings: (() => {
@@ -2110,14 +2113,14 @@ const storyBridgeBase: StoryBridge = {
 			});
 
 			// 4) buildInsertPatch：正文 + anchor（缺省 → append 到末尾）+ 占位符
+			//    定位失败（助手摘录的 anchor 与正文有出入/正文已变）→ 回退 append 末尾而
+			//    不是整体失败——保证图至少嵌入正文
 			const placeholder = `[image:${slotId}]`;
 			const patchRes = buildInsertPatch(targetText, anchor, placeholder);
-			if (!patchRes.ok) {
-				return { ok: false, error: patchRes.reason };
-			}
+			const patch = patchRes.ok ? patchRes.patch : { append: placeholder };
 
 			// 5) 应用补丁得新全文（占位符进正文——正文可修改，红线 2026-08-08 已移除）
-			const newText = applyDraftOpToText(targetText, patchRes.patch);
+			const newText = applyDraftOpToText(targetText, patch);
 
 			// 6) 经 storyEdit 通道（rp-edited-reply 分支注入）写入：
 			//    改后全文作为最新叙事版本（带「已改写」标记、原文旁支可回滚），
