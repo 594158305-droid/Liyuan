@@ -936,6 +936,32 @@ const bindSession = async () => {
 
 	unsubscribe?.();
 	unsubscribe = session.subscribe((event) => {
+		// 流式防御：模型偶发把工具调用写成正文 XML 标签（<tool_calls><invoke …>），
+		// 引擎不识别（只认结构化 toolCall），直播路径原样广播会让用户看到原始标签。
+		// 此处按会话维护跨 delta 状态机，把 <tool_calls>…</tool_calls> 块从直播文本中剥掉
+		//（定稿路径 postprocess 已有 unwrap 兜底；直播路径这里先拦）。
+		let streamingToolCallTag = false;
+		const stripStreamingToolCallTags = (delta: string): string => {
+			if (streamingToolCallTag) {
+				const close = delta.indexOf("</tool_calls>");
+				if (close < 0) return "";
+				streamingToolCallTag = false;
+				return delta.slice(close + "</tool_calls>".length);
+			}
+			// 触发词双查：<tool_calls 或 <invoke(标签被流式切分时,<tool_calls 可能被切成
+			// <tool_c + alls>,后半截也能靠 <invoke 命中进入吞标签状态,减少泄漏)
+			let open = delta.indexOf("<tool_calls");
+			if (open < 0) open = delta.indexOf("<invoke");
+			if (open < 0) return delta;
+			const before = delta.slice(0, open);
+			const rest = delta.slice(open);
+			const closeIdx = rest.indexOf("</tool_calls>");
+			if (closeIdx < 0) {
+				streamingToolCallTag = true;
+				return before;
+			}
+			return before + rest.slice(closeIdx + "</tool_calls>".length);
+		};
 		switch (event.type) {
 			case "agent_start":
 				broadcast({ type: "agent", state: "start" });
@@ -995,8 +1021,10 @@ const bindSession = async () => {
 				break;
 			case "message_update": {
 				const e = event.assistantMessageEvent;
-				if (e.type === "text_delta") broadcast({ type: "delta", kind: "text", delta: e.delta });
-				else if (e.type === "thinking_delta") broadcast({ type: "delta", kind: "thinking", delta: e.delta });
+				if (e.type === "text_delta") {
+					const clean = stripStreamingToolCallTags(e.delta);
+					if (clean) broadcast({ type: "delta", kind: "text", delta: clean });
+				} else if (e.type === "thinking_delta") broadcast({ type: "delta", kind: "thinking", delta: e.delta });
 				break;
 			}
 			case "message_end": {
