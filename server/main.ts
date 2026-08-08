@@ -2143,6 +2143,7 @@ const stage = new StageEngine({
 		onDelta: (kind, delta, draft, reset) =>
 			broadcast({ type: "delta", kind, delta, ...(draft ? { draft: true } : {}), ...(reset ? { reset: true } : {}) }),
 		onDraftResync: (segments) => broadcast({ type: "draft_resync", segments }),
+		onStreamClear: () => broadcast({ type: "stream", state: "clear" }),
 		onNotify: (level, text) => broadcast({ type: "notify", level, text }),
 		onActivity: (detail) => broadcast({ type: "activity", activity: { kind: "note", name: "stage", detail } }),
 		onTurnEnd: (info) => {

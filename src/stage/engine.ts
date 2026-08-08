@@ -169,6 +169,12 @@ export interface StageEvents {
 	 */
 	onDelta?: (kind: "text" | "thinking", delta: string, draft?: boolean, reset?: boolean) => void;
 	/**
+	 * 中间轮旁白清理：稿落地前的工具轮吐出的 text（读题/计划旁白）已流式上屏，
+	 * 但不是正文——通知前端把它收进过程条并从正文区移除（8/09 实弹：读题文字
+	 * 先挂在正文顶部、落树后又拼到正文尾部）。
+	 */
+	onStreamClear?: () => void;
+	/**
 	 * 稿件分段重同步（修复后）：前端把屏上全部稿段**原位**替换为 segments。
 	 * 与 onDelta 的稿件流互补——流式分片管「一段段长出来」，resync 管「原地变新」：
 	 * draft_edit 改稿成功后按当前稿全量重切下发，修后的段就是用户看到的段。
@@ -720,6 +726,9 @@ export class StageEngine {
 			}
 		}
 
+		// 尾巴口径（8/09）：稿落地后的 text 通道产出。稿落地前工具轮的旁白（读题/计划）
+		// 不算——旁白曾被 mergeFinalText 当尾巴拼到正文尾部（实弹：读题文字跑进正文）。
+		let loopTail = "";
 		// M-A agent 循环（PLAN-RP-AGENT-EXEC §2.3）：思考→工具→看结果→再思考，直到交稿定稿。
 		// 首轮无论 stopReason 都进循环——模型直出正文不调工具时由循环做宽进严出代收（D2）。
 		if (!errored && final && final.stopReason !== "aborted") {
@@ -739,6 +748,7 @@ export class StageEngine {
 			if (turn.final) final = turn.final;
 			if (turn.errored) errored = turn.errored;
 			text += turn.text;
+			loopTail = turn.tailText ?? turn.text;
 		}
 
 		const aborted = final?.stopReason === "aborted";
@@ -756,7 +766,7 @@ export class StageEngine {
 		// 二选一会把那部分连内容一起扔掉（8/05 实锤：模型宣告要出「正文+状态栏+咪咪点评」，
 		// draft_write 只交了正文，屏上流式见过三样、落树只剩一样）。故此处**合并**：
 		// 稿件为主体，text 里**格式特征**的尾巴补回（纯文本闲聊不进正文）。
-		const finalText = mergeFinalText(ws.draft, text);
+		const finalText = mergeFinalText(ws.draft, ws.draft.trim() ? loopTail : text);
 
 		// 落树：正文以定稿为准（保留思考块，剥离工具调用轨迹）；纯错误/空拍不落
 		let entryId: string | undefined;
@@ -942,7 +952,7 @@ export class StageEngine {
 		readDeps: StageToolDeps;
 		/** 首轮直出正文（调用方已流式外发） */
 		directText: string;
-	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string }> {
+	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string; tailText?: string }> {
 		const ev = this.#deps.events ?? {};
 		const readDeps = o.readDeps;
 		// 走 tools.ts 派发的工具（统一层世界书族/向量库族 + 台上读侧两件）；其余归工作区执行器。
@@ -968,6 +978,11 @@ export class StageEngine {
 		let sealNudged = false; // 封笔催告（M-E：分段续写完但忘了 draft_seal），只给一轮
 		let userStopped = false; // P7：用户在 ask 选择卡上点了停止——本拍收束
 		let lastConsumed = 0; // 本轮开始时 text 长度——判定「本轮新产出文本」用
+		// 稿首次落地时的 text 长度：之前的 text 是读题/计划旁白（工具轮的 text 通道产出），
+		// 不算正文也不算尾巴；之后的 text 才是尾巴候选（状态栏等）。-1 = 稿未落地。
+		let tailStart = -1;
+		// 尾巴口径：稿落地后的 text 通道产出（未落地=全量，直出正文路径要整段保留）
+		const tailOf = () => (tailStart >= 0 ? text.slice(tailStart) : text);
 		// P1 注入层：轮次卡去重——只在工作区状态跨卡类型切换时注入，历史不累积。
 		// 首轮（规划卡）已在装配时随 tailText 送达，这里从「开工」状态起跟踪。
 		let lastCard = o.ws.plan.length > 0 ? "open" : "plan";
@@ -1284,6 +1299,16 @@ export class StageEngine {
 			// P7：用户停止（ask 卡上点了停止）——本拍收束，不再续轮
 			if (userStopped) break;
 
+			// 中间轮旁白（8/09 实弹）：稿落地前、工具轮里流出的 text 是读题/计划旁白——
+			// 通知前端清掉（收进过程条）；tailStart 一旦标记（稿已落地），之后的 text
+			// 归尾巴候选，不再清（状态栏后调记账的场景，状态栏不能被当旁白删掉）。
+			// round 0 的旁白在 performTurn 首轮流里（o.directText），不在本层 text 统计中。
+			if (tailStart < 0) {
+				const talked = text.length > lastConsumed || (round === 0 && o.directText.trim().length > 0);
+				if (calls.length > 0 && talked) ev.onStreamClear?.();
+				if (o.ws.draft.trim()) tailStart = text.length;
+			}
+
 			// 安全阀最后一轮撤掉工具：模型只能收笔（触阀后以现稿/直出定稿）
 			const lastRound = round >= MAX_ROUNDS - 1;
 			const ctx: Record<string, unknown> = { systemPrompt: o.systemPrompt, messages: convo };
@@ -1333,7 +1358,7 @@ export class StageEngine {
 			for await (const e of s) {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
-					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text };
+					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text, tailText: tailOf() };
 				} else if (e.type === "text_delta" && e.delta) {
 					text += e.delta;
 					// 稿已存在后的正文外产出（状态栏/catsay 等格式尾巴）入时间线按序记档；
@@ -1347,11 +1372,11 @@ export class StageEngine {
 					fwd(e);
 				}
 			}
-			if (!final) return { final: last, text };
+			if (!final) return { final: last, text, tailText: tailOf() };
 			last = final;
 			if (final.stopReason === "aborted") break;
 		}
-		return { final: last, text };
+		return { final: last, text, tailText: tailOf() };
 	}
 
 	/**

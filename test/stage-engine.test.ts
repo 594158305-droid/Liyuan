@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { SessionManager } from "@liyuan/agent-runtime";
-import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@liyuan/ai/providers/faux";
+import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@liyuan/ai/providers/faux";
 import { registerFauxProvider, streamSimple } from "@liyuan/ai/compat";
 
 import { StageEngine, type StageStreamFn } from "../src/stage/engine.ts";
@@ -1210,6 +1210,53 @@ test("谢幕卡：封笔后的下一轮注入【谢幕】而非回看卡——se
 
 		assert.ok(postSealCtx.includes("【谢幕】"), "封笔后注入谢幕卡（记账+格式块指引）");
 		assert.ok(!postSealCtx.includes("【演段回看】"), "封笔后不再注入回看卡催演");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("规划旁白不入正文：稿落地前工具轮的 text 产出被清理，不拼进定稿（8/09 实弹）", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([
+			// 规划轮：模型把读题/列路标走了 text 通道（实弹形态）——旁白，不是正文
+			fauxAssistantMessage(
+				[fauxText("先读题：用户要看炉火，我列一下路标。"), fauxToolCall("beat_plan", { steps: ["推门"] })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				[fauxThinking("演第一段。"), fauxToolCall("draft_append", { segment: "他推门进屋，炉火将熄。" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" }),
+			// 停手轮直接带尾巴（稿落地后的 text = 合法尾巴，保留）
+			fauxAssistantMessage("<catsay>点评一句。</catsay>"),
+			fauxScribeEmpty(),
+		]);
+		let clears = 0;
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {
+			onStreamClear: () => clears++,
+		});
+		await engine.performTurn("你先进去。");
+
+		const branch = sm.getBranch() as Array<{
+			type: string;
+			message?: { role?: string; content?: Array<{ type?: string; text?: string }>; details?: { rpTimeline?: unknown } };
+		}>;
+		const lastMsg = [...branch].reverse().find((e) => e.type === "message" && e.message?.role === "assistant");
+		const treeText = (lastMsg?.message?.content ?? [])
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("");
+		assert.ok(treeText.includes("他推门进屋"), "正文在树上");
+		assert.ok(treeText.includes("点评一句"), "稿后尾巴保留");
+		assert.ok(!treeText.includes("先读题"), "规划旁白不得拼进定稿正文");
+		const tl = (lastMsg?.message?.details?.rpTimeline ?? []) as Array<{ kind: string; text?: string }>;
+		const tlText = tl.filter((s) => s.kind === "text").map((s) => s.text ?? "").join("\n");
+		assert.ok(!tlText.includes("先读题"), "落树时间线的正文段不含旁白");
+		assert.ok(clears >= 1, "旁白轮触发 stream 清理（前端收进过程条）");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });
