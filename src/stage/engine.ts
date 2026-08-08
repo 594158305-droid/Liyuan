@@ -271,6 +271,7 @@ function roundCardFor(
 	ws: TurnWorkspace,
 	userName: string,
 	wordRange?: { min: number; max: number },
+	statusBarTags?: string[],
 ): string | undefined {
 	if (ws.plan.length === 0 && ws.draft.trim() === "") {
 		const range = wordRange ? `，本拍总字数约 ${wordRange.min}–${wordRange.max} 字，列路标时把字数分配到每一步（几步就分几份，心里有数）` : "";
@@ -302,6 +303,17 @@ function roundCardFor(
 			`验收过了再构思下一段——已经交给用户看的段落必须是定稿。\n思考全程用中文。`
 		);
 	}
+	// 谢幕卡（8/09 review）：已封笔后不再催演/催构思——sealed 语境下回看/续写/
+	// 收笔评估卡全部失效（实弹：seal 后的记账轮被回看卡催「构思下一段」）。
+	// 封笔后的剩余正务只有记账与谢幕：状态栏等格式块是本拍最后的产出。
+	if (ws.appends > 0 && ws.sealed) {
+		const sb =
+			statusBarTags && statusBarTags.length > 0
+				? `然后输出状态栏（${statusBarTags.map((t) => `<${t}>`).join(" 或 ")}）等格式块——` +
+					`状态栏意味着本拍结束，输出完即停`
+				: `没有格式块要输出就直接停笔`;
+		return `【谢幕】已封笔，不要再写正文。世界有变动就先 \`world_state_update\` 记账；${sb}。`;
+	}
 	if (ws.appends > 0 && ws.plan.some((s) => !s.done)) {
 		return (
 			`【演段回看】已演 ${ws.appends} 段。你需要在落笔前完成这一轮的工作：\n` +
@@ -309,7 +321,7 @@ function roundCardFor(
 			`\u2461 构思剧情走向：发挥自己职业作家的水平，思考这一段剧情往哪走、人物此刻的状态与下一步的抉择。\n` +
 			`\u2462 全力构思文笔：倾尽所有的去构思这一段怎么写得精彩——镜头、动作、感官细节、神态情绪、节奏、点睛。力求为用户提供最好的体验。\n` +
 			`\u2463 按需调写作方法论：写作上拿不准就调 \`writing_guide\` 读对应主题（general/nsfw），读完照着写。\n` +
-			`\u2464 重新评估：剧情到岔路就用 \`ask\` 问用户；路标不成立就重拟 \`beat_plan\`；戏到停点就 \`draft_seal\` 收笔（清单没勾完也没关系）。\n` +
+			`\u2464 重新评估：剧情到岔路就用 \`ask\` 问用户；路标不成立就重拟 \`beat_plan\`；戏到停点就收笔——收笔前先确认自然下文是否涉及 ${userName} 的行动或选择，涉及就先 \`ask\`，再 \`draft_seal\`（清单没勾完也没关系）。\n` +
 			`思考全程用中文。正文只在稿纸上写——思考里想戏与文笔，落笔交给 \`draft_append\`。`
 		);
 	}
@@ -627,7 +639,7 @@ export class StageEngine {
 		// P1 注入层：首轮（规划轮）卡并入注入块（用户话之前）——用户当拍的话必须保持
 		// 上下文最后一句（8/03 教训：注入块压提问之后，模型会把提问读成历史旧话）。
 		// 轮次卡是工作指令（如 opencode 的 system-reminder），随注入区在用户话前送达。
-		const firstCard = roundCardFor(ws, config.userName, wsDeps.rules.wordRange);
+		const firstCard = roundCardFor(ws, config.userName, wsDeps.rules.wordRange, wsDeps.rules.statusBarTagGroup);
 		const injWithCard = firstCard ? `${injection}\n\n${firstCard}` : injection;
 		const tailText = endsWithUser ? `${injWithCard}\n\n${history[history.length - 1].text}` : injWithCard;
 
@@ -1003,7 +1015,8 @@ export class StageEngine {
 					// 不再靠思考关键词（hasTailIntent）碰运气——实弹：模型记完账思考里没提
 					// 状态栏三个字，直接收场，状态栏整拍蒸发。关键词判定仅兜「rules 没
 					// 提取到但模型自己宣告了尾巴」的残余场景。
-					const producedSoFar = `${o.ws.draft}\n${text}`;
+					// 首轮直出的正文（o.directText）也算已产出——寒暄拍模型第一轮就带状态栏时不再重催
+					const producedSoFar = `${o.ws.draft}\n${o.directText}\n${text}`;
 					const missingReq = o.wsDeps.rules.requiredTags.filter((t) => !hasFormatTag(producedSoFar, t));
 					const sbGroup = o.wsDeps.rules.statusBarTagGroup;
 					const sbMissing = sbGroup.length > 0 && !sbGroup.some((t) => hasFormatTag(producedSoFar, t));
@@ -1281,7 +1294,7 @@ export class StageEngine {
 			// 演段回看卡 / 收笔评估卡：**每轮都注入**——循环指令，每轮重新看到
 			// （8/08 修：旧逻辑只切一次，模型后面几轮看不到评估指令）。
 			// 用替换语义防累积：推新卡前把上一张卡从 convo 里移除。
-			const card = roundCardFor(o.ws, o.wsDeps.userName, o.wsDeps.rules.wordRange);
+			const card = roundCardFor(o.ws, o.wsDeps.userName, o.wsDeps.rules.wordRange, o.wsDeps.rules.statusBarTagGroup);
 			const hasPending = o.ws.plan.some((s) => !s.done);
 			const draftBodyChars = o.ws.draft.trim() ? extractDraftBody(o.ws.draft).replace(/\s+/g, "").length : 0;
 			const wordRange = o.wsDeps.rules.wordRange;
@@ -1290,17 +1303,17 @@ export class StageEngine {
 			// 续写态：路标演完但字数未达标——cardKind 归 "extend"，走替换语义
 			const extending = !fixing && o.ws.appends > 0 && !hasPending && !!wordRange && draftBodyChars < wordRange.min;
 			const cardKind = o.ws.appends > 0
-				? fixing ? "fix" : extending ? "extend" : hasPending ? "review" : "seal"
+				? fixing ? "fix" : o.ws.sealed ? "curtain" : extending ? "extend" : hasPending ? "review" : "seal"
 				: o.ws.plan.length > 0 ? "open" : "plan";
 			if (card) {
-				if (cardKind === "review" || cardKind === "seal" || cardKind === "extend" || cardKind === "fix") {
+				if (cardKind === "review" || cardKind === "seal" || cardKind === "extend" || cardKind === "fix" || cardKind === "curtain") {
 					// 替换上一张卡（找最后一个 role=user 且以各卡名开头）
 					for (let k = convo.length - 1; k >= 0; k--) {
 						const msg = convo[k] as { role?: string; content?: Array<{ type?: string; text?: string }> };
 						const txt = Array.isArray(msg.content)
 							? msg.content.map((c) => c.text ?? "").join("")
 							: "";
-						if (msg.role === "user" && (txt.includes("【演段回看】") || txt.includes("【收笔评估】") || txt.includes("【续写】") || txt.includes("【修复】"))) {
+						if (msg.role === "user" && (txt.includes("【演段回看】") || txt.includes("【收笔评估】") || txt.includes("【续写】") || txt.includes("【修复】") || txt.includes("【谢幕】"))) {
 							convo.splice(k, 1);
 							break;
 						}
@@ -1316,8 +1329,7 @@ export class StageEngine {
 			let final: AssistantMsgLike | null = null;
 			const fwd = this.#draftForwarder();
 			// thinking_delta 入时间线（思考→工具→正文全链）。零思考门禁的判定
-			// 不看这里的统计——改看 last.content 是否含 thinking 块（见 append 拦截处）。
-			let thinkChars = 0;
+			// 看 last.content 是否含 thinking 块（见 append 拦截处），不在流式层统计。
 			for await (const e of s) {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
@@ -1329,7 +1341,6 @@ export class StageEngine {
 					if (o.ws.draft.trim()) recordSegment(o.ws, { kind: "text", text: e.delta });
 					ev.onDelta?.("text", e.delta);
 				} else if (e.type === "thinking_delta" && e.delta) {
-					thinkChars += e.delta.length;
 					recordSegment(o.ws, { kind: "thinking", text: e.delta });
 					ev.onDelta?.("thinking", e.delta);
 				} else {

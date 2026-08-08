@@ -1182,6 +1182,40 @@ test("程序化谢幕：卡定义状态栏、模型 seal 后停手不输出 → 
 	}
 });
 
+test("谢幕卡：封笔后的下一轮注入【谢幕】而非回看卡——sealed 后不再催演（8/09 review）", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		let postSealCtx = "";
+		reg.setResponses([
+			// 2 条路标，只演 1 段就封笔（戏到停点即收，清单没勾完）→ hasPending=true，
+			// 旧逻辑此时仍给「演段回看」卡催构思下一段——与已封笔矛盾
+			fauxAssistantMessage([fauxToolCall("beat_plan", { steps: ["推门", "进屋叙话"] })], { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				[fauxThinking("演第一段。"), fauxToolCall("draft_append", { segment: "他推门进屋，炉火将熄。" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" }),
+			(ctx) => {
+				postSealCtx = JSON.stringify((ctx as { messages?: unknown[] }).messages ?? []);
+				return fauxAssistantMessage([fauxThinking("记个账。"), fauxToolCall("world_state_update", { patch: { location: "屋内" } })], {
+					stopReason: "toolUse",
+				});
+			},
+			fauxAssistantMessage(""),
+			fauxScribeEmpty(),
+		]);
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		await engine.performTurn("你先进去。");
+
+		assert.ok(postSealCtx.includes("【谢幕】"), "封笔后注入谢幕卡（记账+格式块指引）");
+		assert.ok(!postSealCtx.includes("【演段回看】"), "封笔后不再注入回看卡催演");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 // ---------------- P7：ask 工具（剧情共创决策） ----------------
 
 test("ask：注入 askUser 才上清单；未注入则剔除（依赖缺失不上清单）", async () => {

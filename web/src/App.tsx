@@ -66,17 +66,13 @@ import {
 	BackstageGroup,
 	Bubble,
 	ChoiceCard,
-	LiveSteps,
 	MsgAvatar,
-	RichContent,
-	ThinkingBlock,
 	TurnTimeline,
 	toolLabel,
 	type ChatMsg,
 	type SkinProp,
 } from "./components/Messages.tsx";
 import {
-	activitiesOf,
 	appendActivity,
 	appendDelta,
 	concatSegments,
@@ -84,8 +80,6 @@ import {
 	pruneEmpty,
 	resyncDraftSegs,
 	segmentsFromLegacy,
-	textOf,
-	thinkingOf,
 	trailingText,
 	type TurnSegment,
 } from "./timeline.ts";

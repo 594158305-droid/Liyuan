@@ -407,7 +407,8 @@ export function runWriteTool(
 				`· 剩余计划还成立 → 接着演下一条（draft_append）；` +
 				`· 不成立 → beat_plan 重拟剩下几步；` +
 				`· 剧情到岔路 → ask 用户拍板；` +
-				`· 戏已经到停点（${deps.userName} 能接话）→ 直接 draft_seal 收笔，清单没勾完也没关系——` +
+				`· 戏已经到停点（${deps.userName} 能接话）→ 收笔；收笔前先确认：自然下文是否涉及 ` +
+				`${deps.userName} 的行动或选择——涉及就先 ask，再 draft_seal。清单没勾完也没关系——` +
 				`计划是草稿，戏演到哪算哪。`,
 			activity: `勾掉「${target.text}」· 剩 ${left} 条`,
 			ok: true,

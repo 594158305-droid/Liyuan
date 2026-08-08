@@ -349,7 +349,7 @@ ${
 
 每拍演完：你需要停在 ${config.userName} 可以接话、可以行动的位置。
 
-具体的每一步由每轮注入的【第 1 步·规划】【开工】【演段回看】指示，以注入为准。`,
+具体的每一步由每轮注入的轮次卡（【第 1 步·规划】【开工】【演段回看】等）指示，以注入为准。`,
 		);
 	}
 
@@ -554,17 +554,20 @@ export function buildStageInjection({
 	notes.push(`演完本拍即停，停在 ${config.userName} 可接话处；不连演多拍，不写总结式收场白。`);
 	blocks.push(`【导演备注】\n${notes.join("\n")}`);
 
-	// 状态栏独立成块（P9：一个提醒一件事，不挤进导演备注）
+	// 状态栏独立成块（P9：一个提醒一件事，不挤进导演备注）。
+	// 时序与谢幕链对齐（8/09 输出形式）：状态栏是本拍**最后**的产出——
+	// seal 回执、收笔评估卡、程序化谢幕说的都是同一件事，这里不能说成「正文之后」
+	// 就完事，否则模型在续写/ask 未完时提前输出（实弹：状态栏出完又问试墨）。
 	if (statusBarFormats && statusBarFormats.length > 0) {
 		const placeholders = statusBarFormats.filter(isPlaceholderStatusFormat);
 		const panels = statusBarFormats.filter((f) => !isPlaceholderStatusFormat(f));
 		if (placeholders.length > 0 && panels.length === 0) {
 			blocks.push(
-				`【状态栏】本卡扮演的一部分：正文之后原样输出 ${placeholders.join(" 或 ")}（自闭合占位符，界面由卡渲染）；漏写即未完成本拍。`,
+				`【状态栏】本卡扮演的一部分：本拍所有剧情（含续写与 ask）完成后，原样输出 ${placeholders.join(" 或 ")}（自闭合占位符，界面由卡渲染）。状态栏意味着本拍结束——它必须是最后的产出，漏写即未完成本拍。`,
 			);
 		} else {
 			blocks.push(
-				`【状态栏】本卡扮演的一部分：正文之后必须输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本拍剧情更新；漏写状态栏即未完成本拍。`,
+				`【状态栏】本卡扮演的一部分：本拍所有剧情（含续写与 ask）完成后，输出状态栏，格式 ${statusBarFormats.join(" 或 ")}，字段随本拍剧情更新。状态栏意味着本拍结束——它必须是最后的产出，漏写即未完成本拍。`,
 			);
 		}
 	}
