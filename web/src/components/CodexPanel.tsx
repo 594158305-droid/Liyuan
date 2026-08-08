@@ -155,10 +155,13 @@ function CodexRow({
 	}, [open, c.entryCount, c.name]);
 
 	const setMounted = (mounted: boolean) =>
-		run(async () => {
-			await apiPost("/api/codex/mount", { name: c.name, mounted });
-			setTimeout(onChanged, 600);
-		}, mounted ? `挂载中：${c.name}` : `卸载中：${c.name}`);
+		run(
+			async () => {
+				await apiPost("/api/codex/mount", { name: c.name, mounted });
+				setTimeout(onChanged, 600);
+			},
+			mounted ? `已挂载「${c.name}」：对话中可检索该库` : `已卸载「${c.name}」：检索不再并入`,
+		);
 
 	const rename = () =>
 		run(async () => {
@@ -415,7 +418,14 @@ export function CodexPanel({ toast }: { toast: (level: "info" | "warning" | "err
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
 			{data && (
 				<section className="sp-section">
-					<h4>知识库（{data.codexes.length}）</h4>
+					<h4>
+						知识库（{data.codexes.length}）
+						{data.mounted.length > 0 && (
+							<span className="field-hint" style={{ marginLeft: 8 }}>
+								已挂载 {data.mounted.length} 库：{data.mounted.join("、")}
+							</span>
+						)}
+					</h4>
 					<div className="field-hint">
 						点库名展开 → 再「添加条目」或浏览列表。挂载后并入本对话检索；扮演中也可让 AI 写入。
 					</div>
