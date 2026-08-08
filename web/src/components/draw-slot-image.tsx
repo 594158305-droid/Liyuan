@@ -426,8 +426,10 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 		return <div className="draw-slot draw-slot-loading" />;
 	}
 	if (!info) {
-		// 映射不存在 / 加载失败：灰底失效占位
-		return <div className="draw-slot draw-slot-gone">[图片已清理]</div>;
+		// 映射不存在（已删除/清理/加载失败）：不渲染任何标记——用户裁决 2026-08-08
+		// 「[图片已清理]」占位无用（删除旧消息图片时 storyEdit 通道无法改写非最新消息，
+		// 后端剥离不生效，前端直接留白兜底）
+		return null;
 	}
 	if (info.failed || (!info.src && info.hasFailed)) {
 		// 失败态（LWB storeFailedPlaceholder）：不显示图，给「保存并重试」
@@ -445,8 +447,8 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 		);
 	}
 	if (!info.src) {
-		// 无 src 且非失败态：已清理占位
-		return <div className="draw-slot draw-slot-gone">[图片已清理]</div>;
+		// 无 src 且非失败态（已清理）：不渲染标记（同用户裁决——失效占位无用）
+		return null;
 	}
 
 	const valid = validVersions(info);
@@ -567,12 +569,20 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 				<ConfirmButton
 					className="act"
 					disabled={busy}
-					confirmText="确认删除"
-					title="删除"
+					confirmText="确认删除当前图片？"
+					title="删除当前显示的这张图（版本）；删完该槽位将整体移除并从正文剥离占位符"
 					onConfirm={() =>
 						void run(async () => {
-							await apiDelete(`/api/draw/slots?slotId=${encodeURIComponent(slotId)}`);
-							setInfo(null);
+							// 删除当前显示版本；无有效版本（罕见兜底）→ 删整个 slot
+							if (displayed) {
+								await apiDelete(
+									`/api/draw/slots/version?slotId=${encodeURIComponent(slotId)}&versionIndex=${displayed.index}`,
+								);
+							} else {
+								await apiDelete(`/api/draw/slots?slotId=${encodeURIComponent(slotId)}`);
+							}
+							setDisplayIdx(undefined);
+							reload(); // slot 删完 → GET 返回空 → info=null，正文占位符已由后端剥离
 						})
 					}
 				>

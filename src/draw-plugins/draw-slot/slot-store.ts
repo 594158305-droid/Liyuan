@@ -419,6 +419,51 @@ export function deleteSlot(cwd: string, slotId: string): number {
 	return removed;
 }
 
+/**
+ * 删除指定版本（删文件 + 从 versions 移除）；版本删完 → slot 一并删除
+ * （正文占位符剥离由上层负责，slot 不存在时返回 ok:false）。
+ */
+export function deleteVersion(
+	cwd: string,
+	slotId: string,
+	versionIndex: number,
+): { ok: true; versionsLeft: number; removedFiles: number } | { ok: false; error: string } {
+	const store = effectiveStore(cwd);
+	const entry = store.slots[slotId];
+	if (!entry) return { ok: false, error: `slot 不存在：${slotId}` };
+	if (!Number.isInteger(versionIndex) || versionIndex < 0 || versionIndex >= entry.versions.length) {
+		return { ok: false, error: `版本下标越界：${versionIndex}` };
+	}
+	const target = entry.versions[versionIndex];
+	let removedFiles = 0;
+	if (target) {
+		const abs = target.file.startsWith("/") ? join(cwd, target.file.replace(/^\//, "")) : join(cwd, target.file);
+		try {
+			if (existsSync(abs)) {
+				unlinkSync(abs);
+				removedFiles++;
+			}
+		} catch {
+			// 忽略单个文件删除失败
+		}
+	}
+	const versions = entry.versions.filter((_, i) => i !== versionIndex);
+	if (versions.length === 0) {
+		delete store.slots[slotId];
+	} else {
+		// selectedVersionIndex 指向被删版本 → 清掉（越界回退最新非 discarded）
+		const sel =
+			typeof entry.selectedVersionIndex === "number" &&
+			entry.selectedVersionIndex >= 0 &&
+			entry.selectedVersionIndex < versions.length
+				? entry.selectedVersionIndex
+				: undefined;
+		store.slots[slotId] = { ...entry, versions, ...(sel !== undefined ? { selectedVersionIndex: sel } : {}) };
+	}
+	saveSlotStoreNow(cwd, store);
+	return { ok: true, versionsLeft: versions.length, removedFiles };
+}
+
 /** 删除全部 slot（逐个复用 deleteSlot 内部逻辑）；返回删除的 slot 数 */
 export function deleteAllSlots(cwd: string): number {
 	const store = effectiveStore(cwd);

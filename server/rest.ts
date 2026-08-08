@@ -161,6 +161,7 @@ import {
 	cleanupExpired,
 	deleteAllSlots,
 	deleteSlot,
+	deleteVersion,
 	extractSlotIds,
 	flushSlotStorePending,
 	getSlotInfo,
@@ -4570,7 +4571,31 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const slotId = (query.get("slotId") ?? "").trim();
 				if (!slotId) throw new Error("缺少 slotId");
 				const removedFiles = deleteSlot(host.cwd, slotId);
-				sendJson(res, 200, { ok: true, removedFiles });
+				// 剥离正文占位符（删除后不留 [图片已清理] 失效标记；宿主可选实现，未实现则 stripped=0）
+				let stripped = 0;
+				if (host.stripStoryPlaceholders) {
+					const r = await host.stripStoryPlaceholders([slotId]);
+					stripped = r.stripped;
+				}
+				sendJson(res, 200, { ok: true, removedFiles, stripped });
+				return true;
+			}
+			case "DELETE /api/draw/slots/version": {
+				// 删除 slot 中的单个版本（当前显示图）：删文件 + 从 versions 移除；
+				// 版本删完 → slot 一并删除 + 剥离正文占位符
+				if (refuseWhileStreaming()) return true;
+				const slotId = (query.get("slotId") ?? "").trim();
+				if (!slotId) throw new Error("缺少 slotId");
+				const rawIdx = Number.parseInt(query.get("versionIndex") ?? "", 10);
+				if (!Number.isInteger(rawIdx)) throw new Error("缺少 versionIndex");
+				const r = deleteVersion(host.cwd, slotId, rawIdx);
+				if (!r.ok) throw new Error(r.error);
+				let stripped = 0;
+				if (r.versionsLeft === 0 && host.stripStoryPlaceholders) {
+					const sr = await host.stripStoryPlaceholders([slotId]);
+					stripped = sr.stripped;
+				}
+				sendJson(res, 200, { ok: true, versionsLeft: r.versionsLeft, removedFiles: r.removedFiles, stripped });
 				return true;
 			}
 			case "POST /api/draw/slots/cleanup": {
