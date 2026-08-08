@@ -193,6 +193,31 @@ export function appendCodexEntry(cwd: string, name: string, input: CodexEntryInp
 	return { ok: true, entry: normalizeEntries([raw])[0] };
 }
 
+export interface CodexEntryPatch {
+	/** 新正文（必填；uid/keys/comment/constant 等其余字段保持原样） */
+	content: string;
+}
+
+export type UpdateCodexResult = { ok: true; entry: LorebookEntry } | { ok: false; error: string };
+
+/** 按 uid 更新知识库一条已存在条目：只改 content，保留其余字段；找不到条目返回 error */
+export function updateCodexEntry(cwd: string, name: string, uid: number, patch: CodexEntryPatch): UpdateCodexResult {
+	const meta = findCodex(cwd, name);
+	if (!meta) return { ok: false, error: `没有名为「${name.trim()}」的知识库。` };
+	const content = (patch.content ?? "").replace(/\r\n/g, "\n").trim();
+	if (!content) return { ok: false, error: "条目内容不能为空。" };
+	const file = readCodexFile(meta.file);
+	if (!file) return { ok: false, error: "知识库文件不可读。" };
+	const existing = Array.isArray(file.entries)
+		? (file.entries as unknown[]).filter((e): e is Record<string, unknown> => !!e && typeof e === "object")
+		: [];
+	const idx = existing.findIndex((e) => e.uid === uid);
+	if (idx < 0) return { ok: false, error: `知识库「${meta.name}」中找不到 uid=${uid} 的条目（可能已被删除）。` };
+	const raw = { ...existing[idx], content };
+	writeCodexFile(meta.file, { ...file, entries: [...existing.slice(0, idx), raw, ...existing.slice(idx + 1)] });
+	return { ok: true, entry: normalizeEntries([raw])[0] };
+}
+
 export type DeleteCodexResult = { ok: true; removed: boolean } | { ok: false; error: string };
 
 /** 按内容指纹删除一条；找不到则 removed=false */

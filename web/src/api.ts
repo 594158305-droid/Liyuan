@@ -420,6 +420,8 @@ export interface CodexInfo {
 export interface CodexEntryView {
 	/** 内容指纹，删除用 */
 	fingerprint: string;
+	/** 条目标识（编辑 / 删除定位用） */
+	uid: number;
 	/** 展示用名字（= comment） */
 	name: string;
 	comment: string;

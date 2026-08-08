@@ -438,11 +438,19 @@ test("引擎工具：查设定 → 结果回喂 → 续演正文；工具装配�
 		});
 		await engine.performTurn("北境的骨誓是什么规矩？");
 
-		// 读侧 + 写侧全清单装配进首轮。lorebook_toggle 不在其中：本用例未注入
-		// setDisabledLore，统一层按依赖过滤（依赖缺失的工具不上清单，见 adapters/stage.ts）
+		// 读侧 + 写侧全清单装配进首轮。lorebook_toggle / codex_mount / choice 不在其中：
+		// 本用例未注入 setDisabledLore / mountCodex / select，统一层按依赖过滤
+		// （依赖缺失的工具不上清单，见 adapters/stage.ts）。codex 读/写五件只依赖 cwd，
+		// 引擎恒注入，故在清单上。
 		const names = (ctxs[0].tools ?? []).map((t) => t.name).sort();
 		assert.deepEqual(names, [
+			"assistant_run",
 			"card_read",
+			"codex_create",
+			"codex_delete",
+			"codex_list",
+			"codex_read",
+			"codex_write",
 			"draft_check",
 			"draft_edit",
 			"draft_read",

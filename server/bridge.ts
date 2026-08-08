@@ -63,6 +63,11 @@ export function createStoryBridge(base: StoryBridge, perms: BridgePermissions): 
 		listModels: perms.readStory ? base.listModels.bind(base) : () => deny("listModels"),
 		cardName: perms.readStory ? base.cardName.bind(base) : () => deny("cardName"),
 		deliverMedia: perms.readStory ? base.deliverMedia.bind(base) : () => deny("deliverMedia"),
+		// ---- 向量记忆作用域 / 世界线视图 / 面板读取 / 知识库挂载清单：只读查询，随 readStory ----
+		memoryScope: perms.readStory ? base.memoryScope.bind(base) : () => deny("memoryScope"),
+		worldlineView: perms.readStory ? base.worldlineView.bind(base) : () => deny("worldlineView"),
+		storyPanels: perms.readStory ? base.storyPanels.bind(base) : () => deny("storyPanels"),
+		mountedCodexes: perms.readStory ? base.mountedCodexes.bind(base) : () => deny("mountedCodexes"),
 		// ---- 写面板：独立权限 ----
 		writePanels: perms.writePanels ? base.writePanels.bind(base) : () => deny("writePanels"),
 		// ---- 显式改稿：独立权限（DESIGN-story-edit §3）----

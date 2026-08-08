@@ -23,7 +23,7 @@ import {
 	scanEntries,
 	searchEntries,
 } from "../lorebook.ts";
-import { loadCodexEntries } from "../codex.ts";
+import { appendCodexEntry, createCodex, deleteCodexEntry, listCodexes, loadCodexEntries } from "../codex.ts";
 import { formatPanelIndex, formatPanelSnapshot, loadPanels } from "../panels.ts";
 import { dir } from "../paths.ts";
 import {
@@ -209,6 +209,16 @@ export interface StageEngineDeps {
 	 * 未注入 = 台上无 lorebook_toggle 工具。
 	 */
 	setDisabledLore?: (fingerprints: string[], enabled: boolean) => number;
+	/**
+	 * 知识库挂载/卸载（codex_mount 工具用）：宿主写 rp-codex 树快照（挂载关系随分支走，rewind/fork 跟随）。
+	 * 未注入 = 台上无 codex_mount 工具（依赖缺失的工具不上清单）。
+	 */
+	mountCodex?: (sessionId: string, name: string, enabled: boolean) => { ok: boolean; error?: string };
+	/**
+	 * 向用户出选择卡（choice 工具用）：复用宿主 askChoice / uiContext.select；
+	 * undefined = 用户停止。未注入 = 台上无 choice 工具。
+	 */
+	select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
 	/**
 	 * MCP 外设（8/06 重新接线）：宿主注入 hub 的两个能力，台上据此挂 mcp__ 工具。
 	 * 未注入 = 台上无 MCP 工具（依赖缺失的工具不上清单）。
@@ -1098,6 +1108,26 @@ export class StageEngine {
 						writePanel: (input: { name: string; kind: string; content: string }) =>
 							this.#deps.writePanel!(sm.getSessionId(), input),
 						closePanel: (name: string) => this.#deps.closePanel!(sm.getSessionId(), name),
+					}
+				: {}),
+			// ---- codex 族：读/写直接走 src/codex.ts 纯函数（只依赖 cwd）；挂载走宿主回调 ----
+			listCodexes: () => listCodexes(cwd),
+			readCodex: (name) => loadCodexEntries(cwd, name),
+			createCodexFn: (name, description) => createCodex(cwd, name, description),
+			writeCodex: (name, input) => appendCodexEntry(cwd, name, input),
+			deleteCodexEntryFn: (name, fingerprint) => deleteCodexEntry(cwd, name, fingerprint),
+			// fingerprint 已由世界书族提供（同一 loreFingerprint），codex 族复用，不重复声明
+			...(this.#deps.mountCodex
+				? {
+						mountedCodexes: () => codexNamesFromBranch(sm.getBranch() as BranchEntryLike[]),
+						mountCodex: (name: string, enabled: boolean) => this.#deps.mountCodex!(sm.getSessionId(), name, enabled),
+					}
+				: {}),
+			// ---- choice：宿主出选择卡（透传引擎 abort 信号，停止即结算为「用户停止」） ----
+			...(this.#deps.select
+				? {
+						select: (title: string, options: string[], opts?: { signal?: AbortSignal }) =>
+							this.#deps.select!(title, options, { ...(opts ?? {}), signal: opts?.signal ?? this.#abort?.signal }),
 					}
 				: {}),
 			getState: () => stateFromBranch(sm.getBranch() as BranchEntryLike[]),

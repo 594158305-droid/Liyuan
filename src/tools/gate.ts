@@ -23,7 +23,13 @@
  * 但**回音室风险比世界书更隐蔽**——模型自作主张灌进去的内容，下一拍 `memory_search`
  * 又当「既定事实」捞回来，而条目要翻管理面板才看得见。
  */
-export const GATED_TOOLS = ["lorebook_write", "codex_write", "memory_add", "memory_delete"] as const;
+export const GATED_TOOLS = [
+	"lorebook_write",
+	"codex_write",
+	"codex_delete",
+	"memory_add",
+	"memory_delete",
+] as const;
 
 /**
  * 用户主动要求记录的信号。**宽松匹配是刻意的**（原注释：宁可放行用户明确要求的写入，
@@ -43,7 +49,9 @@ export const DELETE_REQUEST_RE =
 
 /** 工具名 → 该工具认哪一套用户信号 */
 function signalFor(toolName: string): RegExp {
-	return toolName === "memory_delete" ? DELETE_REQUEST_RE : WRITE_REQUEST_RE;
+	return toolName === "memory_delete" || toolName === "codex_delete"
+		? DELETE_REQUEST_RE
+		: WRITE_REQUEST_RE;
 }
 
 /** 门禁判定结果：allow=放行；block 带 reason（原样回给模型，别让它转头去问用户） */
@@ -55,12 +63,13 @@ export const GATE_BLOCK_REASON =
 	"不要写、也不要询问「是否写入」；若用户后续明确要求再执行。";
 
 /**
- * 删除被拦时的话术（M-D3）。与写入同一条纪律（不要转头问用户），
- * 但**成本方向相反**：错删不可逆且用户不易察觉，故话术要指向「继续演」而不是「等确认」。
+ * 删除被拦时的话术（M-D3；codex_delete 复用，语料统一成「条目」）。
+ * 与写入同一条纪律（不要转头问用户），但**成本方向相反**：错删不可逆且用户不易察觉，
+ * 故话术要指向「继续演」而不是「等确认」。
  */
 export const GATE_DELETE_BLOCK_REASON =
-	"删除记忆条目需用户明确要求：本轮用户并未要求删除，本次删除已拒绝。" +
-	"不要删、也不要询问「是否删除」；记忆有误就在正文里绕开它，若用户后续明确要求再执行。";
+	"删除条目需用户明确要求：本轮用户并未要求删除，本次删除已拒绝。" +
+	"不要删、也不要询问「是否删除」；记忆/设定有误就在正文里绕开它，若用户后续明确要求再执行。";
 
 export interface GateInput {
 	toolName: string;
@@ -82,6 +91,6 @@ export function checkWriteGate(input: GateInput): GateVerdict {
 	if (signalFor(input.toolName).test(input.lastUserText)) return { allow: true };
 	return {
 		allow: false,
-		reason: input.toolName === "memory_delete" ? GATE_DELETE_BLOCK_REASON : GATE_BLOCK_REASON,
+		reason: signalFor(input.toolName) === DELETE_REQUEST_RE ? GATE_DELETE_BLOCK_REASON : GATE_BLOCK_REASON,
 	};
 }

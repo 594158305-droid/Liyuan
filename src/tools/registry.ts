@@ -16,7 +16,17 @@
  */
 
 /** 能力域——按板块分族，用于按消费者取子集 */
-export type ToolDomain = "lore" | "memory" | "card" | "worldline" | "draft" | "state" | "panel" | "preset";
+export type ToolDomain =
+	| "lore"
+	| "memory"
+	| "card"
+	| "worldline"
+	| "draft"
+	| "state"
+	| "panel"
+	| "preset"
+	| "codex"
+	| "choice";
 
 /** 消费者面 */
 export type ToolSurface = "stage" | "assistant" | "extension";

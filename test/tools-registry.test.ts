@@ -213,7 +213,7 @@ test("写入门禁：只管设定集/知识库写入，不拦剧情记账与草�
 	for (const t of ["world_state_update", "draft_write", "draft_edit", "lorebook_search"]) {
 		assert.equal(checkWriteGate({ toolName: t, lastUserText: "无关文本", creationMode: "ask" }).allow, true, t);
 	}
-	assert.deepEqual([...GATED_TOOLS], ["lorebook_write", "codex_write", "memory_add", "memory_delete"]);
+	assert.deepEqual([...GATED_TOOLS], ["lorebook_write", "codex_write", "codex_delete", "memory_add", "memory_delete"]);
 });
 
 test("写入门禁：读不到用户原文时宁拦勿写", () => {

@@ -86,6 +86,7 @@ import {
 	keysFromTitle,
 	listCodexes,
 	loadCodexEntries,
+	updateCodexEntry,
 	userEntryToCodexInput,
 } from "../src/codex.ts";
 import { RP_COMMANDS } from "../src/commands.ts";
@@ -1522,6 +1523,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				sendJson(res, 200, {
 					entries: entries.map((e) => ({
 						fingerprint: loreFingerprint(e.content),
+						/** 条目标识（编辑 / 删除定位用） */
+						uid: e.uid,
 						/** 前端主标题：名字 */
 						name: e.comment || e.keys[0] || "（未命名）",
 						comment: e.comment,
@@ -1592,6 +1595,44 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				}
 				host.notify("info", `已从「${codexName}」删除一条`);
 				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			/**
+			 * 用户编辑条目内容：只收 codex（库名）+ uid（条目标识）+ content（新正文）。
+			 * 只改 content，保留 keys/comment/constant 等其余字段。
+			 */
+			case "PUT /api/codex/entries": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					codex?: string;
+					uid?: unknown;
+					content?: string;
+				};
+				const codexName = (body.codex ?? "").trim();
+				if (!codexName) throw new Error("缺少知识库名 codex");
+				const uid = typeof body.uid === "number" ? body.uid : typeof body.uid === "string" ? Number(body.uid) : NaN;
+				if (!Number.isInteger(uid) || uid < 0) throw new Error("缺少有效的条目 uid");
+				const content = (body.content ?? "").trim();
+				if (!content) throw new Error("信息不能为空");
+				const r = updateCodexEntry(host.cwd, codexName, uid, { content });
+				if (!r.ok) throw new Error(r.error);
+				if (host.mountedCodexes().some((n) => n.toLowerCase() === codexName.toLowerCase())) {
+					await host.reloadSession();
+				}
+				host.notify("info", `已更新「${codexName}」：${r.entry.comment}`);
+				sendJson(res, 200, {
+					ok: true,
+					entry: {
+						uid: r.entry.uid,
+						fingerprint: loreFingerprint(r.entry.content),
+						name: r.entry.comment || r.entry.keys[0] || "（未命名）",
+						comment: r.entry.comment,
+						keys: r.entry.keys,
+						constant: r.entry.constant,
+						content: r.entry.content,
+						chars: r.entry.content.length,
+					},
+				});
 				return true;
 			}
 			// 导出知识库为世界书 JSON（公开格式，可互通酒馆等；柱 3）

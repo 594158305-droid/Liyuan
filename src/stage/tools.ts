@@ -18,6 +18,8 @@ import type { MemoryDeps, MemoryHitLike } from "../tools/memory.ts";
 import type { CardDeps } from "../tools/card.ts";
 import type { WorldlineDeps } from "../tools/worldline.ts";
 import type { PanelDeps } from "../tools/panels.ts";
+import type { CodexDeps } from "../tools/codex.ts";
+import type { ChoiceDeps } from "../tools/choice.ts";
 import type { WorldState } from "../types.ts";
 
 /** 一拍内最多允许的检索次数（超出后撤掉工具，强制动笔） */
@@ -40,7 +42,14 @@ export type { LoreHitLike, MemoryHitLike };
  * 台上工具执行依赖。五族（世界书 / 向量库 / 角色库 / 世界线 / 面板）由统一工具层
  * 定义，此处继承——一处增减、全链路同步。台上的可用工具按注入函数的存在性过滤。
  */
-export interface StageToolDeps extends LoreDeps, MemoryDeps, CardDeps, WorldlineDeps, PanelDeps {
+export interface StageToolDeps
+	extends LoreDeps,
+		MemoryDeps,
+		CardDeps,
+		WorldlineDeps,
+		PanelDeps,
+		CodexDeps,
+		ChoiceDeps {
 	/** 世界状态账本（getState 必在；formatState 用于展示） */
 	getState: () => WorldState;
 	formatState: (s: WorldState) => string;

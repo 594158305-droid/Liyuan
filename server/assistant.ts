@@ -36,14 +36,15 @@ import { worldlineTools, type WorldlineDeps, type WorldlineViewLite } from "../s
 import { panelTools, type PanelDeps } from "../src/tools/panels.ts";
 import type { PanelWriteOutput } from "../src/tools/panels.ts";
 import { regexTools, type RegexDeps } from "../src/tools/regex.ts";
+import { codexTools, type CodexDeps } from "../src/tools/codex.ts";
 import { assistantToolDefs } from "./tool-adapter.ts";
 import { loadCardFile } from "../src/card.ts";
 import {
 	appendCodexEntry,
 	createCodex,
-	findCodex,
+	deleteCodexEntry,
 	listCodexes,
-	validateCodexName,
+	loadCodexEntries,
 } from "../src/codex.ts";
 import { appendOverlayEntry, loreFingerprint, overlayPathFor, searchEntries, toggleDisabledLore } from "../src/lorebook.ts";
 import { PANEL_KINDS } from "../src/panels.ts";
@@ -129,6 +130,8 @@ export interface StoryBridge {
 	refreshStoryMaterials(): Promise<void>;
 	/** 收编知识库挂载变化（写文件后调，/codexmount 命令桥） */
 	mountCodex(name: string, on: boolean): void;
+	/** 当前剧情分支上挂载的知识库名（codex_mount 列表模式用；与 restHost.mountedCodexes 同源） */
+	mountedCodexes(): string[];
 	/**
 	 * 显式改稿：把改后全文以 rp-edited-reply 分支条目提交（带「已改写」标记、原文保留可回滚）。
 	 * lastRoleIndex 语义与 scriptEditMessage 一致：从分支末尾倒数第 N 条角色消息，0=最后一条。
@@ -339,8 +342,11 @@ export const STAGEHAND_TOOL_NAMES: string[] = [
 	"draw_generate",
 	"draw_enhance",
 	"lorebook_write",
+	"codex_list",
+	"codex_read",
 	"codex_create",
 	"codex_write",
+	"codex_delete",
 	"codex_mount",
 	"card_create",
 	"regex_manage",
@@ -884,66 +890,6 @@ function createStagehandTools(
 				}
 			},
 		}),
-		defineTool({
-			name: "codex_create",
-			label: "建知识库",
-			description:
-				"Create a new named knowledge codex (a lore database independent of the character card, mountable to any conversation). Then use codex_write to add entries and codex_mount to attach it to the story.",
-			parameters: Type.Object({
-				name: Type.String({ description: "库名（≤40 字）" }),
-				description: Type.Optional(Type.String({ description: "一句话说明这个库收集什么" })),
-			}),
-			async execute(_id, params) {
-				const err = validateCodexName(params.name);
-				if (err) return text(err, true);
-				const r = createCodex(cwd, params.name, params.description ?? "");
-				if (!r.ok) return text(r.error, true);
-				return text(`知识库「${r.meta.name}」已创建。可用 codex_write 写条目、codex_mount 挂到剧情。`);
-			},
-		}),
-		defineTool({
-			name: "codex_write",
-			label: "写知识库",
-			description:
-				"Add an entry to a named knowledge codex (dedup by content). The codex must already exist (codex_create). Entries become searchable once the codex is mounted to the story.",
-			parameters: Type.Object({
-				codex: Type.String({ description: "目标库名" }),
-				title: Type.String({ description: "条目标题" }),
-				keys: Type.Optional(Type.Array(Type.String(), { description: "检索关键词（省略则从标题派生）" })),
-				content: Type.String({ description: "条目正文" }),
-			}),
-			async execute(_id, params) {
-				if (!findCodex(cwd, params.codex)) {
-					const all = listCodexes(cwd).map((c) => c.name).join("、");
-					return text(`没有名为「${params.codex}」的知识库${all ? `（现有：${all}）` : "，先用 codex_create 建库"}。`, true);
-				}
-				const r = appendCodexEntry(cwd, params.codex, {
-					title: params.title,
-					keys: params.keys ?? [],
-					content: params.content,
-				});
-				if (!r.ok) return text(r.error, true);
-				if (r.entry === null) return text("内容与库中已有条目重复，未写入。");
-				return text(`已写入知识库「${params.codex}」：【${params.title}】。挂载到剧情后即可被检索命中。`);
-			},
-		}),
-		defineTool({
-			name: "codex_mount",
-			label: "挂/卸知识库",
-			description:
-				"Mount or unmount a knowledge codex onto the story conversation (mounted codex entries join the story's lorebook search). Call with on=false to unmount.",
-			parameters: Type.Object({
-				name: Type.String({ description: "库名" }),
-				on: Type.Optional(Type.Boolean({ description: "true=挂载（默认）false=卸载" })),
-			}),
-			async execute(_id, params) {
-				const meta = findCodex(cwd, params.name);
-				if (!meta) return text(`没有名为「${params.name}」的知识库。`, true);
-				const on = params.on !== false;
-				bridge.mountCodex(meta.name, on);
-				return text(`知识库「${meta.name}」已${on ? "挂载到" : "从"}剧情对话${on ? "" : "卸载"}（${meta.entryCount} 条）。`);
-			},
-		}),
 	);
 
 	// 统一工具层（PLAN-RP-TOOLING M-D1/M-D2）：与台上共用同一份实现，语料与能力按面注入。
@@ -998,6 +944,30 @@ function createStagehandTools(
 					memoryManualAdd(cwd, memoryScopeOf(), input.text, { ...(input.title ? { title: input.title } : {}) }),
 				listMemory: (storeId) => memoryListChunks(cwd, memoryScopeOf(), storeId),
 				deleteMemory: (storeId, id) => memoryDeleteChunk(cwd, memoryScopeOf(), storeId, id),
+			},
+			loadConfig(cwd).language,
+		),
+	);
+
+	// 知识库族（PLAN-RP-TOOLING）：六件合一（list/read/create/write/delete/mount）。
+	// 读/写直接走 src/codex.ts 纯函数（只依赖 cwd）；挂载经 bridge.mountCodex 走 /codexmount
+	// 命令桥（与扩展 codex_mount 同一内存+树快照路径）；挂载清单读桥的 mountedCodexes。
+	// 与世界书/向量库族同样不挂门禁（助手每次调用由用户当面驱动）。
+	tools.push(
+		...assistantToolDefs<CodexDeps>(
+			codexTools,
+			{
+				listCodexes: () => listCodexes(cwd),
+				readCodex: (name) => loadCodexEntries(cwd, name),
+				createCodexFn: (name, description) => createCodex(cwd, name, description),
+				writeCodex: (name, input) => appendCodexEntry(cwd, name, input),
+				deleteCodexEntryFn: (name, fingerprint) => deleteCodexEntry(cwd, name, fingerprint),
+				fingerprint: loreFingerprint,
+				mountedCodexes: () => bridge.mountedCodexes(),
+				mountCodex: (name, enabled) => {
+					bridge.mountCodex(name, enabled);
+					return { ok: true };
+				},
 			},
 			loadConfig(cwd).language,
 		),

@@ -12,30 +12,57 @@ import {
 	apiDelete,
 	apiGet,
 	apiPost,
+	apiPut,
 	downloadJson,
 	type CodexEntryView,
 	type CodexInfo,
 } from "../api.ts";
-import { IconChevronDown, IconPencil, IconPlus, IconTrash } from "./icons.tsx";
+import { IconChevronDown, IconEdit, IconPencil, IconPlus, IconTrash } from "./icons.tsx";
 import { ConfirmButton, Field, PanelStatus, SearchInput, Toggle, useAction, usePanelData } from "./kit.tsx";
 
 function EntryCard({
 	e,
 	busy,
 	onDelete,
+	onSave,
 }: {
 	e: CodexEntryView;
 	busy: boolean;
 	onDelete: (fp: string) => void;
+	/** 保存编辑；返回是否成功（成功才退出编辑态） */
+	onSave: (uid: number, content: string) => Promise<boolean>;
 }) {
 	const [open, setOpen] = useState(false);
+	const [editing, setEditing] = useState(false);
+	const [draft, setDraft] = useState("");
+	const [saving, setSaving] = useState(false);
 	const long = e.content.length > 120;
 	const preview = long && !open ? `${e.content.slice(0, 120).trimEnd()}…` : e.content;
+	const startEdit = () => {
+		setDraft(e.content);
+		setEditing(true);
+	};
+	const save = async () => {
+		if (saving || !draft.trim()) return;
+		setSaving(true);
+		const ok = await onSave(e.uid, draft);
+		setSaving(false);
+		if (ok) setEditing(false);
+	};
 	return (
 		<div className="codex-entry">
 			<div className="codex-entry-head">
 				<span className="codex-entry-name">{e.name}</span>
 				<span className="lore-meta">{e.chars || e.content.length} 字</span>
+				<button
+					type="button"
+					className="act"
+					disabled={busy || editing}
+					title="编辑内容"
+					onClick={startEdit}
+				>
+					<IconEdit size={12} />
+				</button>
 				<ConfirmButton
 					className="act"
 					disabled={busy}
@@ -46,11 +73,34 @@ function EntryCard({
 					<IconTrash size={12} />
 				</ConfirmButton>
 			</div>
-			<div className={`codex-entry-body ${open || !long ? "open" : ""}`}>{preview}</div>
-			{long && (
-				<button type="button" className="act codex-entry-more" onClick={() => setOpen((v) => !v)}>
-					{open ? "收起" : "展开全文"}
-				</button>
+			{editing ? (
+				// 编辑态：textarea 直接替换内容预览区
+				<div className="codex-add-form">
+					<textarea
+						className="panel-search codex-info-input"
+						rows={4}
+						value={draft}
+						autoFocus
+						onChange={(ev) => setDraft(ev.target.value)}
+					/>
+					<div className="panel-row">
+						<button className="drawer-btn save-btn" disabled={saving || !draft.trim()} onClick={() => void save()}>
+							保存
+						</button>
+						<button className="drawer-btn" disabled={saving} onClick={() => setEditing(false)}>
+							取消
+						</button>
+					</div>
+				</div>
+			) : (
+				<>
+					<div className={`codex-entry-body ${open || !long ? "open" : ""}`}>{preview}</div>
+					{long && (
+						<button type="button" className="act codex-entry-more" onClick={() => setOpen((v) => !v)}>
+							{open ? "收起" : "展开全文"}
+						</button>
+					)}
+				</>
 			)}
 		</div>
 	);
@@ -154,6 +204,20 @@ function CodexRow({
 			await loadEntries(true);
 			onChanged();
 		}, "已删除条目");
+
+	// 编辑已有条目：成功返回 true（刷新列表 + 通知），失败 toast 后保留编辑态
+	const saveEntry = async (uid: number, content: string): Promise<boolean> => {
+		try {
+			await apiPut<{ ok: true }>(`/api/codex/entries`, { codex: c.name, uid, content: content.trim() });
+			await loadEntries(true);
+			onChanged();
+			toast("info", "已保存修改");
+			return true;
+		} catch (e) {
+			toast("error", e instanceof Error ? e.message : String(e));
+			return false;
+		}
+	};
 
 	const toggleOpen = () => setOpen((v) => !v);
 
@@ -308,7 +372,7 @@ function CodexRow({
 						{entries !== null && entries.length > 0 && (
 							<div className="codex-entries">
 								{entries.map((e) => (
-									<EntryCard key={e.fingerprint} e={e} busy={locked} onDelete={deleteEntry} />
+									<EntryCard key={e.fingerprint} e={e} busy={locked} onDelete={deleteEntry} onSave={saveEntry} />
 								))}
 							</div>
 						)}

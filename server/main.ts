@@ -1969,6 +1969,7 @@ const storyBridgeBase: StoryBridge = {
 	mountCodex: (name, on) => {
 		restHost.queueCommand(`/codexmount ${on ? "mount" : "unmount"} ${name}`);
 	},
+	mountedCodexes: () => restHost.mountedCodexes(),
 	/**
 	 * 显式改稿（story_edit 工具落地，设计稿 DESIGN-story-edit §3+§4）：
 	 * 用 scriptEditMessage 的 lastRoleIndex 语义定位目标回复 → sm.branch 直钉前驱 →
@@ -2913,6 +2914,38 @@ const stage = new StageEngine({
 		void restHost.softRefreshConfig();
 		return fingerprints.length;
 	},
+	// codex_mount 工具：宿主写 rp-codex 树快照——挂载关系随剧情分支走（rewind/fork 跟随）。
+	// 与扩展 snapshotCodexMounts 同一条路径；扩展在下一拍 agent_start 会 restoreCodexFromBranch 收编。
+	mountCodex: (sessionId, name, enabled) => {
+		try {
+			const sm = session.sessionManager;
+			const branch = sm.getBranch() as Array<{
+				type?: string;
+				customType?: string;
+				data?: { mounted?: unknown };
+			}>;
+			let mounted: string[] = [];
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e?.type === "custom" && e.customType === "rp-codex" && e.data && Array.isArray(e.data.mounted)) {
+					mounted = e.data.mounted.filter((n): n is string => typeof n === "string");
+					break;
+				}
+			}
+			const lower = name.trim().toLowerCase();
+			const next = enabled
+				? mounted.some((n) => n.toLowerCase() === lower)
+					? mounted
+					: [...mounted, name.trim()]
+				: mounted.filter((n) => n.toLowerCase() !== lower);
+			sm.appendCustomEntry("rp-codex", { mounted: next });
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	},
+	// choice 工具：复用 uiContext.select（askChoice 选择卡；停止即结算为 undefined，见 engine 透传）
+	select: uiContext.select,
 	streamFn: streamSimple as unknown as StageStreamFn,
 	events: {
 		onTurnStart: () => broadcast({ type: "agent", state: "start" }),

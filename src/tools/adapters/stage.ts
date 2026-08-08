@@ -11,6 +11,8 @@ import { memoryTools, type MemoryDeps } from "../memory.ts";
 import { cardTools, type CardDeps } from "../card.ts";
 import { worldlineTools, type WorldlineDeps } from "../worldline.ts";
 import { panelTools, type PanelDeps } from "../panels.ts";
+import { codexTools, type CodexDeps } from "../codex.ts";
+import { choiceTool, type ChoiceDeps } from "../choice.ts";
 
 /** @liyuan/ai Tool 的结构子集（与 src/stage/tools.ts 的 StageTool 同形） */
 export interface StageToolShape {
@@ -20,10 +22,24 @@ export interface StageToolShape {
 }
 
 /** 台上统一层依赖（各族依赖包的并集；随里程碑推进逐族扩充） */
-export type UnifiedStageDeps = LoreDeps & MemoryDeps & CardDeps & WorldlineDeps & PanelDeps;
+export type UnifiedStageDeps = LoreDeps &
+	MemoryDeps &
+	CardDeps &
+	WorldlineDeps &
+	PanelDeps &
+	CodexDeps &
+	ChoiceDeps;
 
-/** 台上可见的统一层工具（世界书族 + 向量库族 + 角色库族 + 世界线族 + 面板族） */
-const ALL_TOOLS = [...loreTools, ...memoryTools, ...cardTools, ...worldlineTools, ...panelTools] as ToolSpec<UnifiedStageDeps>[];
+/** 台上可见的统一层工具（世界书族 + 向量库族 + 角色库族 + 世界线族 + 面板族 + 知识库族 + 选择卡） */
+const ALL_TOOLS = [
+	...loreTools,
+	...memoryTools,
+	...cardTools,
+	...worldlineTools,
+	...panelTools,
+	...codexTools,
+	choiceTool,
+] as ToolSpec<UnifiedStageDeps>[];
 const STAGE_SPECS: ToolSpec<UnifiedStageDeps>[] = toolsFor(ALL_TOOLS, "stage");
 
 const ctxFor = (language: string): ToolContext => ({ surface: "stage", language });
@@ -44,6 +60,13 @@ function availableSpecs(deps: UnifiedStageDeps): ToolSpec<UnifiedStageDeps>[] {
 		if (s.name === "panel_write") return typeof deps.writePanel === "function";
 		if (s.name === "panel_read") return typeof deps.loadPanels === "function";
 		if (s.name === "panel_close") return typeof deps.closePanel === "function";
+		if (s.name === "codex_list") return typeof deps.listCodexes === "function";
+		if (s.name === "codex_read") return typeof deps.readCodex === "function";
+		if (s.name === "codex_create") return typeof deps.createCodexFn === "function";
+		if (s.name === "codex_write") return typeof deps.writeCodex === "function" && typeof deps.gate === "function";
+		if (s.name === "codex_delete") return typeof deps.deleteCodexEntryFn === "function" && typeof deps.gate === "function";
+		if (s.name === "codex_mount") return typeof deps.listCodexes === "function" && typeof deps.mountCodex === "function";
+		if (s.name === "choice") return typeof deps.select === "function";
 		return true;
 	});
 }
