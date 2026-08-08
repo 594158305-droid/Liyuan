@@ -442,6 +442,8 @@ export interface UploadInfo {
 	name: string;
 	size: string;
 	mtimeMs: number;
+	/** 文件字节数（服务端新增；缺失时按 0 处理） */
+	bytes?: number;
 }
 
 /** GET /api/uploads：我的上传 + 本地图片（AI 出图） */

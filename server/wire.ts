@@ -778,7 +778,8 @@ export function toWireHistory(
  * 锚点挂接在正文中段的图会被挪到消息末尾显示；也曾试按 text 相对比例映射段落——text 与
  * timeline 段间分隔符不同（\n\n vs \n）导致偏移误差，弃用。）
  */
-function splicePlaceholdersIntoTimeline(m: { timeline: Array<{ kind?: string; text?: string }>; text: string }): void {
+function splicePlaceholdersIntoTimeline(m: WireMsg): void {
+	if (!Array.isArray(m.timeline) || m.timeline.length === 0) return;
 	let replaced = false;
 	m.timeline = m.timeline
 		.map((s) => {
@@ -789,7 +790,7 @@ function splicePlaceholdersIntoTimeline(m: { timeline: Array<{ kind?: string; te
 			}
 			return null;
 		})
-		.filter((s): s is { kind?: string; text?: string } => s !== null);
+		.filter((s): s is WireSegment => s !== null);
 }
 
 /**

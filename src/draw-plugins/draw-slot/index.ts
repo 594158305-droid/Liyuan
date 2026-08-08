@@ -11,6 +11,7 @@
  */
 
 import type { PluginContext, PluginManifest, PluginToolDef } from "../types.ts";
+import { cleanupExpired } from "./slot-store.ts";
 
 /** 插件声明（与 plugin.json 同内容；registry 校验 id 一致性用） */
 export const manifest: PluginManifest = {
@@ -31,21 +32,35 @@ export const tools: PluginToolDef[] = [];
 interface SlotSettings {
 	autoSave: boolean;
 	retentionDays: number;
+	/** 自动清理开关（LWB clearExpiredCache 对齐）：开启时启动做一次性清理，不设定时器 */
+	autoClean: boolean;
 }
 
-let slotSettings: SlotSettings = { autoSave: false, retentionDays: 3 };
+let slotSettings: SlotSettings = { autoSave: false, retentionDays: 3, autoClean: false };
 
-/** 读取插件配置（autoSave / retentionDays，缺省回默认）；供本插件 REST 与其它插件查询 */
+/** 读取插件配置（autoSave / retentionDays / autoClean，缺省回默认）；供本插件 REST 与其它插件查询 */
 export function getSlotSettings(): SlotSettings {
 	return { ...slotSettings };
 }
 
-/** init：只存配置（清理按 retention 定时/手动触发，不在启动时执行） */
+/** init：只存配置；autoClean 开启时做一次性过期清理（清理按 retention 定时/手动触发，不在启动时跑定时器） */
 export function init(ctx: PluginContext): void {
 	const s = ctx.settings ?? {};
 	slotSettings = {
 		autoSave: s.autoSave === true,
 		retentionDays: typeof s.retentionDays === "number" && s.retentionDays >= 0 ? s.retentionDays : 3,
+		autoClean: s.autoClean === true,
 	};
-	ctx.log(`draw-slot 就绪（autoSave=${slotSettings.autoSave}，retentionDays=${slotSettings.retentionDays}）`);
+	ctx.log(`draw-slot 就绪（autoSave=${slotSettings.autoSave}，retentionDays=${slotSettings.retentionDays}，autoClean=${slotSettings.autoClean}）`);
+	// 启动一次性清理（LWB clearExpiredCache 同款语义；幂等，失败不影响插件）
+	if (slotSettings.autoClean && ctx.cwd) {
+		try {
+			const r = cleanupExpired(ctx.cwd, slotSettings.retentionDays);
+			if (r.removedSlots > 0 || r.removedFiles > 0) {
+				ctx.log(`自动清理完成：移除 ${r.removedSlots} 个槽位、${r.removedFiles} 个文件`);
+			}
+		} catch (err) {
+			ctx.log(`自动清理失败：${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
 }

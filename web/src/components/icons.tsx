@@ -410,3 +410,14 @@ export const IconSparkles = (p: IconProps) => (
 		<path d="M22 5h-4" />
 	</Icon>
 );
+
+/** 扫帚（清理过期按钮）：斜把手 + 帚头 */
+export const IconBroom = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M19.5 4.5 9.8 14.2" />
+		<path d="m6.5 17.5 2.3-2.3a1.2 1.2 0 0 1 1.7 0l0 0a1.2 1.2 0 0 1 0 1.7L8.2 19.2a2.5 2.5 0 0 1-2.5.6l-1.4 1.4a.7.7 0 0 1-1-1l1.3-1.5a2.5 2.5 0 0 1 2-1.2" />
+		<path d="m14.5 7.5 3 3" />
+		<path d="m12 10 3 3" />
+		<path d="m9.5 12.5 3 3" />
+	</Icon>
+);

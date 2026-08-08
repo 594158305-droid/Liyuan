@@ -90,3 +90,6 @@ scripts/_*
 # optional: keep web/dist for easier clone-and-run; uncomment to force rebuild
 # web/dist/
 .liyuan-plugins/
+
+# 插件/脚本能力分析工作区（本地笔记与实验产物，不入库）
+plugin-analysis/

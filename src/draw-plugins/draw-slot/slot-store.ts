@@ -87,8 +87,10 @@ export interface SlotInfo {
 	versions: { file: string; src: string; saved: boolean; discarded: boolean; tags: VersionTags; failed?: { code: string; reason: string } }[];
 }
 
-/** 版本 tags 快照（LWB 编辑 TAG：scene/characterPrompts/positive） */
+/** 版本 tags 快照（LWB 编辑 TAG：scene/characterPrompts/positive；card = 生成时角色卡路径快照） */
 export interface VersionTags {
+	/** 生成时角色卡路径（如 assets/cards/StarMini.png；老数据缺省） */
+	card?: string;
 	scene?: string;
 	characterPrompts?: { name: string; prompt: string; uc?: string }[];
 	positive?: string;
@@ -576,9 +578,10 @@ export function scanMediaDisk(cwd: string): { files: string[]; orphanFiles: stri
 	return { files, orphanFiles };
 }
 
-/** 从版本 params 读 tags（兼容旧 prompt 文本：无 scene 时回退 prompt 作 scene 展示） */
+/** 从版本 params 读 tags（兼容旧 prompt 文本：无 scene 时回退 prompt 作 scene 展示；card 为生成时角色卡快照） */
 export function tagsFromParams(params: Record<string, unknown>): VersionTags {
 	const out: VersionTags = {};
+	if (typeof params.card === "string" && params.card.trim()) out.card = params.card;
 	if (typeof params.scene === "string") out.scene = params.scene;
 	else if (typeof params.prompt === "string") out.scene = params.prompt; // 旧格式回退
 	if (Array.isArray(params.characterPrompts)) {

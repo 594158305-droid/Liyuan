@@ -1468,6 +1468,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					file: u.file,
 					name: u.name,
 					size: formatBytes(u.bytes),
+					bytes: u.bytes,
 					mtimeMs: u.mtimeMs,
 				});
 				sendJson(res, 200, {
@@ -4505,11 +4506,23 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const slotView = (s: (typeof summaries)[number]): Record<string, unknown> => {
 					const info = getSlotInfo(host.cwd, s.slotId);
 					if (!info) return { slotId: s.slotId, saved: s.saved, createdAt: s.createdAt, versionCount: s.versionCount, versions: [] };
+					// 占用磁盘字节（画廊「占用空间」统计）：全部现存版本文件（含 discarded，未清前仍占盘）
+					let bytes = 0;
+					for (const v of info.versions) {
+						if (!v.file) continue;
+						const abs = v.file.startsWith("/") ? join(host.cwd, v.file.replace(/^\//, "")) : join(host.cwd, v.file);
+						try {
+							bytes += statSync(abs).size;
+						} catch {
+							// 文件缺失不影响统计
+						}
+					}
 					return {
 						slotId: info.slotId,
 						saved: info.saved,
 						createdAt: info.createdAt,
 						versionCount: info.versionCount,
+						bytes,
 						...(typeof info.selectedVersionIndex === "number" ? { selectedVersionIndex: info.selectedVersionIndex } : {}),
 						...(info.hasFailed ? { hasFailed: true } : {}),
 						versions: info.versions,

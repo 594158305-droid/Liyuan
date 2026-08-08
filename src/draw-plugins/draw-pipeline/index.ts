@@ -190,6 +190,13 @@ export function defaultPipelineDeps(cwd: string): PipelineDeps {
 			});
 		},
 		registerSlot: (slotId, file, tags) => {
+			// 生成时角色卡快照：画廊按角色卡分组（config.card 随会话/切换变化，落库固定当前值）
+			let card = "";
+			try {
+				card = (loadConfig(cwd).card ?? "").trim();
+			} catch {
+				// 读卡失败不阻断落库
+			}
 			createSlot(cwd, {
 				slotId,
 				chatId: "",
@@ -198,6 +205,7 @@ export function defaultPipelineDeps(cwd: string): PipelineDeps {
 				...(tags
 					? {
 							params: {
+								...(card ? { card } : {}),
 								...(tags.scene ? { scene: tags.scene, positive: tags.scene } : {}),
 								...(tags.characterPrompts ? { characterPrompts: tags.characterPrompts } : {}),
 							},

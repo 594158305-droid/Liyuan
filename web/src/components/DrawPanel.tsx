@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api.ts";
 import type { WorldState } from "../wire.ts";
-import { IconEdit, IconPlus, IconSettings, IconTrash } from "./icons.tsx";
+import { IconEdit, IconImage, IconPlus, IconSettings, IconTrash } from "./icons.tsx";
 import { ConfirmButton, Field, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { DrawSettingsModal } from "./draw-settings-modal.tsx";
 
@@ -1204,6 +1204,8 @@ export function DrawPanel({
 	const [adding, setAdding] = useState(false);
 	const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
 	const [settingsOpen, setSettingsOpen] = useState(false);
+	/** 生图设置总览初始板块：设置 → quick；图片管理 → gallery */
+	const [settingsSection, setSettingsSection] = useState<"quick" | "params" | "llm" | "tags" | "gallery">("quick");
 
 	const defaultProvider = providers.data?.config.defaultProvider ?? "";
 	const defaultProviderName =
@@ -1272,9 +1274,31 @@ export function DrawPanel({
 			<section className="sp-section">
 				<div className="sp-section-head">
 					<h4>API 管理（{providers.data?.providers.length ?? 0}）</h4>
-					<button type="button" className="drawer-btn" title="打开生图设置总览" onClick={() => setSettingsOpen(true)}>
+					<button
+						type="button"
+						className="drawer-btn"
+						title="打开生图设置总览"
+						onClick={() => {
+							setSettingsSection("quick");
+							setSettingsOpen(true);
+						}}
+					>
 						<IconSettings size={13} /> 设置
 					</button>
+					{/* 图片管理：仅 draw-edit 插件启用时渲染（否则弹窗内无此板块） */}
+					{editEnabled && (
+						<button
+							type="button"
+							className="drawer-btn"
+							title="打开图片管理"
+							onClick={() => {
+								setSettingsSection("gallery");
+								setSettingsOpen(true);
+							}}
+						>
+							<IconImage size={13} /> 图片管理
+						</button>
+					)}
 					<button
 						type="button"
 						className="drawer-btn"
@@ -1383,6 +1407,7 @@ export function DrawPanel({
 					worldState={worldState}
 					roleEnabled={roleEnabled}
 					editEnabled={editEnabled}
+					initialSection={settingsSection}
 					onClose={() => setSettingsOpen(false)}
 				/>
 			)}

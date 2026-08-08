@@ -344,6 +344,7 @@ export function DrawSettingsModal({
 	roleEnabled,
 	editEnabled,
 	onClose,
+	initialSection,
 }: {
 	toast: ToastFn;
 	charName?: string;
@@ -351,6 +352,8 @@ export function DrawSettingsModal({
 	roleEnabled: boolean;
 	editEnabled: boolean;
 	onClose: () => void;
+	/** 打开时预选的板块（默认「快速测试」）；若该板块不可见则回退默认 */
+	initialSection?: SectionId;
 }) {
 	const [active, setActive] = useState<SectionId>("quick");
 
@@ -363,6 +366,17 @@ export function DrawSettingsModal({
 	];
 	const visible = nav.filter((n) => n.show);
 	const current = visible.some((n) => n.id === active) ? active : "quick";
+
+	// 初始定位：仅挂载一次；传入的板块不可见时保持默认「快速测试」
+	const seededRef = useRef(false);
+	useEffect(() => {
+		if (seededRef.current) return;
+		seededRef.current = true;
+		if (initialSection && visible.some((n) => n.id === initialSection)) {
+			setActive(initialSection);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
 
 	return createPortal(
 		<div className="draw-modal" onClick={onClose}>
