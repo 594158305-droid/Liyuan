@@ -160,9 +160,10 @@ test("system prompt：字节稳定、宏替换、主权红线随预设让位", (
 	const b = buildStageSystemPrompt(opts);
 	assert.equal(a, b, "同素材两次装配必须逐字节一致");
 	assert.ok(a.includes("沈舟的同门师姐"), "{{user}} 宏应替换");
-	assert.ok(a.includes("用户主权"), "无预设：harness 兜底纪律在场");
+	assert.ok(a.includes("绝不替 沈舟 说话、行动"), "无预设：harness 兜底纪律在场（叙事与文风节）");
 	assert.ok(a.includes("state1"), "状态栏格式线索在场");
-	assert.ok(a.includes("一拍演完即停"), "一拍即停是 harness 缺省");
+	assert.ok(a.includes("停在 沈舟 可以接话"), "演完即停是 harness 缺省（正面祈使句）");
+	assert.ok(a.includes("一场长篇沉浸式角色扮演"), "舞台只声明角色扮演（不抢预设身份工作）");
 
 	const withPreset = buildStageSystemPrompt({
 		...opts,
@@ -189,10 +190,12 @@ test("system prompt：构思成清单 + 最小稿纸循环，其他工具仍由 
 		assert.ok(p.includes("角色扮演"), "先说清在做什么");
 		// P2：删「始终思考剧情的发展走向」越权句，全貌思考不再合法化到每一轮
 		assert.ok(!p.includes("始终思考剧情"), "不把全貌思考合法化到每一轮");
-		assert.ok(p.includes("一拍 = 演一段"), "常驻只留流程总纲一句");
+		assert.ok(p.includes("资深作家"), "身份激活：把自己当成资深作家");
+		assert.ok(p.includes("你需要读懂本拍处境"), "第 1 轮祈使句");
+		assert.ok(p.includes("发挥自己职业作家的水平"), "每轮开始祈使句（身份激活）");
+		assert.ok(p.includes("倾尽所有的去构思"), "写作过程中祈使句（强度上限）");
 		assert.ok(p.includes("以注入为准"), "具体步骤以每轮注入的轮次卡为准");
-		assert.ok(p.includes("计划是假设不是剧本"), "计划是起点假设，可被已写内容推翻");
-		assert.ok(p.includes("正文只在稿纸上诞生"), "正文只能经稿纸交付");
+		assert.ok(p.includes("重新评估"), "写完后评估（ask/重拟/seal）");
 		for (const tool of ["writing_guide", "draft_write", "lorebook_search"]) {
 			assert.ok(!p.includes(tool), `不把无关工具写进工作流 ${tool}`);
 		}

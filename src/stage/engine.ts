@@ -87,6 +87,7 @@ import {
 } from "./media-stage.ts";
 import { assistantStageTool, runAssistantStageTool } from "./assistant-stage.ts";
 import type { MemoryChunkLike } from "../tools/memory.ts";
+import { extractDraftBody } from "../draft.ts";
 import {
 	createWorkspace,
 	finalTimeline,
@@ -259,28 +260,75 @@ const textOfAssistant = (m: AssistantMsgLike | null): string => {
  * 在流程的哪个位置，而不是从静态系统提示词里猜。卡只在状态切换时注入一轮
  * （见 agentLoop 的 lastCard 去重），不在历史里累积。
  */
-function roundCardFor(ws: TurnWorkspace, userName: string): string | undefined {
+function roundCardFor(
+	ws: TurnWorkspace,
+	userName: string,
+	wordRange?: { min: number; max: number },
+): string | undefined {
 	if (ws.plan.length === 0 && ws.draft.trim() === "") {
+		const range = wordRange ? `，本拍总字数约 ${wordRange.min}–${wordRange.max} 字，列路标时把字数分配到每一步（几步就分几份，心里有数）` : "";
 		return (
 			`【第 1 步·规划】你还没有落笔、也还没有计划。这一轮思考只做三件事：` +
 			`读题（谁在场、上文到哪、用户要什么）、探索（拿不准就查设定/记忆/账本）、` +
-			`列路标（\`beat_plan\`）。\`beat_plan\` 被接受前，不要落任何正文。` +
-			`预设的文风与行为边界从落笔起生效，这一轮不用逐条读。`
+			`列路标（\`beat_plan\`）${range}。\`beat_plan\` 被接受前，不要落任何正文。` +
+			`预设的文风与行为边界从落笔起生效，这一轮不用逐条读。\n` +
+			`**路标只写到「发生什么」的抽象层**（如「被值守弟子拦下」「褪衣取砚」）——` +
+			`具体怎么演（动作的先后、神态的变化、对白的语气、情绪的流转）留给演到那一段时再想，` +
+			`不要在这一轮预演各段的细节。\n` +
+			`思考全程用中文，与正文同语言。`
 		);
 	}
 	if (ws.plan.length > 0 && ws.appends === 0 && ws.draft.trim() === "") {
 		return (
-			`【开工】计划已接受。从现在起你是演员：按第一条未完成的演，一段一段交` +
-			`（\`draft_append\`，一个自然段就交）。正文只在稿纸上诞生。`
+			`【开工】计划已接受。从现在起进入演出：把自己当成一位资深作家，发挥强大的剧情构思能力，肆意展现你的文笔。` +
+			`按第一条未完成的演，一段一段交（\`draft_append\`，一个自然段就交）。正文只在稿纸上诞生。思考全程用中文，与正文同语言。`
 		);
 	}
-	if (ws.appends > 0) {
+	// 修复卡（8/09 问题：修复注入缺失）：上一段验收出的违规未修，优先注入修复指令——
+	// 否则模型被「演段回看卡」的构思引导带走，把修复攒到末尾统一做（实弹：四段写完才修）。
+	// 修复是这一步唯一该做的事：先修干净，再谈下一段。
+	if (ws.appends > 0 && ws.pendingViolations.length > 0) {
 		return (
-			`【演段回看】已演 ${ws.appends} 段。回看刚写下的这段，然后**承接计划的路标，把这一段演具体**：\n` +
-			`路标只说「发生什么」——现在要想的是**怎么演**：人物此刻的状态、动作的先后、神态的变化、对白的语气、情绪的流转。想的是剧情，不是写句子。\n` +
-			`想清楚后重新评估：剧情到岔路了吗（需不需要 \`ask\` 用户，此刻不定走不下去才问）；` +
-			`剩余路标还成立吗（不成立就 \`beat_plan\` 重拟）；戏到停点了吗（到了就 \`draft_seal\` 收笔，清单没勾完也没关系）。\n` +
-			`正文只在稿纸上写——思考里想剧情，落笔交给 \`draft_append\`。`
+			`【修复】上一段还有 ${ws.pendingViolations.length} 处未修：\n` +
+			ws.pendingViolations.map((v) => `- ${v}`).join("\n") +
+			`\n先用 \`draft_edit\` 逐处修掉（old 逐字引用现稿原文、须唯一，可一次给多处），` +
+			`验收过了再构思下一段——已经交给用户看的段落必须是定稿。\n思考全程用中文。`
+		);
+	}
+	if (ws.appends > 0 && ws.plan.some((s) => !s.done)) {
+		return (
+			`【演段回看】已演 ${ws.appends} 段。你需要在落笔前完成这一轮的工作：\n` +
+			`\u2460 回看：读一遍刚写下的段落，接住它的气口。\n` +
+			`\u2461 构思剧情走向：发挥自己职业作家的水平，思考这一段剧情往哪走、人物此刻的状态与下一步的抉择。\n` +
+			`\u2462 全力构思文笔：倾尽所有的去构思这一段怎么写得精彩——镜头、动作、感官细节、神态情绪、节奏、点睛。力求为用户提供最好的体验。\n` +
+			`\u2463 按需调写作方法论：写作上拿不准就调 \`writing_guide\` 读对应主题（general/nsfw），读完照着写。\n` +
+			`\u2464 重新评估：剧情到岔路就用 \`ask\` 问用户；路标不成立就重拟 \`beat_plan\`；戏到停点就 \`draft_seal\` 收笔（清单没勾完也没关系）。\n` +
+			`思考全程用中文。正文只在稿纸上写——思考里想戏与文笔，落笔交给 \`draft_append\`。`
+		);
+	}
+	// 路标已全部演完（或本来就没有计划）：这一拍的主体已完成。按字数决定去向——
+	// 字数不够 → 续写自然下文（8/09 定案：续写是「用户输入少 + 字数目标高」时的出口，
+	// 模型绞尽脑汁扩写不如承接世界书里的下一步；续写会自然走到岔路触发 ask，
+	// 也杜绝了「路标演完自由发散」——扶南女王那次就是没有续写出口、卡催构思导致的）。
+	// 字数达标 → 收笔评估。
+	const draftBodyChars = ws.draft.trim() ? extractDraftBody(ws.draft).replace(/\s+/g, "").length : 0;
+	if (ws.appends > 0) {
+		if (wordRange && draftBodyChars < wordRange.min) {
+			return (
+				`【续写】路标已全部演完，但本拍正文还没到目标（当前约 ${draftBodyChars} 字 / 目标 ${wordRange.min}–${wordRange.max} 字）。` +
+				`承接刚写下的，续写这一拍的自然下文——设定/世界书里的下一步（如「润墨之后的试墨」）。一段一段演。\n` +
+				`续写中涉及 ${userName} 的行动或选择，用 \`ask\` 停下来问；` +
+				`写到字数达标、戏到停点，用 \`draft_seal\` 收笔。思考全程用中文。`
+			);
+		}
+		return (
+			`【收笔评估】路标已全部演完，戏到了一个停点。你需要在收笔前按顺序完成：\n` +
+			`\u2460 判断戏是否真的到停点了——到停点就 \`draft_seal\` 收笔；\n` +
+			`\u2461 剧情是否停在 ${userName} 可以接话、可以行动的位置；\n` +
+			`\u2462 这一拍的自然下文是否涉及 ${userName} 的行动或选择（如「润墨之后该试墨」）——` +
+			`涉及就先 \`ask\` 问用户、按答案续写，**续写全部完成之前不要输出状态栏**；\n` +
+			`\u2463 剧情彻底结束后，最后才输出状态栏等格式块（状态栏意味着本拍结束）。\n` +
+			`思考全程用中文。`
 		);
 	}
 	return undefined;
@@ -566,7 +614,7 @@ export class StageEngine {
 		// P1 注入层：首轮（规划轮）卡并入注入块（用户话之前）——用户当拍的话必须保持
 		// 上下文最后一句（8/03 教训：注入块压提问之后，模型会把提问读成历史旧话）。
 		// 轮次卡是工作指令（如 opencode 的 system-reminder），随注入区在用户话前送达。
-		const firstCard = roundCardFor(ws, config.userName);
+		const firstCard = roundCardFor(ws, config.userName, wsDeps.rules.wordRange);
 		const injWithCard = firstCard ? `${injection}\n\n${firstCard}` : injection;
 		const tailText = endsWithUser ? `${injWithCard}\n\n${history[history.length - 1].text}` : injWithCard;
 
@@ -895,7 +943,6 @@ export class StageEngine {
 		let sealNudged = false; // 封笔催告（M-E：分段续写完但忘了 draft_seal），只给一轮
 		let userStopped = false; // P7：用户在 ask 选择卡上点了停止——本拍收束
 		let lastConsumed = 0; // 本轮开始时 text 长度——判定「本轮新产出文本」用
-		let lastThinkChars = 0; // 上一轮生成的思考字符数（演段轮零思考门禁判据）
 		// P1 注入层：轮次卡去重——只在工作区状态跨卡类型切换时注入，历史不累积。
 		// 首轮（规划卡）已在装配时随 tailText 送达，这里从「开工」状态起跟踪。
 		let lastCard = o.ws.plan.length > 0 ? "open" : "plan";
@@ -1074,16 +1121,56 @@ export class StageEngine {
 						});
 						continue;
 					}
-					// 演段轮零思考门禁（8/08 晚定案）：上一轮生成没产出任何思考就 append，
+					// 演段轮零思考门禁（8/08 晚定案）：上一条消息没有思考就 append，
 					// 说明没承接路标想「这段怎么演」——拒收一次，回喂承接指引。
+					// 判定看 last.content 是否含 thinking 块（思考+工具同轮输出也算有思考——
+					// 8/08 修：thinking_delta 可能不走流式而随消息到达，上一轮 stream 统计会漏判）。
 					// 只拦「续写第二段及以后」：首段前有第 1 轮的大构思，不算零思考。
-					if (name === "draft_append" && o.ws.appends > 0 && lastThinkChars === 0) {
+					const lastHadThink = (last.content ?? []).some(
+						(c) => c.type === "thinking" && (c.thinking ?? "").trim().length > 0,
+					);
+					if (name === "draft_append" && o.ws.appends > 0 && !lastHadThink) {
 						r = {
 							text:
 								`未收段。你上一轮没有思考就直接落笔——路标只说「发生什么」，` +
-								`这一段**怎么演**（人物此刻的状态、动作的先后、神态的变化、对白的语气、情绪的流转）` +
-								`要在落笔前想清楚。回看刚写下的，承接路标把这一段演具体，想好了再交。`,
+								`这一段的**戏与文笔**要在落笔前想清楚：镜头从哪开、动作怎么拆、` +
+								`感官细节（光线/声音/气味/触感）、人物此刻的状态与神态、` +
+								`节奏松紧与对白语气、有没有一个细节立住这一段。` +
+								`回看刚写下的，承接路标把这一段写好，想好了再交。`,
 							activity: "零思考落笔被拦下（需承接路标）",
+							ok: false,
+						};
+						ev.onActivity?.(r.activity);
+						recordSegment(o.ws, {
+							kind: "tool",
+							activity: { kind: "tool_start", name, detail: r.activity },
+						});
+						convo.push({
+							role: "toolResult",
+							toolCallId: call.id,
+							toolName: name,
+							content: [{ type: "text", text: r.text }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						continue;
+					}
+					// 演段轮未修违规门禁（8/08 晚定案 + 8/09 收紧）：
+					// 上一段验收出的违规未修掉就不许**任何推进**（append/done/seal）——
+					// 用户看到的每一段，在他看下一段之前必须是最终形态。
+					// 8/09：原来只拦 append，模型照样勾步/封笔把修复拖走；现在
+					// 只放行修复相关（draft_edit/draft_write）与只读（read/search/check）。
+					// 修复是写段后的固定下一步：写完 → 报告 → 只能修 → 替换上屏 → 才继续。
+					const ADVANCE_TOOLS = new Set(["draft_append", "beat_step_done", "draft_seal"]);
+					if (ADVANCE_TOOLS.has(name) && o.ws.pendingViolations.length > 0) {
+						r = {
+							text:
+								`${name === "draft_append" ? "未收段" : name === "draft_seal" ? "未封笔" : "未勾步"}。` +
+								`上一段还有 ${o.ws.pendingViolations.length} 处未修：\n` +
+								o.ws.pendingViolations.map((v) => `- ${v}`).join("\n") +
+								`\n先用 \`draft_edit\` 逐处修掉（old 逐字引用现稿原文、须唯一，可一次给多处），` +
+								`验收过了再继续——已经交给用户看的段落必须是定稿。`,
+							activity: `推进被拦下（${o.ws.pendingViolations.length} 处未修）`,
 							ok: false,
 						};
 						ev.onActivity?.(r.activity);
@@ -1131,6 +1218,13 @@ export class StageEngine {
 						o.ws.mediaDeliveries = o.ws.mediaDeliveries ?? [];
 						o.ws.mediaDeliveries.push({ toolName: name, details: mediaDetails, text: r.text });
 					}
+					// 每轮修复可见性（8/09 问题 2）：draft_edit 修改后**原地替换上屏**——
+					// 用户看到的每段就是修后版，不用等落树刷新。draft=true + reset=true
+					// = 前端清旧稿、按最新稿重画（与 draft_write 重交同一语义）。
+					if (name === "draft_edit" && r.ok !== false && o.ws.draft.trim()) {
+						const edited = o.ws.draft;
+						ev.onDelta?.("text", edited, true, true);
+					}
 					// 时间线：工具按调用位置入档（draft_write/edit 的正文另由 #recordDraft 记）
 					recordSegment(o.ws, { kind: "tool", activity: { kind: "tool_start", name, detail: r.activity ?? "" } });
 					if (r.activity) ev.onActivity?.(r.activity);
@@ -1154,20 +1248,47 @@ export class StageEngine {
 			const ctx: Record<string, unknown> = { systemPrompt: o.systemPrompt, messages: convo };
 			if (!lastRound) ctx.tools = o.tools;
 
-			// P1 注入层：按工作区状态注入当前轮次卡（状态切换才注入一次）
-			const card = roundCardFor(o.ws, o.wsDeps.userName);
-			const cardKind = o.ws.appends > 0 ? "review" : o.ws.plan.length > 0 ? "open" : "plan";
-			if (card && cardKind !== lastCard) {
-				lastCard = cardKind;
-				convo.push(nowMsg(card));
+			// P1 注入层：按工作区状态注入当前轮次卡。
+			// 规划/开工卡：状态切换才注入一次（一次性指令）。
+			// 演段回看卡 / 收笔评估卡：**每轮都注入**——循环指令，每轮重新看到
+			// （8/08 修：旧逻辑只切一次，模型后面几轮看不到评估指令）。
+			// 用替换语义防累积：推新卡前把上一张卡从 convo 里移除。
+			const card = roundCardFor(o.ws, o.wsDeps.userName, o.wsDeps.rules.wordRange);
+			const hasPending = o.ws.plan.some((s) => !s.done);
+			const draftBodyChars = o.ws.draft.trim() ? extractDraftBody(o.ws.draft).replace(/\s+/g, "").length : 0;
+			const wordRange = o.wsDeps.rules.wordRange;
+			// 修复态优先：有未修违规 → "fix"（修复卡，先修再演）
+			const fixing = o.ws.appends > 0 && o.ws.pendingViolations.length > 0;
+			// 续写态：路标演完但字数未达标——cardKind 归 "extend"，走替换语义
+			const extending = !fixing && o.ws.appends > 0 && !hasPending && !!wordRange && draftBodyChars < wordRange.min;
+			const cardKind = o.ws.appends > 0
+				? fixing ? "fix" : extending ? "extend" : hasPending ? "review" : "seal"
+				: o.ws.plan.length > 0 ? "open" : "plan";
+			if (card) {
+				if (cardKind === "review" || cardKind === "seal" || cardKind === "extend" || cardKind === "fix") {
+					// 替换上一张卡（找最后一个 role=user 且以各卡名开头）
+					for (let k = convo.length - 1; k >= 0; k--) {
+						const msg = convo[k] as { role?: string; content?: Array<{ type?: string; text?: string }> };
+						const txt = Array.isArray(msg.content)
+							? msg.content.map((c) => c.text ?? "").join("")
+							: "";
+						if (msg.role === "user" && (txt.includes("【演段回看】") || txt.includes("【收笔评估】") || txt.includes("【续写】") || txt.includes("【修复】"))) {
+							convo.splice(k, 1);
+							break;
+						}
+					}
+					convo.push(nowMsg(card));
+				} else if (cardKind !== lastCard) {
+					lastCard = cardKind;
+					convo.push(nowMsg(card));
+				}
 			}
 
 			const s = this.#deps.streamFn(o.model, ctx as never, o.options);
 			let final: AssistantMsgLike | null = null;
 			const fwd = this.#draftForwarder();
-			// 演段轮零思考门禁（8/08 晚定案）：本轮没产生任何思考就直接调 draft_append
-			// 的，下一轮拒收并回喂——「承接路标想这段怎么演」必须在落笔前发生。
-			// 记本轮 thinking 产出；nextRound 里若 append 时 thinkChars 为 0 则拦。
+			// thinking_delta 入时间线（思考→工具→正文全链）。零思考门禁的判定
+			// 不看这里的统计——改看 last.content 是否含 thinking 块（见 append 拦截处）。
 			let thinkChars = 0;
 			for await (const e of s) {
 				if (e.type === "done") final = e.message ?? null;
@@ -1189,7 +1310,6 @@ export class StageEngine {
 			}
 			if (!final) return { final: last, text };
 			last = final;
-			lastThinkChars = thinkChars; // 演段轮零思考门禁：下一轮 append 前必须有过思考
 			if (final.stopReason === "aborted") break;
 		}
 		return { final: last, text };

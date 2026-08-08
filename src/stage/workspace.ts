@@ -73,6 +73,14 @@ export interface TurnWorkspace {
 	patches: Record<string, unknown>[];
 	/** 最近一次验收是否全绿（谢幕判定用；未验收过 = false） */
 	lastGreen: boolean;
+	/**
+	 * 最近一次验收的**未修违规**（未封笔口径：文本质量类；不含字数/缺模块）。
+	 *
+	 * 修复注入时机（8/08 晚定案）：末尾统一修复让用户看到的段不是真正文——
+	 * 违规必须在**每轮 append 之后**注入并强制修掉，下一段之前上一段已是最终形态。
+	 * draft_edit 改稿成功后会重跑验收，此清单随之更新；空 = 可以继续演。
+	 */
+	pendingViolations: string[];
 	checks: number;
 	/**
 	 * 本拍时间线（思考/工具/正文按**发生顺序**）。
@@ -111,6 +119,7 @@ export function createWorkspace(): TurnWorkspace {
 		lookups: 0,
 		patches: [],
 		lastGreen: false,
+		pendingViolations: [],
 		checks: 0,
 		timeline: [],
 	};
@@ -256,6 +265,8 @@ function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green
 		: report.violations;
 	const green = violations.length === 0 && sov.length === 0;
 	ws.lastGreen = green && !pending;
+	// 修复注入时机：未修违规随每轮 append 回执记下——引擎据此拦「带着脏段续演」
+	ws.pendingViolations = [...violations, ...sov];
 	// 未封笔：连同 notes 里的「正文 N 字，预设建议上/下限」一并滤掉——
 	// 那是最直接的误差信号（目标 − 实测），留着等于把游标卡尺塞回模型手里。
 	const notes = pending ? report.notes.filter((n) => !/^正文 \d+ 字/.test(n)) : report.notes;

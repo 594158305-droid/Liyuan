@@ -651,19 +651,13 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 
 	if (rules.wordRange) {
 		const { min, max } = rules.wordRange;
-		// 字数由预设 prompt 引导即可，harness 层不再硬拒——双重执法导致模型把思考
-		// 全浪费在"怎么砍到 800 以内"的算术上。只有极端偏差（>50%）才算 violation；
-		// 正常偏差降为 note（报字数不打回，模型自己决定要不要改）。
+		// 字数只作提示（note），不作违规（violation）——8/09 定案：
+		// 字数目标已由规划轮分配 + 【续写】卡兜底，封笔后不再判违规逼模型扩写
+		// （那是末端修复的诱因：封笔报「字数不足」→ 模型在稿纸里补内容）。
 		if (bodyChars < min) {
-			const ratio = (min - bodyChars) / min;
-			const msg = `正文 ${bodyChars} 字（不含标签模块），预设建议下限 ${min}。`;
-			if (ratio > 0.5) violations.push(msg);
-			else notes.push(msg);
+			notes.push(`正文 ${bodyChars} 字（不含标签模块），预设建议下限 ${min}。`);
 		} else if (bodyChars > max) {
-			const ratio = (bodyChars - max) / max;
-			const msg = `正文 ${bodyChars} 字（不含标签模块），预设建议上限 ${max}。`;
-			if (ratio > 0.5) violations.push(msg);
-			else notes.push(msg);
+			notes.push(`正文 ${bodyChars} 字（不含标签模块），预设建议上限 ${max}。`);
 		}
 	}
 
@@ -698,16 +692,11 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 		}
 	}
 
-	for (const tag of rules.requiredTags) {
-		if (!new RegExp(`<${escapeReg(tag)}[\\s>]`, "i").test(turnText)) {
-			violations.push(`缺模块 <${tag}>——按预设格式补在正文之后。`);
-		}
-	}
-	if (rules.statusBarTagGroup.length > 0) {
-		// [\s/>] 兼容三种形态：<tag>（成对）、<tag >、<tag/>（自闭合占位符——界面由卡渲染）
-		const hit = rules.statusBarTagGroup.some((tag) => new RegExp(`<${escapeReg(tag)}[\\s/>]`, "i").test(turnText));
-		if (!hit) violations.push(`缺状态栏模块（${rules.statusBarTagGroup.map((t) => `<${t}>`).join(" 或 ")}）。`);
-	}
+	// 末端修复已彻底删除（8/09 定案）：requiredTags / statusBarTagGroup 不再判违规——
+	// 状态栏/格式模块归**输出层**（模型最后一轮走 text 通道输出，mergeFinalText 拼接），
+	// 不属于稿纸验收项。判违规会把模型逼进「封笔后稿纸里补」的末端修复，
+	// 造成状态栏补两次、续写被未修违规拦截等连锁问题。
+	// 字段保留（rulesAreEmpty / 提取逻辑仍引用），只是不再产生 violations。
 
 	return { violations, notes, bodyChars, pass: violations.length === 0 };
 }

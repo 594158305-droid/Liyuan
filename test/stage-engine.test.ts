@@ -1003,6 +1003,122 @@ test("演段轮连发门禁：同一轮两个 draft_append → 第二个被拒�
 	}
 });
 
+
+test("演段轮未修违规门禁：上一段带禁词不修就续演 → 被拒，先 edit 再演（修复注入每轮生效）", async () => {
+	const { cwd, sm } = makeStage();
+	addBannedWordPreset(cwd); // 禁词表 { "闪过" }
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const responses: unknown[] = [];
+		// 第一轮：beat_plan
+		responses.push(fauxAssistantMessage([fauxToolCall("beat_plan", { steps: ["推门", "见人"] })], { stopReason: "toolUse" }));
+		// 第二轮：append 带禁词「闪过」的第一段
+		responses.push(
+			fauxAssistantMessage(
+				[fauxThinking("承接路标：她推门进来，眼中闪过一道冷光。"), fauxToolCall("draft_append", { segment: "她推门进来，眼中闪过一道冷光。" })],
+				{ stopReason: "toolUse" },
+			),
+		);
+		// 第三轮：无视报告直接续演第二段 → 应被「未修违规」门禁拦下
+		responses.push(
+			fauxAssistantMessage(
+				[fauxThinking("接着演：她抬头看我。"), fauxToolCall("draft_append", { segment: "她抬头看我。" })],
+				{ stopReason: "toolUse" },
+			),
+		);
+		// 第四轮：看到拦截后先 draft_edit 修掉禁词
+		responses.push(
+			fauxAssistantMessage(
+				[
+					fauxThinking("先把「闪过」改掉：眼中亮起一道冷光。"),
+					fauxToolCall("draft_edit", { edits: [{ old: "眼中闪过一道冷光", new: "眼中亮起一道冷光" }] }),
+				],
+				{ stopReason: "toolUse" },
+			),
+		);
+		// 第五轮：修完再续演第二段 → 通过
+		responses.push(
+			fauxAssistantMessage(
+				[fauxThinking("已修干净。承接路标演第二段：她抬头看我。"), fauxToolCall("draft_append", { segment: "她抬头看我。" })],
+				{ stopReason: "toolUse" },
+			),
+		);
+		// 第六轮：封笔
+		responses.push(fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" }));
+		responses.push(fauxAssistantMessage(""));
+		responses.push(fauxScribeEmpty());
+		reg.setResponses(responses as never);
+
+		const activities: string[] = [];
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), { onActivity: (d) => activities.push(d) });
+		await engine.performTurn("你先进去。");
+
+		assert.ok(
+			activities.some((a) => a.includes("推进被拦下") || a.includes("续演被拦下")),
+			"带未修违规续演被拦截",
+		);
+		assert.ok(
+			activities.some((a) => a.includes("定点改稿")),
+			"拦截后先 draft_edit 修",
+		);
+		assert.ok(activities.some((a) => a.includes("续写第 2 段")), "修干净后第二段通过");
+		const { history } = rebuildHistory(sm.getBranch() as BranchEntryLike[]);
+		const flat = JSON.stringify(history);
+		assert.ok(!flat.includes("闪过"), "修的禁词不在定稿里");
+		assert.ok(flat.includes("眼中亮起一道冷光") && flat.includes("她抬头看我。"), "两段定稿在树上");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+
+test("每轮修复可见性：draft_edit 修改后整稿替换上屏（8/09 问题 2）", async () => {
+	const { cwd, sm } = makeStage();
+	addBannedWordPreset(cwd); // 禁词表 { "闪过" }
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const responses: unknown[] = [];
+		// 第一轮：beat_plan
+		responses.push(fauxAssistantMessage([fauxToolCall("beat_plan", { steps: ["推门"] })], { stopReason: "toolUse" }));
+		// 第二轮：append 带禁词的第一段
+		responses.push(
+			fauxAssistantMessage(
+				[fauxThinking("承接路标：她推门进来，眼中闪过一道冷光。"), fauxToolCall("draft_append", { segment: "她推门进来，眼中闪过一道冷光。" })],
+				{ stopReason: "toolUse" },
+			),
+		);
+		// 第三轮：draft_edit 修掉禁词
+		responses.push(
+			fauxAssistantMessage(
+				[fauxThinking("修掉禁词。"), fauxToolCall("draft_edit", { edits: [{ old: "眼中闪过一道冷光", new: "眼中亮起一道冷光" }] })],
+				{ stopReason: "toolUse" },
+			),
+		);
+		// 第四轮：封笔
+		responses.push(fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" }));
+		responses.push(fauxAssistantMessage(""));
+		responses.push(fauxScribeEmpty());
+		reg.setResponses(responses as never);
+
+		const deltas: Array<{ text: string; draft?: boolean; reset?: boolean }> = [];
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {
+			onDelta: (kind, d, draft, reset) => {
+				if (kind === "text") deltas.push({ text: d, draft, reset });
+			},
+		});
+		await engine.performTurn("你先进去。");
+
+		// 编辑后收到一次整稿替换推送：draft=true + reset=true + 内容为修后稿
+		const editPush = deltas.find((x) => x.reset === true && x.draft === true && x.text.includes("眼中亮起一道冷光"));
+		assert.ok(editPush, "draft_edit 后应收到 reset+draft 的整稿替换推送");
+		assert.ok(!editPush?.text.includes("闪过"), "推送的是修后稿（禁词已消失）");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 // ---------------- P7：ask 工具（剧情共创决策） ----------------
 
 test("ask：注入 askUser 才上清单；未注入则剔除（依赖缺失不上清单）", async () => {

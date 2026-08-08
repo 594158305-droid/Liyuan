@@ -44,9 +44,10 @@ test("writeTools：写侧十一件在清单里，beat_plan 列首为落笔前构
 	assert.match(byName.get("draft_append") ?? "", /追加|续写/);
 	assert.match(byName.get("draft_seal") ?? "", /封笔/);
 	assert.match(byName.get("draft_edit") ?? "", /整批不套用/);
-	// beat_plan 的描述必须自证「路标不是正文」——粒度是这个工具的全部价值
+	// beat_plan 的描述必须自证「路标是抽象层，怎么演留给各段」——粒度是这个工具的全部价值
 	assert.match(byName.get("beat_plan") ?? "", /路标/);
-	assert.match(byName.get("beat_plan") ?? "", /不是.*正文/);
+	assert.match(byName.get("beat_plan") ?? "", /抽象/);
+	assert.match(byName.get("beat_plan") ?? "", /怎么演.*再想|留给演到/);
 	// 计划是草图：描述须声明可改写，否则模型会把它当成必须演完的剧本
 	assert.match(byName.get("beat_plan") ?? "", /草图|改写/);
 });
@@ -221,7 +222,7 @@ const minRules = (): WorkspaceDeps => ({
 	rules: { ...emptyDraftRules(), wordRange: { min: 800, max: 2000 } },
 });
 
-test("draft_append：追加不覆盖；未封笔时字数不算违规，封笔后按完整稿验收", () => {
+test("draft_append：追加不覆盖；字数全程只提示不违规（8/09 末端修复删除）", () => {
 	const ws = createWorkspace();
 	const d = minRules();
 	// 第一段只有 300 字——若按完整稿 800 字下限判，必违规；但这是分段续写的第一段
@@ -230,7 +231,7 @@ test("draft_append：追加不覆盖；未封笔时字数不算违规，封笔�
 	assert.equal(ws.draft, "山门外雪落了一夜。他推门进屋，炉火将熄。");
 	assert.equal(ws.appends, 1);
 	assert.equal(ws.sealed, false);
-	assert.doesNotMatch(r1.text, /违规/); // 未封笔：字数不算违规
+	assert.doesNotMatch(r1.text, /待修/); // 未封笔：字数不算违规（无待修项）
 	assert.match(r1.text, /续写中/);
 	// 追加第二段：不覆盖，续在末尾
 	runWriteTool(ws, d, "draft_append", { segment: "她还在窗边坐着，像在等什么。" });
@@ -239,10 +240,11 @@ test("draft_append：追加不覆盖；未封笔时字数不算违规，封笔�
 	assert.equal(ws.appends, 2);
 	// 未封笔时 lastGreen 恒 false（谢幕判定：稿子还没写完，不算完成）
 	assert.equal(ws.lastGreen, false);
-	// 封笔：按完整稿验收（这里字数仍不足 800 → 会判违规）
+	// 封笔：字数不足也只是提示，不再是违规（8/09）
 	const r3 = runWriteTool(ws, d, "draft_seal", {});
 	assert.equal(ws.sealed, true);
 	assert.match(r3.text, /已封笔/);
+	assert.doesNotMatch(r3.text, /待修/, "封笔后字数不足不判违规——字数归规划层（8/09）");
 });
 
 test("draft_append：追加进时间线是追加段（draft=true），不塌成替换", () => {
