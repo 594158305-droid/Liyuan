@@ -496,8 +496,14 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 
 	const enhance = (op: "redraw" | "enhance" | "upscale" | "inpaint", extra: Record<string, unknown> = {}) =>
 		run(async () => {
-			// 作用于当前显示版本
-			await apiPost("/api/draw/enhance", { source: showSrc, op, slotId, ...extra });
+			// 作用于当前显示版本（versionIndex 供后端 redraw 文生图组装 / 新版本 tags 继承定位源版本）
+			await apiPost("/api/draw/enhance", {
+				source: showSrc,
+				op,
+				slotId,
+				...(displayed ? { versionIndex: displayed.index } : {}),
+				...extra,
+			});
 			setDisplayIdx(undefined); // 追加新版本 → 回到最新
 			reload();
 		});
@@ -612,7 +618,13 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 					onCancel={() => setInpaintOpen(false)}
 					onConfirm={(maskBase64) => {
 						void run(async () => {
-							await apiPost("/api/draw/enhance", { source: showSrc, op: "inpaint", maskBase64, slotId });
+							await apiPost("/api/draw/enhance", {
+								source: showSrc,
+								op: "inpaint",
+								maskBase64,
+								slotId,
+								...(displayed ? { versionIndex: displayed.index } : {}),
+							});
 							setInpaintOpen(false);
 							setDisplayIdx(undefined);
 							reload();

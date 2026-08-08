@@ -528,7 +528,7 @@ export function scanMediaDisk(cwd: string): { files: string[]; orphanFiles: stri
 }
 
 /** 从版本 params 读 tags（兼容旧 prompt 文本：无 scene 时回退 prompt 作 scene 展示） */
-function tagsFromParams(params: Record<string, unknown>): VersionTags {
+export function tagsFromParams(params: Record<string, unknown>): VersionTags {
 	const out: VersionTags = {};
 	if (typeof params.scene === "string") out.scene = params.scene;
 	else if (typeof params.prompt === "string") out.scene = params.prompt; // 旧格式回退

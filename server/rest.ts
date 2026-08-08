@@ -171,6 +171,7 @@ import {
 	saveSlotStoreNow,
 	scanMediaDisk,
 	setSelectedVersionIndex,
+	tagsFromParams,
 	updateVersionTags,
 } from "../src/draw-plugins/draw-slot/slot-store.ts";
 import { detectPresentCharacters, detectPresentCharactersWithAliases } from "../src/draw-plugins/draw-role/character-detect.ts";
@@ -4973,6 +4974,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					scaleBy?: number;
 					maskBase64?: string;
 					slotId?: string;
+					/** 源版本下标（数组下标 0=最旧；缺省=selectedVersionIndex ?? 最新非 discarded）——redraw 文生图/tags 继承用 */
+					versionIndex?: number;
 				};
 				const source = (body.source ?? "").trim();
 				if (!source) throw new Error("缺少 source");
@@ -4980,6 +4983,53 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (op !== "redraw" && op !== "enhance" && op !== "upscale" && op !== "inpaint") {
 					throw new Error("op 必须为 redraw / enhance / upscale / inpaint");
 				}
+
+				// redraw + slotId：「重新生成」= 用源版本 tags 文生图（构图全新）——
+				// 修复 img2img redraw 导致构图不变（DESIGN §8 对账 #5 时版本无 prompt 快照，
+				// 现 generate 路由已把 prompt 存进 params，切回文生图条件已满足）。
+				// 无 tags（历史版本）回退下方 img2img redraw 原行为。
+				if (op === "redraw" && body.slotId) {
+					const entry = loadSlotStore(host.cwd).slots[body.slotId];
+					const ver = entry ? pickSlotVersion(entry, body.versionIndex) : null;
+					const tags = ver ? tagsFromParams(ver.params) : {};
+					const scene = (tags.scene ?? tags.positive ?? "").trim();
+					if (scene) {
+						const charTags = (tags.characterPrompts ?? [])
+							.map((c) => (c.prompt ?? "").trim())
+							.filter(Boolean);
+						const prompt = charTags.length > 0 ? `${charTags.join(", ")}, ${scene}` : scene;
+						// 尺寸继承：读源图 PNG IHDR（NAI 输出为 png）；非 png/读失败 → 不动尺寸
+						let size: { width: number; height: number } | undefined;
+						try {
+							const buf = readFileSync(resolveSourceAbs(host.cwd, source));
+							size = pngSizeOf(buf) ?? undefined;
+						} catch {
+							size = undefined;
+						}
+						let rg: { src: string; slotId: string };
+						try {
+							rg = await generateImage(host.cwd, {
+								prompt,
+								...(size ? { params: { width: size.width, height: size.height } as never } : {}),
+							});
+						} catch (e) {
+							throw new Error(drawErrorZhFull(e));
+						}
+						// 新版本带 tags（scene/characterPrompts/positive），编辑 TAG 不空
+						appendVersion(host.cwd, body.slotId, {
+							file: srcToRel(rg.src),
+							params: {
+								prompt,
+								scene: tags.scene ?? "",
+								positive: tags.positive ?? tags.scene ?? "",
+								characterPrompts: tags.characterPrompts ?? [],
+							},
+						});
+						sendJson(res, 200, { ok: true, src: rg.src });
+						return true;
+					}
+				}
+
 				let r: { src: string };
 				try {
 					r = await enhanceImage(host.cwd, {
@@ -4993,12 +5043,14 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					throw new Error(drawErrorZhFull(e));
 				}
 				if (body.slotId) {
-					const relSrc = r.src.startsWith("/cache/")
-						? `.liyuan-cache/${r.src.slice("/cache/".length)}`
-						: r.src.startsWith("/media/")
-							? `.liyuan-media/${r.src.slice("/media/".length)}`
-							: r.src;
-					appendVersion(host.cwd, body.slotId, { file: relSrc });
+					// 新版本继承源版本 tags（增强/放大/局部重绘画面场景不变；redraw 无 tags 回退时同样继承）——
+					// 修复增强/重生成后新版本编辑 TAG 全空（原 appendVersion 不带 params）
+					const entry = loadSlotStore(host.cwd).slots[body.slotId];
+					const ver = entry ? pickSlotVersion(entry, body.versionIndex) : null;
+					appendVersion(host.cwd, body.slotId, {
+						file: srcToRel(r.src),
+						...(ver && ver.params ? { params: { ...ver.params } } : {}),
+					});
 				}
 				sendJson(res, 200, { ok: true, src: r.src });
 				return true;
@@ -5095,6 +5147,47 @@ function drawErrorZhFull(e: unknown): string {
 		}
 	}
 	return e instanceof Error ? e.message : String(e);
+}
+
+// ---------- 生图版本操作辅助（enhance redraw 文生图 + tags 继承用） ----------
+
+/** 源图 URL → 磁盘绝对路径（/cache/ /media/ 前缀；绝对路径直接用） */
+function resolveSourceAbs(cwd: string, source: string): string {
+	if (source.startsWith("/cache/")) return join(cwd, ".liyuan-cache", source.slice("/cache/".length));
+	if (source.startsWith("/media/")) return join(cwd, ".liyuan-media", source.slice("/media/".length));
+	if (isAbsolute(source)) return source;
+	return join(cwd, source);
+}
+
+/** 生成结果 URL → slot 存储相对路径（/cache/ /media/ 前缀 → .liyuan-* 目录） */
+function srcToRel(src: string): string {
+	if (src.startsWith("/cache/")) return `.liyuan-cache/${src.slice("/cache/".length)}`;
+	if (src.startsWith("/media/")) return `.liyuan-media/${src.slice("/media/".length)}`;
+	return src;
+}
+
+/** 读 PNG IHDR 宽高（大端）；非 PNG/损坏 → null（NAI 输出为 png，尺寸继承用） */
+function pngSizeOf(buf: Buffer): { width: number; height: number } | null {
+	if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null;
+	return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+/** 定位 slot 版本：显式 versionIndex → selectedVersionIndex → 最新非 discarded；无则 null */
+function pickSlotVersion(
+	entry: { selectedVersionIndex?: number; versions: Array<{ params: Record<string, unknown>; discarded: boolean }> },
+	versionIndex?: number,
+): { params: Record<string, unknown>; discarded: boolean } | null {
+	const versions = entry.versions;
+	if (typeof versionIndex === "number" && versionIndex >= 0 && versionIndex < versions.length) {
+		return versions[versionIndex] ?? null;
+	}
+	if (typeof entry.selectedVersionIndex === "number" && entry.selectedVersionIndex >= 0 && entry.selectedVersionIndex < versions.length) {
+		return versions[entry.selectedVersionIndex] ?? null;
+	}
+	for (let i = versions.length - 1; i >= 0; i--) {
+		if (!versions[i].discarded) return versions[i];
+	}
+	return null;
 }
 
 /**
