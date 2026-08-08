@@ -79,6 +79,12 @@ function resolveSourcePath(cwd: string, source: string): string {
 	return join(cwd, source);
 }
 
+/** 读 PNG IHDR 宽高（大端）；非 PNG/损坏 → null（NAI 输出为 png，增强/重生成尺寸继承用） */
+export function pngSizeOf(buf: Buffer): { width: number; height: number } | null {
+	if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null;
+	return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
 /** 外部 signal 中止时拒绝本次调用（队列为全局单例，不能整体 abort，只拒绝当前等待/请求） */
 function withSignal<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
 	if (!signal) return p;
@@ -177,10 +183,22 @@ export async function enhanceImage(cwd: string, opts: EnhanceImageOptions): Prom
 	// 解析源图路径并读入 base64
 	const sourcePath = resolveSourcePath(cwd, opts.source);
 	if (!existsSync(sourcePath)) throw new DrawError("parse", "源图不存在");
-	const imageBase64 = readFileSync(sourcePath).toString("base64");
+	const sourceBuf = readFileSync(sourcePath);
+	const imageBase64 = sourceBuf.toString("base64");
 
 	// 生效参数：preset → opts.params 覆盖
 	const { params, seed } = mergeOverrides(provider, opts.presetId, opts.params);
+
+	// 分辨率继承：enhance/inpaint/redraw 输出保持源图尺寸——NAI img2img 若不给尺寸
+	// 会用 provider 默认宽高（竖图会被拉成横图，用户反馈「重生成/增强没记住分辨率」）；
+	// upscale 例外：输出 = 源图 × scaleBy，由 NAI 按倍数放大，不传源图尺寸。
+	if (opts.op !== "upscale") {
+		const sz = pngSizeOf(sourceBuf);
+		if (sz) {
+			params.width = sz.width;
+			params.height = sz.height;
+		}
+	}
 
 	// op → strength/noise/scaleBy/maskImage 映射
 	const map: Record<EnhanceImageOptions["op"], { strength: number; noise: number; scaleBy: number; maskImage?: string }> = {

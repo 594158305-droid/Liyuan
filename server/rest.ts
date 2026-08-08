@@ -152,7 +152,7 @@ import { readJsonFile } from "../src/jsonio.ts";
 import { formatBytes, listMedia, listUploads, saveUpload } from "../src/uploads.ts";
 import { loadDrawConfig, newProviderId, normalizeDrawAspects, normalizeDrawProvider, saveDrawConfig } from "../src/draw/config.ts";
 import { testNovelAiConnection } from "../src/draw/novelai.ts";
-import { generateImage, enhanceImage } from "../src/draw/service.ts";
+import { generateImage, enhanceImage, pngSizeOf } from "../src/draw/service.ts";
 import { DrawError } from "../src/draw/errors.ts";
 import { EXTDATA_SCOPES, getExtData, putExtData } from "../src/extdata.ts";
 import { loadWardrobe, saveReferenceImage, saveWardrobe, upsertCharacter, type WardrobeFile } from "../src/wardrobe.ts";
@@ -5192,12 +5192,6 @@ function srcToRel(src: string): string {
 	if (src.startsWith("/cache/")) return `.liyuan-cache/${src.slice("/cache/".length)}`;
 	if (src.startsWith("/media/")) return `.liyuan-media/${src.slice("/media/".length)}`;
 	return src;
-}
-
-/** 读 PNG IHDR 宽高（大端）；非 PNG/损坏 → null（NAI 输出为 png，尺寸继承用） */
-function pngSizeOf(buf: Buffer): { width: number; height: number } | null {
-	if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null;
-	return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
 
 /** 定位 slot 版本：显式 versionIndex → selectedVersionIndex → 最新非 discarded；无则 null */
