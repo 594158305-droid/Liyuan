@@ -3,8 +3,8 @@
  * 消息正文里的 `[image:slotId]` 渲染为实际图片 + 悬浮操作条 + 版本导航胶囊。
  *
  * LWB 黑盒对齐（批次 1）：
- * - 版本导航胶囊 ‹ n/total ›：n 0=最新（LWB currentIndex 语义；versions 数组 0=最旧，
- *   显示 n = versions.length-1-arrayIndex）；‹/› 本地切换显示 + POST /api/draw/slots/select 持久化
+ * - 版本导航胶囊 ‹ n/total ›：n 1=最旧 → total=最新（有效列表位置 +1，discarded 跳号仍连续）；
+ *   ‹ 更旧 › 更新（点击 POST /api/draw/slots/select 持久化）；已在最新时 › = 重新生成（新增候选图）
  * - 编辑 TAG 分栏弹窗（🎬场景 + 👤每角色）：PUT /api/draw/slots/tags 保存不重绘
  * - 「保存」保存当前显示版：POST /api/draw/slots/save {slotId, versionIndex}
  *
@@ -82,11 +82,6 @@ export interface DrawSlotInfo {
 /** 有效版本（非 discarded 且有 src），保留原数组下标（0=最旧） */
 function validVersions(info: DrawSlotInfo): { index: number; view: DrawSlotVersionView }[] {
 	return (info.versions ?? []).map((view, index) => ({ index, view })).filter((x) => !x.view.discarded && !!x.view.src);
-}
-
-/** 显示位置换算：LWB currentIndex 0=最新 → 显示 n = versions.length-1 - arrayIndex */
-function displayIndex(info: DrawSlotInfo, arrayIndex: number): number {
-	return (info.versions?.length ?? 0) - 1 - arrayIndex;
 }
 
 /**
@@ -467,7 +462,8 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 	})();
 	const showSrc = displayed?.view.src ?? info.src;
 	const total = valid.length;
-	const navN = displayed ? displayIndex(info, displayed.index) : 0;
+	/** 序号 n = 当前显示版本在有效列表中的位置 + 1（1=最旧 → total=最新；discarded 跳号仍连续） */
+	const navN = displayed ? valid.findIndex((x) => x.index === displayed.index) + 1 : 0;
 
 	/** 持久化选中版本（本地先切显示，POST select，再刷新 info 同步 selectedVersionIndex） */
 	const selectVersion = (versionIndex: number) =>
@@ -477,13 +473,25 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 			reload();
 		});
 
-	/** 版本导航：dir=-1 更旧（n 增大），dir=1 更新（n 减小）；仅在有 ≥2 个有效版本时可用 */
+	/**
+	 * 版本导航：
+	 * ‹（dir=-1）= 上一张（更旧），pos-1，序号递减；已在最旧（pos=0）无目标时按钮已禁用，直接 return 兜底
+	 * ›（dir=1）= 下一张（更新），pos+1，序号递增；已到最新（无下一张）→ 重新生成（redraw 新增候选图并回到最新）
+	 * busy 期间全部禁用（防重入）；仅 1 张候选时 › 同样可用并触发重新生成
+	 */
 	const stepVersion = (dir: -1 | 1) => {
-		if (busy || !displayed || total < 2) return;
+		if (busy || !displayed) return;
 		const pos = valid.findIndex((x) => x.index === displayed.index);
 		const target = valid[pos + dir];
-		if (!target) return;
-		void selectVersion(target.index);
+		if (dir === 1) {
+			// ›：有下一张则切换；无下一张（已到最新）→ 重新生成新增候选图
+			if (target) void selectVersion(target.index);
+			else void enhance("redraw");
+		} else {
+			// ‹：更旧，无目标（已最旧）由按钮禁用兜底
+			if (!target) return;
+			void selectVersion(target.index);
+		}
 	};
 
 	const enhance = (op: "redraw" | "enhance" | "upscale" | "inpaint", extra: Record<string, unknown> = {}) =>
@@ -501,13 +509,13 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 			{/* busy 蒙层 + 转圈（批次 2.4：蒙住图片区域，不只在操作条） */}
 			{busy && <span className="draw-slot-busy-overlay" />}
 			{!info.saved && <span className="draw-slot-badge">未保存</span>}
-			{/* 版本导航胶囊（LWB：n 0=最新；‹ 更旧 › 更新；点击同步 POST select 持久化） */}
+			{/* 版本导航胶囊：n 1=最旧 → total=最新；‹ 更旧 › 更新；已在最新时 › = 重新生成（新增候选图） */}
 			{total > 0 && (
 				<span className="draw-ver-nav">
 					<button
 						type="button"
 						className="act"
-						disabled={busy || navN >= total - 1}
+						disabled={busy || navN <= 1}
 						title="上一个版本（更旧）"
 						onClick={() => stepVersion(-1)}
 					>
@@ -519,8 +527,8 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 					<button
 						type="button"
 						className="act"
-						disabled={busy || navN <= 0}
-						title="下一个版本（更新）"
+						disabled={busy}
+						title={navN >= total ? "重新生成（新增候选图）" : "下一个版本（更新）"}
 						onClick={() => stepVersion(1)}
 					>
 						›
