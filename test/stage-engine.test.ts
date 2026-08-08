@@ -681,11 +681,17 @@ test("引擎循环：格式尾巴（状态栏占位+catsay）走 text 通道 →
 
 		// 时间线随 details 持久化：resync/刷新后尾巴仍在
 		const entry = branch.filter((e) => e.type === "message" && e.message?.content).pop();
-		const timeline = entry?.message?.details?.rpTimeline as Array<{ kind: string; text?: string }> | undefined;
+		const timeline = entry?.message?.details?.rpTimeline as
+			| Array<{ kind: string; text?: string; draft?: boolean }>
+			| undefined;
 		assert.ok(Array.isArray(timeline), "rpTimeline 落树持久化");
-		const tlText = (timeline ?? []).filter((s) => s.kind === "text").map((s) => s.text ?? "").join("");
-		assert.ok(tlText.includes("咪咪点评"), "持久化时间线的正文段含尾巴（吸收不重复）");
-		assert.ok((timeline ?? []).filter((s) => s.kind === "text").length <= 1, "尾巴段被吸收，不重复上屏");
+		const textSegs = (timeline ?? []).filter((s) => s.kind === "text");
+		const tlText = textSegs.map((s) => s.text ?? "").join("\n\n");
+		assert.ok(tlText.includes("咪咪点评"), "持久化时间线含尾巴");
+		// 分段同构（8/09 输出形式）：稿段与尾巴段各自独立——稿段带 draft，尾巴段不带
+		assert.equal(textSegs.length, 2, "稿段 + 尾巴段，互不吸收");
+		assert.ok(textSegs[0].draft === true && (textSegs[0].text ?? "").includes("暮色四合"), "稿段在前且带 draft 标记");
+		assert.ok(textSegs[1].draft !== true && (textSegs[1].text ?? "").includes("咪咪点评"), "尾巴独立末段（非稿段）");
 		assert.ok(activities.some((a) => a.includes("交稿")), "过程条照常");
 	} finally {
 		reg.unregister();
@@ -1073,7 +1079,7 @@ test("演段轮未修违规门禁：上一段带禁词不修就续演 → 被拒
 });
 
 
-test("每轮修复可见性：draft_edit 修改后整稿替换上屏（8/09 问题 2）", async () => {
+test("每轮修复可见性：draft_edit 修改后分段重同步（8/09 输出形式）", async () => {
 	const { cwd, sm } = makeStage();
 	addBannedWordPreset(cwd); // 禁词表 { "闪过" }
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
@@ -1101,18 +1107,75 @@ test("每轮修复可见性：draft_edit 修改后整稿替换上屏（8/09 问�
 		responses.push(fauxScribeEmpty());
 		reg.setResponses(responses as never);
 
-		const deltas: Array<{ text: string; draft?: boolean; reset?: boolean }> = [];
+		const resyncs: string[][] = [];
 		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {
-			onDelta: (kind, d, draft, reset) => {
-				if (kind === "text") deltas.push({ text: d, draft, reset });
-			},
+			onDraftResync: (segments) => resyncs.push(segments),
 		});
 		await engine.performTurn("你先进去。");
 
-		// 编辑后收到一次整稿替换推送：draft=true + reset=true + 内容为修后稿
-		const editPush = deltas.find((x) => x.reset === true && x.draft === true && x.text.includes("眼中亮起一道冷光"));
-		assert.ok(editPush, "draft_edit 后应收到 reset+draft 的整稿替换推送");
-		assert.ok(!editPush?.text.includes("闪过"), "推送的是修后稿（禁词已消失）");
+		// 编辑后收到分段重同步推送：修后分段原位替换，禁词已消失
+		assert.ok(resyncs.length >= 1, "draft_edit 后应收到 draft_resync 推送");
+		const last = resyncs[resyncs.length - 1];
+		assert.ok(last.some((p) => p.includes("眼中亮起一道冷光")), "推送的是修后分段");
+		assert.ok(last.every((p) => !p.includes("闪过")), "禁词已消失");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("程序化谢幕：卡定义状态栏、模型 seal 后停手不输出 → 引擎点名催谢幕（8/09 输出形式）", async () => {
+	// 卡 first_mes 带 StatusBlock 示例 → statusBarTagGroup=["StatusBlock"]
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-eng-"));
+	writeFileSync(
+		join(cwd, "card.json"),
+		JSON.stringify({
+			data: {
+				name: "云澜",
+				description: "{{user}}的师姐",
+				first_mes: "你来了。\n<StatusBlock>\n地点：山门\n</StatusBlock>",
+			},
+		}),
+	);
+	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟" }));
+	mkdirSync(join(cwd, ".liyuan"), { recursive: true });
+	const sm = SessionManager.create(cwd, join(cwd, "sessions"));
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([
+			fauxAssistantMessage([fauxToolCall("beat_plan", { steps: ["推门"] })], { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				[fauxThinking("演第一段。"), fauxToolCall("draft_append", { segment: "他推门进屋，炉火将熄。" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" }),
+			// 记完账/封完笔直接停手，思考里只字未提状态栏——旧逻辑（hasTailIntent 猜词）
+			// 在此收场，状态栏整拍蒸发；新逻辑程序化判定缺 StatusBlock，点名催谢幕
+			fauxAssistantMessage([fauxThinking("这拍演完了。")]),
+			// 谢幕轮：补状态栏
+			fauxAssistantMessage("<StatusBlock>\n地点：屋内\n</StatusBlock>"),
+			fauxScribeEmpty(),
+		]);
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		await engine.performTurn("你先进去。");
+
+		const branch = sm.getBranch() as Array<{
+			type: string;
+			message?: { role?: string; content?: Array<{ type?: string; text?: string }>; details?: { rpTimeline?: unknown } };
+		}>;
+		const lastMsg = [...branch].reverse().find((e) => e.type === "message" && e.message?.role === "assistant");
+		const treeText = (lastMsg?.message?.content ?? [])
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("");
+		assert.ok(treeText.includes("他推门进屋"), "正文在树上");
+		assert.ok(treeText.includes("StatusBlock"), "谢幕轮被程序化拉起，状态栏落树（不再靠思考关键词碰运气）");
+		// 分段同构：状态栏是独立尾巴段（非稿段），排在最后
+		const tl = (lastMsg?.message?.details?.rpTimeline ?? []) as Array<{ kind: string; text?: string; draft?: boolean }>;
+		const textSegs = tl.filter((s) => s.kind === "text");
+		assert.ok(textSegs.length >= 2, "稿段 + 尾巴段");
+		const tail = textSegs[textSegs.length - 1];
+		assert.ok((tail.text ?? "").includes("StatusBlock") && tail.draft !== true, "状态栏收成独立尾巴末段");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

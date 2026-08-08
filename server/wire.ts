@@ -239,6 +239,8 @@ export type ServerFrame =
 	| { type: "message"; message: WireMsg }
 	/** draft=true：该 text 增量是 draft_write 参数的转发（替换语义——重交原地更新，不叠加）；reset=true：本次调用的首个分片 */
 	| { type: "delta"; kind: "text" | "thinking"; delta: string; draft?: boolean; reset?: boolean }
+	/** 稿件分段重同步（修复/重交后）：前端把屏上全部稿段原位替换为 segments（按空行切段） */
+	| { type: "draft_resync"; segments: string[] }
 	/** 丢弃当前流式半成品（中间 tool 轮被过滤后，避免计划旁白叠进下一轮 / 误落本地气泡） */
 	| { type: "stream"; state: "clear" }
 	| { type: "agent"; state: "start" | "end" }

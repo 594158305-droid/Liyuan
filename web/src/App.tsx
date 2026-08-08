@@ -82,6 +82,7 @@ import {
 	concatSegments,
 	dropTrailingText,
 	pruneEmpty,
+	resyncDraftSegs,
 	segmentsFromLegacy,
 	textOf,
 	thinkingOf,
@@ -716,6 +717,11 @@ export default function App() {
 						setStreamThinking(streamThinkingRef.current);
 					}
 					pushSegDelta(frame.kind, frame.delta, frame.draft, frame.reset);
+					break;
+				case "draft_resync":
+					// 修复后的稿件分段重同步：全部稿段原位替换成修后分段（该段原地变新）
+					if (abortingRef.current) break;
+					setSegs(resyncDraftSegs(turnSegsRef.current, frame.segments));
 					break;
 				case "stream":
 					// 中间 tool 轮被 server 过滤：计划旁白留档进过程清单，再清流式半成品

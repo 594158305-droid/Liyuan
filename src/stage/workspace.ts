@@ -140,20 +140,52 @@ export function recordSegment(
 		return;
 	}
 	if (!seg.text) return;
-	if (last && last.kind === seg.kind) last.text += seg.text;
+	// text 记档（尾巴流式等，无 draft 标记）不并入稿段——稿段是 draft_append/resync
+	// 维护的作品分段，尾巴黏进去会让「稿段拼接 ≠ 现稿」，定稿分段同构随之失效。
+	const mergeable = last && last.kind === seg.kind && !(last.kind === "text" && last.draft === true);
+	if (mergeable) last.text += seg.text;
 	else ws.timeline.push({ kind: seg.kind, text: seg.text });
 }
 
 /**
- * 定稿时间线：**所有** text 段统一收拢为一个稿段（内容 = finalText），清掉空壳段。
+ * 定稿时间线（8/09 输出形式定案：分段同构——重放形态 = 流式形态）。
  *
- * 落树的正文是 finalText（工作区空时退回直出正文；稿件 + 格式尾巴由引擎合并），
- * 时间线里的正文段必须与它一致，否则屏上会出现「时间线里的稿」与「消息正文」
- * 两份不同的文本。尾巴段（状态栏 / catsay，收尾轮按序记入）已并入 finalText，
- * 故只保留第一个正文段的位置、内容替换为 finalText，其余 text 段吸收掉不重复上屏。
- * 工作区从未记过稿段（直出正文路径）时，用 finalText 补在末尾。
+ * 常态：稿段（draft=true，= 屏上一段段长出来的故事）原位保留；finalText 相对现稿
+ * 多出的尾巴（状态栏 / catsay，text 通道直出）收成独立末段。落树正文 finalText 与
+ * 时间线正文（稿段拼接 + 尾巴段）内容一致，且分段结构与用户流式所见相同。
+ *
+ * 兜底：无稿（直出正文路径）或稿段与现稿脱同步时，退回「全文单段放首个 text 位置」
+ * 的塌段形态——内容正确优先于形态。
  */
 export function finalTimeline(ws: TurnWorkspace, finalText: string): TurnSegment[] {
+	// 分段同构（8/09 输出形式定案）：定稿保持稿段原位——重放形态 = 流式形态。
+	// mergeFinalText 的产物必为「稿全文」或「稿全文 + 尾巴」，故 startsWith 成立时
+	// 尾巴 = 稿之后的部分（状态栏等 text 通道产出），收成独立末段（不带 draft）。
+	// 非稿 text 段（尾巴的流式记档）丢弃——内容已归并进尾巴段，避免重复。
+	const draft = ws.draft.trim();
+	const flat = (s: string) => s.replace(/\s+/g, "");
+	const draftSegs = ws.timeline.filter(
+		(s): s is Extract<TurnSegment, { kind: "text" }> => s.kind === "text" && s.draft === true,
+	);
+	const joined = draftSegs.map((s) => s.text).join("\n\n");
+	if (draft && finalText.startsWith(draft) && flat(joined) === flat(draft)) {
+		const tail = finalText.slice(draft.length).trim();
+		const out: TurnSegment[] = [];
+		for (const s of ws.timeline) {
+			if (s.kind === "tool") {
+				if (s.activities.length > 0) out.push(s);
+				continue;
+			}
+			if (s.kind === "text") {
+				if (s.draft === true && s.text.trim()) out.push(s);
+				continue;
+			}
+			if (s.text.trim().length > 0) out.push(s);
+		}
+		if (tail) out.push({ kind: "text", text: tail });
+		return out;
+	}
+	// 兜底（无稿 / 直出代收 / 稿段与现稿脱同步）：全文单段放首个 text 位置（旧行为）
 	const out: TurnSegment[] = [];
 	let textPlaced = false;
 	for (const s of ws.timeline) {
@@ -188,6 +220,14 @@ function replaceDraftSegment(ws: TurnWorkspace, content: string): void {
 }
 
 /**
+ * 稿件按空行切段——分段的**同源算法**：时间线重切（下方 resyncDraftSegments）、
+ * 引擎的 draft_resync 帧（修复后前端原位替换稿段）都用它，保证前后端看到同一套分段。
+ */
+export function splitDraftSegments(draft: string): string[] {
+	return draft.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
+}
+
+/**
  * 定点改稿后同步时间线（M-E）：分段续写时**保持分段**，只把整稿重新切回各段。
  *
  * 续写形态下屏上是「一段段长出来的故事」，若改一处就塌成一整块，
@@ -197,8 +237,7 @@ function replaceDraftSegment(ws: TurnWorkspace, content: string): void {
 function resyncDraftSegments(ws: TurnWorkspace): void {
 	const firstIdx = ws.timeline.findIndex((s) => s.kind === "text" && s.draft === true);
 	ws.timeline = ws.timeline.filter((s) => !(s.kind === "text" && s.draft === true));
-	const parts = ws.draft.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
-	const segs: TurnSegment[] = parts.map((p) => ({ kind: "text" as const, text: p, draft: true }));
+	const segs: TurnSegment[] = splitDraftSegments(ws.draft).map((p) => ({ kind: "text" as const, text: p, draft: true }));
 	if (firstIdx >= 0) ws.timeline.splice(Math.min(firstIdx, ws.timeline.length), 0, ...segs);
 	else ws.timeline.push(...segs);
 }
@@ -428,8 +467,16 @@ export function runWriteTool(
 		if (!ws.draft.trim()) return { text: "工作区还没有稿件——先用 draft_write / draft_append 写正文。", ok: false };
 		ws.sealed = true;
 		const c = runCheck(ws, deps);
+		// 谢幕导向（8/09 输出形式）：状态栏 = 本拍结束的标志，必须是最后的产出。
+		// 封笔回执明示这一步，模型记完账也忘不掉（引擎另有程序化谢幕兜底）。
+		const sb = deps.rules.statusBarTagGroup;
+		const tail =
+			c.green && sb.length > 0
+				? `\n剩最后一步：剧情彻底结束后（含 ask/续写），在正文之外直接输出状态栏` +
+					`（${sb.map((t) => `<${t}>`).join(" 或 ")}）等格式块——状态栏意味着本拍结束，必须最后出现。`
+				: "";
 		return {
-			text: `已封笔。按完整稿验收：\n${c.text}`,
+			text: `已封笔。按完整稿验收：\n${c.text}${tail}`,
 			activity: c.green ? "封笔 · 验收通过" : "封笔 · 需修改",
 			ok: true,
 		};

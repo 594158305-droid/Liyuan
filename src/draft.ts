@@ -611,6 +611,15 @@ export interface DraftReport {
 
 const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * 格式模块标签是否已出现（成对 `<tag>`、带属性 `<tag …>`、自闭合 `<tag/>` 都算）。
+ * 谢幕判定用（8/09 输出形式）：状态栏等格式块该不该催，看文本里有没有，
+ * 不看模型思考里说没说。
+ */
+export function hasFormatTag(text: string, tag: string): boolean {
+	return new RegExp(`<${escapeReg(tag)}[\\s/>]`, "i").test(text);
+}
+
 /** 剥掉全部顶层标签块与 HTML 注释后的正文 */
 export function extractDraftBody(turnText: string): string {
 	let t = turnText.replace(/<!--[\s\S]*?-->/g, "");

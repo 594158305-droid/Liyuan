@@ -5,10 +5,12 @@ import { emptyDraftRules } from "../src/draft.ts";
 import { defaultState } from "../src/state.ts";
 import {
 	createWorkspace,
+	finalTimeline,
 	formatPlan,
 	MAX_STEPS,
 	MAX_STEP_LEN,
 	projectedState,
+	recordSegment,
 	runWriteTool,
 	type WorkspaceDeps,
 } from "../src/stage/workspace.ts";
@@ -268,6 +270,56 @@ test("draft_append：续写后 draft_edit 改一处，时间线保持分段不�
 	assert.equal(ws.edits, 1);
 	const segs = ws.timeline.filter((s) => s.kind === "text" && s.draft === true);
 	assert.equal(segs.length, 2, "改稿后仍是两个稿段（分段形态不塌）");
+});
+
+test("finalTimeline：分段同构——稿段原位保留，尾巴收独立末段（8/09 输出形式）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	recordSegment(ws, { kind: "thinking", text: "构思第一段。" });
+	runWriteTool(ws, d, "draft_append", { segment: "第一段。" });
+	recordSegment(ws, { kind: "thinking", text: "构思第二段。" });
+	runWriteTool(ws, d, "draft_append", { segment: "第二段。" });
+	// 尾巴（状态栏）流式记档：非稿 text，不得黏进稿段
+	recordSegment(ws, { kind: "text", text: "<StatusBlock>地点：山门</StatusBlock>" });
+	const finalText = `${ws.draft}\n\n<StatusBlock>地点：山门</StatusBlock>`;
+	const tl = finalTimeline(ws, finalText);
+	const textSegs = tl.filter((s): s is Extract<(typeof tl)[number], { kind: "text" }> => s.kind === "text");
+	assert.equal(textSegs.length, 3, "两个稿段 + 一个尾巴段");
+	assert.equal(textSegs[0].text, "第一段。");
+	assert.equal(textSegs[0].draft, true);
+	assert.equal(textSegs[1].text, "第二段。");
+	assert.equal(textSegs[1].draft, true);
+	assert.ok(textSegs[2].text.includes("StatusBlock"), "尾巴独立末段");
+	assert.notEqual(textSegs[2].draft, true, "尾巴段不带 draft 标记");
+	// 内容一致：稿段拼接 + 尾巴 = finalText
+	assert.equal([textSegs[0].text, textSegs[1].text].join("\n\n") + "\n\n" + textSegs[2].text, finalText);
+});
+
+test("finalTimeline：无稿（直出路径）回退单段全文", () => {
+	const ws = createWorkspace();
+	recordSegment(ws, { kind: "thinking", text: "直接说。" });
+	recordSegment(ws, { kind: "text", text: "你好。" });
+	const tl = finalTimeline(ws, "你好。");
+	const textSegs = tl.filter((s) => s.kind === "text");
+	assert.equal(textSegs.length, 1, "直出路径仍是单段");
+	assert.equal((textSegs[0] as { text: string }).text, "你好。");
+});
+
+test("draft_seal：回执谢幕导向——卡定义状态栏时点名「最后一步」（8/09 输出形式）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	d.rules.statusBarTagGroup = ["StatusBlock"];
+	runWriteTool(ws, d, "draft_append", { segment: "他推门进屋，炉火将熄。" });
+	const r = runWriteTool(ws, d, "draft_seal", {});
+	assert.match(r.text, /最后一步/, "封笔回执点名谢幕");
+	assert.match(r.text, /StatusBlock/, "点名状态栏标签");
+	assert.match(r.text, /本拍结束/, "状态栏 = 结束标志");
+	// 卡没定义状态栏：不加谢幕导向（没有就不硬造）
+	const ws2 = createWorkspace();
+	const d2 = deps();
+	runWriteTool(ws2, d2, "draft_append", { segment: "他推门进屋，炉火将熄。" });
+	const r2 = runWriteTool(ws2, d2, "draft_seal", {});
+	assert.doesNotMatch(r2.text, /最后一步/, "无状态栏卡不催谢幕");
 });
 
 test("draft_seal：空工作区封笔被拒", () => {

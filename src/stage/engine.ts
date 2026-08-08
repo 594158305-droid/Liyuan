@@ -87,10 +87,11 @@ import {
 } from "./media-stage.ts";
 import { assistantStageTool, runAssistantStageTool } from "./assistant-stage.ts";
 import type { MemoryChunkLike } from "../tools/memory.ts";
-import { extractDraftBody } from "../draft.ts";
+import { extractDraftBody, hasFormatTag } from "../draft.ts";
 import {
 	createWorkspace,
 	finalTimeline,
+	splitDraftSegments,
 	projectedState,
 	recordSegment,
 	runWriteTool,
@@ -167,6 +168,12 @@ export interface StageEvents {
 	 * reset=true 表示本次调用的首个分片（前端据此清掉旧稿）。
 	 */
 	onDelta?: (kind: "text" | "thinking", delta: string, draft?: boolean, reset?: boolean) => void;
+	/**
+	 * 稿件分段重同步（修复后）：前端把屏上全部稿段**原位**替换为 segments。
+	 * 与 onDelta 的稿件流互补——流式分片管「一段段长出来」，resync 管「原地变新」：
+	 * draft_edit 改稿成功后按当前稿全量重切下发，修后的段就是用户看到的段。
+	 */
+	onDraftResync?: (segments: string[]) => void;
 	onTurnEnd?: (info: StageTurnEndInfo) => void;
 	/** 面向用户的告警（宏降级等）；每种只发一次 */
 	onNotify?: (level: "info" | "warning" | "error", text: string) => void;
@@ -318,16 +325,22 @@ function roundCardFor(
 				`【续写】路标已全部演完，但本拍正文还没到目标（当前约 ${draftBodyChars} 字 / 目标 ${wordRange.min}–${wordRange.max} 字）。` +
 				`承接刚写下的，续写这一拍的自然下文——设定/世界书里的下一步（如「润墨之后的试墨」）。一段一段演。\n` +
 				`续写中涉及 ${userName} 的行动或选择，用 \`ask\` 停下来问；` +
-				`写到字数达标、戏到停点，用 \`draft_seal\` 收笔。思考全程用中文。`
+				`写到字数达标、戏到停点，用 \`draft_seal\` 收笔。` +
+				`状态栏等格式块是本拍**最后**的产出——续写全部完成之前不要输出。思考全程用中文。`
 			);
 		}
+		// 收笔评估卡（8/09 卡序纠正）：ask/续写判断必须在 seal **之前**——旧卡把
+		// 「到停点就 seal」排在第一步，模型照卡执行：封完笔才评估出「下文是用户的
+		// 行动、该 ask」，全成马后炮（实弹：想 ask 却已 seal，转头记账收场，
+		// ask 没发、状态栏也没了，还替用户把下一步演进了正文）。卡序 = 行为序。
 		return (
-			`【收笔评估】路标已全部演完，戏到了一个停点。你需要在收笔前按顺序完成：\n` +
-			`\u2460 判断戏是否真的到停点了——到停点就 \`draft_seal\` 收笔；\n` +
-			`\u2461 剧情是否停在 ${userName} 可以接话、可以行动的位置；\n` +
-			`\u2462 这一拍的自然下文是否涉及 ${userName} 的行动或选择（如「润墨之后该试墨」）——` +
-			`涉及就先 \`ask\` 问用户、按答案续写，**续写全部完成之前不要输出状态栏**；\n` +
-			`\u2463 剧情彻底结束后，最后才输出状态栏等格式块（状态栏意味着本拍结束）。\n` +
+			`【收笔评估】路标已全部演完，戏到了一个停点。按顺序评估，评估完再动手：\n` +
+			`① 这一拍的自然下文是否涉及 ${userName} 的行动或选择（如「润墨之后该试墨」）——` +
+			`涉及就先用 \`ask\` 问用户、按答案续写，此时不要收笔；\n` +
+			`② 不涉及，再看剧情是否停在 ${userName} 可以接话、可以行动的位置——不在就续写到停点；\n` +
+			`③ 以上都满足，\`draft_seal\` 收笔；\n` +
+			`④ 封笔之后最后一步：输出状态栏等格式块——状态栏意味着本拍结束，` +
+			`必须是这拍的最后产出（续写/ask 全部完成之前不要输出）。\n` +
 			`思考全程用中文。`
 		);
 	}
@@ -984,7 +997,21 @@ export class StageEngine {
 						continue;
 					}
 					if (text.trim()) break; // 本轮已有产出（可能正是尾巴）→ 正常谢幕
-					if (tailPass || (!hasTailIntent(last) && !hasTailIntent(o.first))) break;
+					if (tailPass) break; // 谢幕轮只给一次，防空转
+					// 程序化谢幕（8/09 输出形式定案）：状态栏 = 本拍结束的标志，必须最后出现。
+					// 卡/预设定义了格式块而稿与 text 通道都还没出现过 → 必开一轮谢幕并点名清单，
+					// 不再靠思考关键词（hasTailIntent）碰运气——实弹：模型记完账思考里没提
+					// 状态栏三个字，直接收场，状态栏整拍蒸发。关键词判定仅兜「rules 没
+					// 提取到但模型自己宣告了尾巴」的残余场景。
+					const producedSoFar = `${o.ws.draft}\n${text}`;
+					const missingReq = o.wsDeps.rules.requiredTags.filter((t) => !hasFormatTag(producedSoFar, t));
+					const sbGroup = o.wsDeps.rules.statusBarTagGroup;
+					const sbMissing = sbGroup.length > 0 && !sbGroup.some((t) => hasFormatTag(producedSoFar, t));
+					const wanted = [
+						...(sbMissing ? [`状态栏（${sbGroup.map((t) => `<${t}>`).join(" 或 ")}）`] : []),
+						...missingReq.map((t) => `<${t}>`),
+					];
+					if (wanted.length === 0 && !hasTailIntent(last) && !hasTailIntent(o.first)) break;
 					tailPass = true;
 					convo.push(last);
 					convo.push({
@@ -992,9 +1019,11 @@ export class StageEngine {
 						content: [
 							{
 								type: "text",
-								text:
-									`正文已收稿。若本拍还有正文之外的收尾内容（状态栏、点评等预设格式块），` +
-									`现在直接输出；没有则回空，本拍就此收束。`,
+								text: wanted.length
+									? `剧情已收笔。最后一步：输出 ${wanted.join("、")}——预设定义的谢幕格式块，` +
+										`在正文之外直接输出（不进稿纸），输出完本拍结束。不要再写正文。`
+									: `正文已收稿。若本拍还有正文之外的收尾内容（状态栏、点评等预设格式块），` +
+										`现在直接输出；没有则回空，本拍就此收束。`,
 							},
 						],
 						timestamp: Date.now(),
@@ -1218,12 +1247,11 @@ export class StageEngine {
 						o.ws.mediaDeliveries = o.ws.mediaDeliveries ?? [];
 						o.ws.mediaDeliveries.push({ toolName: name, details: mediaDetails, text: r.text });
 					}
-					// 每轮修复可见性（8/09 问题 2）：draft_edit 修改后**原地替换上屏**——
-					// 用户看到的每段就是修后版，不用等落树刷新。draft=true + reset=true
-					// = 前端清旧稿、按最新稿重画（与 draft_write 重交同一语义）。
+					// 每轮修复可见性（8/09 输出形式定案）：draft_edit 修改后**分段重同步**——
+					// 前端把全部稿段原位替换成修后分段，该段原地变新，无重复、不塌段。
+					// （旧做法发「全稿 + reset」只替换末段，前面稿段还在屏上 → 正文重复。）
 					if (name === "draft_edit" && r.ok !== false && o.ws.draft.trim()) {
-						const edited = o.ws.draft;
-						ev.onDelta?.("text", edited, true, true);
+						ev.onDraftResync?.(splitDraftSegments(o.ws.draft));
 					}
 					// 时间线：工具按调用位置入档（draft_write/edit 的正文另由 #recordDraft 记）
 					recordSegment(o.ws, { kind: "tool", activity: { kind: "tool_start", name, detail: r.activity ?? "" } });

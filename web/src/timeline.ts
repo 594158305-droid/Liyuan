@@ -11,11 +11,21 @@
 
 import type { WireActivity } from "./wire.ts";
 
-/** 时间线段：思考 / 工具步骤 / 正文，三选一，按发生顺序排列 */
+/**
+ * 时间线段：思考 / 工具步骤 / 正文，三选一，按发生顺序排列。
+ *
+ * text 段的 draft 标记（8/09 输出形式定案）：true = 稿段（稿纸工具产出的正文，
+ * 一段 = 一次 draft_append / resync 重切的一段）；缺省 = 尾巴文本（状态栏等
+ * text 通道直出）。稿段与尾巴段**永不互相并入**——修复重同步、旁白丢弃、
+ * 定稿合并都靠这个标记区分「作品」与「过程文本」。
+ */
 export type TurnSegment =
 	| { kind: "thinking"; text: string }
-	| { kind: "text"; text: string }
+	| { kind: "text"; text: string; draft?: boolean }
 	| { kind: "tool"; activities: WireActivity[] };
+
+/** 段是不是稿段（draft_write/append/resync 产出的正文） */
+const isDraftSeg = (s: TurnSegment | undefined): boolean => !!s && s.kind === "text" && s.draft === true;
 
 /**
  * 思考量的粗略 token 估算（折叠态摘要用）。
@@ -59,11 +69,13 @@ export function formatTokenCount(n: number): string {
  * 追加流式增量：与末段同类则并入，否则开新段。
  * 返回新数组（React 状态不可变更新）。
  *
- * draft=true 表示稿件流（draft_write 参数转发）——**替换语义**：
- * 多稿重交/定点改稿作用在同一份稿上，新稿原地替换末尾正文段而不是叠加，
- * 否则屏上会出现「初稿 + 终稿」两份正文（与服务端 replaceDraftSegment 同语义）。
- * reset=true 表示本次 draft_write 调用的首个分片——把旧稿整个清掉换成新稿开头；
- * 同一次调用内的后续分片（reset=false）照常并入新稿段。
+ * draft=true 表示稿件流（draft_write / draft_append 参数转发）：
+ * - reset=true（draft_write 重交的首个分片）——旧稿**所有稿段**清掉，从新段重新开始
+ *   （与服务端 replaceDraftSegment 同语义；只清稿段，尾巴/思考/工具照留）。
+ * - reset=false——并入末尾**稿段**；末段不是稿段（思考/工具/尾巴刚插过）则开新稿段，
+ *   屏上的故事就是一段段长出来的（M-E 分段续写形态）。
+ * 非 draft 的 text（状态栏等尾巴）只并入非稿 text 段——稿段永不吃尾巴增量，
+ * 尾巴也永不黏进稿段。
  */
 export function appendDelta(
 	segs: TurnSegment[],
@@ -75,25 +87,41 @@ export function appendDelta(
 	if (!delta) return segs;
 	if (draft && kind === "text") {
 		if (reset) {
-			// 新一稿：替换末尾正文段为增量起点（清掉旧稿），无正文段则开新段
-			const last = segs[segs.length - 1];
-			if (last && last.kind === "text") return [...segs.slice(0, -1), { kind: "text", text: delta }];
-			return [...segs, { kind: "text", text: delta }];
+			// 新一稿：清掉所有稿段，新稿从末尾开新段（思考/工具/尾巴保留原位）
+			const kept = segs.filter((s) => !isDraftSeg(s));
+			return [...kept, { kind: "text", text: delta, draft: true }];
 		}
 		const last = segs[segs.length - 1];
-		if (last && last.kind === "text") {
-			// 同稿分片并入末尾正文段（该段 = 当前稿）
-			const merged: TurnSegment = { kind: "text", text: last.text + delta };
-			return [...segs.slice(0, -1), merged];
+		if (last && last.kind === "text" && last.draft === true) {
+			// 同段分片并入正在写的稿段
+			return [...segs.slice(0, -1), { kind: "text", text: last.text + delta, draft: true }];
 		}
-		return [...segs, { kind: "text", text: delta }];
+		// 新段落（上一事件是思考/工具/尾巴）：开新稿段
+		return [...segs, { kind: "text", text: delta, draft: true }];
 	}
 	const last = segs[segs.length - 1];
-	if (last && last.kind === kind) {
+	if (last && last.kind === kind && !isDraftSeg(last)) {
 		const merged: TurnSegment = { kind, text: last.text + delta };
 		return [...segs.slice(0, -1), merged];
 	}
 	return [...segs, { kind, text: delta }];
+}
+
+/**
+ * 稿件分段重同步（draft_resync 帧）：修复 / 重交后，屏上**全部稿段**原位替换成
+ * 服务端按空行重切的新分段——该段原地变新，无重复、不塌段、位置不动。
+ * 与服务端 workspace.resyncDraftSegments 同源语义。
+ * 插入位置 = 原第一个稿段的位置（前面的思考/工具/尾巴不动）；无稿段则接在末尾。
+ */
+export function resyncDraftSegs(segs: TurnSegment[], parts: string[]): TurnSegment[] {
+	const firstIdx = segs.findIndex((s) => isDraftSeg(s));
+	const kept = segs.filter((s) => !isDraftSeg(s));
+	const drafts: TurnSegment[] = parts
+		.filter((p) => p.trim().length > 0)
+		.map((p) => ({ kind: "text", text: p, draft: true }));
+	if (firstIdx < 0) return [...kept, ...drafts];
+	// 第一个稿段之前全是非稿段，故 kept 的前 firstIdx 个元素即原稿段前的所有段
+	return [...kept.slice(0, firstIdx), ...drafts, ...kept.slice(firstIdx)];
 }
 
 /**
@@ -113,20 +141,25 @@ export function appendActivity(segs: TurnSegment[], activity: WireActivity): Tur
  * 丢弃末尾的中间态正文段（server 发 stream:clear —— 该轮正文是调工具前的
  * 计划旁白，不算成品）。思考段与工具段保留：它们本就是过程记录。
  *
- * 只删末尾连续的 text 段，前面轮次已定稿的正文不动。
+ * 只删末尾连续的**非稿** text 段——稿段是作品不是旁白，任何清场都不碰；
+ * 前面轮次已定稿的正文也不动。
  */
 export function dropTrailingText(segs: TurnSegment[]): TurnSegment[] {
 	let end = segs.length;
-	while (end > 0 && segs[end - 1].kind === "text") end--;
+	while (end > 0) {
+		const s = segs[end - 1];
+		if (s.kind !== "text" || s.draft === true) break;
+		end--;
+	}
 	return end === segs.length ? segs : segs.slice(0, end);
 }
 
-/** 末尾中间态正文（stream:clear 前留档成 note 用）；无则空串 */
+/** 末尾中间态正文（stream:clear 前留档成 note 用）；稿段不算旁白，无则空串 */
 export function trailingText(segs: TurnSegment[]): string {
 	let out = "";
 	for (let i = segs.length - 1; i >= 0; i--) {
 		const s = segs[i];
-		if (s.kind !== "text") break;
+		if (s.kind !== "text" || s.draft === true) break;
 		out = s.text + out;
 	}
 	return out;
@@ -183,6 +216,7 @@ export function segmentsFromLegacy(o: {
 /**
  * 合并两条时间线（同一拍里多次定稿——中断续写 / 多轮 upsert）。
  * 直接首尾相接后归并相邻同类段，保持整体时序。
+ * text 段只在 draft 标记一致时归并——稿段与尾巴段相邻也保持独立。
  */
 export function concatSegments(a: TurnSegment[], b: TurnSegment[]): TurnSegment[] {
 	const out: TurnSegment[] = [];
@@ -194,9 +228,15 @@ export function concatSegments(a: TurnSegment[], b: TurnSegment[]): TurnSegment[
 		}
 		if (last.kind === "tool" && seg.kind === "tool") {
 			out[out.length - 1] = { kind: "tool", activities: [...last.activities, ...seg.activities] };
-		} else if (last.kind === seg.kind && seg.kind !== "tool" && last.kind !== "tool") {
-			// 两段文本相接：中间补空行，避免上一稿末句与下一稿首句黏连
-			out[out.length - 1] = { kind: seg.kind, text: `${last.text.trimEnd()}\n\n${seg.text.trimStart()}` };
+		} else if (last.kind === "thinking" && seg.kind === "thinking") {
+			out[out.length - 1] = { kind: "thinking", text: `${last.text.trimEnd()}\n\n${seg.text.trimStart()}` };
+		} else if (last.kind === "text" && seg.kind === "text" && last.draft !== true && seg.draft !== true) {
+			// 两段尾巴文本相接：中间补空行，避免上一段末句与下一段首句黏连。
+			// 稿段永不归并——段边界即 append/resync 的分段结构，塌了就回到一整块。
+			out[out.length - 1] = {
+				kind: "text",
+				text: `${last.text.trimEnd()}\n\n${seg.text.trimStart()}`,
+			};
 		} else {
 			out.push(seg);
 		}
