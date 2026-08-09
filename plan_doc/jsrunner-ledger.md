@@ -20,6 +20,24 @@ bootstrap 启动加载、ready 竞态补偿）。
 - **Lane C（V2-2 拖拽排序 + V2-4 区域扩展 + V2-5 tab 接管）**：ledger order/move + area 枚举扩展 + position:"tab" + 顶栏/侧栏挂载点 + tab 条。
 - **Lane D（V2-7 性能实测）**：N 面板实测脚本 + 指标 + 超标方案（依赖前序 lane 完成后的真实环境）。
 
+## V2 实施结果（2026-08-09 全部完成，git 475e38f + 后续文档提交）
+
+**V2 六项已实现并提交（475e38f）**：V2-1 zip 打包（JSZip 前端解包/打包 + manifest 约定 +
+导出回导）、V2-2 拖拽排序（ledger order/move + grip 把手 + 键盘替代 + panel-order 持久化）、
+V2-3 文件共享（shared 注册表 extdata global:shared-assets + sharedAssets + 引用计数删除确认）、
+V2-4 区域扩展（area 增 left/top/right + App 三新挂载点 + helper 白名单放开）、V2-5 tab 接管
+（position:"tab" + 标准/脚本 tab 条 + :has 隐藏标准字段区）、V2-6 sandbox 加固（allow-scripts +
+localStorage 内存副本代理 + /uploads/ CORS）。
+
+**V2-7 性能实测完成**（本文件后续提交）：N=10 面板注入实测——全部挂载、单脚本渲染
+0.4–0.8ms、展开瞬时、JS 堆 28MB、事件链路正常，全面达标**不触发优化方案**（虚拟化/
+默认收起/上限告警均不需要）；实测环境已还原。结论与复测方法见
+docs/DESIGN-jsrunner-ledger-ui.md V2-7 实施结论。
+
+**验证**：typecheck 通过、jsrunner-baseline 测试 15/15（新增 move/setOrder/activeTab 3 用例）、
+浏览器冒烟能力自检 8/8 全绿（sandbox 加固后 localStorage 代理 + CORS 无回归）。
+各 lane 实施结论与 D4 偏差已写入设计文档相应节。
+
 2026-08-09 用户点名进行设计，产出 `docs/DESIGN-jsrunner-ledger.md`（D2）。设计要点：
 
 1. **三条通道**（核心）：
