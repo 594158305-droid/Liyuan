@@ -681,6 +681,18 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 	}
 	if (bannedHits > 5) violations.push(`（禁词共 ${bannedHits} 处，以上仅列前 5）`);
 
+	// 正文不是文档（机械格式纪律，无条件判）：行首 markdown 标题符号是结构标记不是
+	// 叙事语言——模型偶发拿 ##/### 给拟声词放大字号（8/09 实弹「### *啪……啪……*」），
+	// 渲染端按纯文本走，裸符号直接上屏。强调交给文字本身。
+	{
+		const mdHeading = /^#{1,6}\s*\S.*$/m.exec(body);
+		if (mdHeading) {
+			violations.push(
+				`正文含 markdown 标题符号「${mdHeading[0].slice(0, 24)}」——正文不是文档，删掉行首的 # 号，强调用文字本身表达。`,
+			);
+		}
+	}
+
 	if (rules.banNegPos) {
 		const m = /不是[^。！？\n]{1,24}[，,]?\s*而?是/.exec(body);
 		if (m) violations.push(`「不是…是…」句式：${ctxQuote(body, m.index, m[0].length)}`);

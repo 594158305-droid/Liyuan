@@ -204,6 +204,20 @@ test("checkDraft：禁词/句式全报；状态栏与字数只提示不违规（
 	assert.ok(formatDraftReport(r1).includes("draft_edit"));
 });
 
+test("checkDraft：markdown 标题符号判违规——正文不是文档（8/09 实弹「### *啪……*」）", () => {
+	const rules = emptyDraftRules();
+	const bad = "他抬手落下。\n\n### *啪……啪……啪*\n\n她闷哼一声。";
+	const r1 = checkDraft(bad, rules);
+	assert.ok(
+		r1.violations.some((v) => v.includes("markdown 标题符号")),
+		"行首 # 号判违规（无预设也判——机械格式纪律）",
+	);
+	// 正文中非行首的 #（罕见）不误伤；状态栏标签块内的内容不参与（extractDraftBody 已剥）
+	const ok = "他抬手落下，啪、啪、啪，三声脆响。\n<StatusBlock>\n# 无关\n</StatusBlock>";
+	const r2 = checkDraft(ok, rules);
+	assert.ok(!r2.violations.some((v) => v.includes("markdown")), "标签块内与无标题正文不误伤");
+});
+
 test("checkDraft：状态栏不再参与验收（8/09：归输出层，mergeFinalText 拼接）", () => {
 	// 状态栏/格式模块彻底从稿纸验收摘除——无论缺不缺、什么形态，都不报
 	const rules = extractDraftRules([], ["`<StatusPlaceHolderImpl/>`"]);
