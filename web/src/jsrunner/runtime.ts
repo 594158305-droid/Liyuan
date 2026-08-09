@@ -313,7 +313,9 @@ export class ScriptRuntimes {
 		// opaque，脚本无法访问 parent.document；localStorage 随之不可用——由桥内代理（内存副本 +
 		// postMessage 落宿主）承接。桥与宿主通信走 postMessage，不受 sandbox 影响；
 		// fetch('/uploads/…') 因跨源需要 CORS（server /uploads/ 已加 Access-Control-Allow-Origin: *）。
-		iframe.setAttribute("sandbox", "allow-scripts");
+		// 2026-08-09 用户裁决（开放性优先，见 AGENTS.md 产品红线）：放开 allow-same-origin——
+		// 脚本可访问 parent.document 直操宿主 DOM（瑟瑟状态栏 bundle 直操宿主 UI 所需）。
+		iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
 		// 初始 context 同步注入（D4 冒烟修复）：脚本顶层 getContext() 即有值
 		iframe.srcdoc = buildScriptSrcDoc({ ...meta, content }, this.bridgeJs, getContextSnapshot());
 		this.ensureContainer().appendChild(iframe);
@@ -328,6 +330,13 @@ export class ScriptRuntimes {
 		this.createTokens.delete(id);
 		this.desiredIds.delete(id);
 		if (!entry) return;
+		// 2026-08-09 用户裁决（开放性优先）：脚本直操宿主 DOM——destroy 前调用脚本注册的
+		// 宿主清理钩子（__lyHostCleanup），移除宿主页面注入的骨架/样式/脚本，避免停用后 UI 残留。
+		try {
+			(window as unknown as { __lyHostCleanup?: () => void }).__lyHostCleanup?.();
+		} catch (e) {
+			console.warn("[jsrunner] 宿主清理钩子调用失败", e);
+		}
 		try {
 			entry.iframe.remove();
 		} catch {

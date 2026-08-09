@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
+const WEB_VENDOR_DIR = join(ROOT, "web", "src", "jsrunner", "vendor-files");
 const SRC = "J:/SillyTavern/public/scripts/extensions/third-party/JS-Slash-Runner/my/瑟瑟灵感状态栏V2.67.js";
 const OUT_DIR = join(ROOT, "assets", "liyuan-statusbar");
 const OUT_FILE = join(OUT_DIR, "liyuan-瑟瑟状态栏.js");
@@ -85,24 +86,24 @@ console.log(`[convert] head=${headInner.length}B body=${bodyInner.length}B bundl
 
 if (!bundleSrc) throw new Error("未从 EMBEDDED_HTML 提取到 module bundle");
 
-/** bundle 内宿主文档引用重定向（exp-4：45+89 处 parent.document/window.parent） */
-function redirectParent(js) {
-	return js
-		.replace(/window\.parent\.document/g, "document")
-		.replace(/parent\.document/g, "document")
-		.replace(/window\.parent\.localStorage/g, "localStorage")
-		.replace(/parent\.localStorage/g, "localStorage")
-		.replace(/window\.parent\.jQuery/g, "window.jQuery")
-		.replace(/parent\.jQuery/g, "window.jQuery")
-		.replace(/window\.parent\.\$/g, "window.$")
-		.replace(/parent\.\$/g, "window.$")
-		// 其余 window.parent / parent 裸引用 → window（自身）
-		.replace(/window\.parent\b(?!\.postMessage)/g, "window")
-		.replace(/\bparent\.(?!postMessage)/g, "window.");
+// 本地 jQuery 源码（内联注入宿主 head；2026-08-09 实测 CDN 网络不可达——code.jquery.com /
+// unpkg.com 均 ERR_CONNECTION_CLOSED，改为离线内联。iframe 模式（v10/v11）验证过本副本
+// 与 bundle 兼容；在宿主 realm 执行 → jQuery 绑定宿主 document → 宿主事件委托生效）
+const JQUERY_SRC = readFileSync(join(WEB_VENDOR_DIR, "jquery.min.js"), "utf8");
+console.log(`[convert] 内联 jQuery 源码 ${JQUERY_SRC.length}B`);
+
+/**
+ * bundle 注入宿主执行（2026-08-09 用户裁决：放开沙箱同源，脚本直操宿主 DOM）。
+ * bundle 原样注入宿主 document（script append 到 parent.document.head）——与 ST 宿主执行
+ * 完全一致：裸 document / window.parent 引用天然指向宿主，无需任何重定向。
+ * （此前 redirectParent 把 parent.document → document 的重定向已废弃。）
+ */
+function documentHostRedirect(js) {
+	return js;
 }
 
-const bundleFixed = redirectParent(bundleSrc);
-console.log(`[convert] bundle parent 重定向完成（${bundleSrc.length} → ${bundleFixed.length}B）`);
+const bundleFixed = documentHostRedirect(bundleSrc);
+console.log(`[convert] bundle 就绪（${bundleSrc.length}B，注入宿主执行，不重定向）`);
 
 /** 生成适配主脚本 */
 const out = `// ===== liyuan-瑟瑟状态栏（适配版 · P1 外壳）=====
@@ -114,13 +115,12 @@ const out = `// ===== liyuan-瑟瑟状态栏（适配版 · P1 外壳）=====
 //           场景切换（改 ST API 预设）→ 无对等，已删除；
 //           布局定位形态（fixed 悬浮）→ 不追求复刻，append 内嵌。
 
-// ---------- 0. Liyuan 面板注册（V1/P2 通道） ----------
-// maxHeight: 99999 → 宿主钳制 Math.min(上报内容高, maxHeight) 退化为「内容全高」，
-// iframe 内部无溢出、无内部滚动条；滚动由外层 .status-card（max-height:50vh; overflow-y:auto）统一承担。
-TavernHelper.registerLedgerPanel({ title: "瑟瑟状态栏", icon: "✨", area: "status", maxHeight: 99999 });
+// ---------- 0. （已删除）Liyuan 面板注册——2026-08-09 用户裁决：bundle 直操宿主 DOM，
+//     UI 长在宿主页面（3b 骨架注入宿主 body），不再注册 ledger 面板外壳（iframe 挂载槽）。 ----------
 
-// ---------- 1. tavern_events 常量表（G6 缺口补齐：bundle 用全局 tavern_events.X） ----------
-window.tavern_events = {
+// ---------- 1. tavern_events 常量表（G6 缺口补齐：bundle 用全局 tavern_events.X；
+//     2026-08-09 用户裁决 bundle 注入宿主执行 → 常量定义到宿主 window） ----------
+window.parent.tavern_events = {
 	APP_READY: "APP_READY",
 	CHAT_CHANGED: "CHAT_CHANGED",
 	GENERATION_STARTED: "GENERATION_STARTED",
@@ -132,26 +132,29 @@ window.tavern_events = {
 	WORLD_STATE_CHANGED: "WORLD_STATE_CHANGED",
 };
 
-// ---------- 2. 数据暴露（原 Loader 内联数据，暴露到自身 window——bundle 同窗读取） ----------
-window.__ub_play_data = ${JSON.stringify(PLAY_DATA)};
-window.__ub_gacha_data = ${JSON.stringify(GACHA_DATA)};
-window.__ub_play_images = ${JSON.stringify(PLAY_IMAGES)};
-window.__ub_古代随机事件_events = ${JSON.stringify(ACCIDENT_EVENTS_古代随机事件)};
-window.__ub_现代随机事件_events = ${JSON.stringify(ACCIDENT_EVENTS_现代随机事件)};
+// ---------- 2. 数据暴露（原 Loader 内联数据，定义到宿主 window——bundle 宿主 realm 读取） ----------
+window.parent.__ub_play_data = ${JSON.stringify(PLAY_DATA)};
+window.parent.__ub_gacha_data = ${JSON.stringify(GACHA_DATA)};
+window.parent.__ub_play_images = ${JSON.stringify(PLAY_IMAGES)};
+window.parent.__ub_古代随机事件_events = ${JSON.stringify(ACCIDENT_EVENTS_古代随机事件)};
+window.parent.__ub_现代随机事件_events = ${JSON.stringify(ACCIDENT_EVENTS_现代随机事件)};
 
-// ---------- 3. 自身 iframe 渲染（取代原 Loader 的宿主 body/head 注入） ----------
-// 3a. head 样式（原 EMBEDDED_HTML 的 <style> 等）
-document.head.insertAdjacentHTML("beforeend", ${JSON.stringify(headInner)});
-// 3b. body 骨架（#ac-content / .minimal-container / 各弹层容器）
-document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(bodyInner)});
+// ---------- 3. 宿主 document 骨架注入（2026-08-09 用户裁决：放开沙箱同源，bundle 直操宿主 DOM） ----------
+// 3a. （已删除：splitEmbedded 的 headInner 实为截断死脚本——745KB 未闭合 module script，
+//     注入宿主会破坏 HTML；真实样式由 bundle 运行时创建 style 标签注入宿主 head）
+// 3b. body 骨架（#ac-content / .minimal-container / 各弹层容器）→ 宿主 body
+parent.document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(bodyInner)});
 
 // ---------- 4. 宿主全局补齐（冒烟实测：bundle 引用全局 Vue + AutoCardUpdaterAPI） ----------
-// 4a. AutoCardUpdaterAPI 桩升级为 worldState 桥（P2 数据面）：
+// 4a. AutoCardUpdaterAPI 桩升级为 worldState 桥（P2 数据面）——定义到**宿主 window**
+//     （2026-08-09 用户裁决：bundle 注入宿主 document 执行，宿主 realm 读 window.AutoCardUpdaterAPI）：
 //     - exportTableAsJson() 从 getContext().worldState 构建 bundle 期望的表结构
 //       （{sheet_xxx: {name, content: [[列名...],[行...]], ...}}，读侧 cj/z6 按列名匹配）
 //     - 账本变化（WORLD_STATE_CHANGED）→ 重建表 + 触发 registerTableUpdateCallback（bundle 刷新）
-//     - 脚本私有动态数据（瑟瑟能量/任务等）经 localStorage 代理落宿主（bundle 自带持久化）
+//     - 脚本私有动态数据（瑟瑟能量/任务等）经 localStorage 落宿主（bundle 自带持久化）
 //     - 写路径：bundle k9 操作内存表（界面即时生效）；账本字段单向 账本→状态栏
+//     注意：桩内部引用 getContext/TavernHelper/localStorage 均来自 iframe 执行环境（闭包捕获），
+//     宿主 realm 调用时照常工作（函数跨 realm 闭包可用）。
 let __lyTableCb = null;
 let __lySheets = null;
 
@@ -300,7 +303,7 @@ function __lyPersistCell(table, row, col, value) {
 	}
 }
 
-window.AutoCardUpdaterAPI = {
+window.parent.AutoCardUpdaterAPI = {
 	registerTableUpdateCallback: (cb) => {
 		__lyTableCb = cb;
 	},
@@ -386,7 +389,7 @@ window.AutoCardUpdaterAPI = {
 // 验证 updateCell → __lyPersistCell → 私有持久化真实工作（2s 后执行，避开 bundle 初始化竞态）
 setTimeout(() => {
 	try {
-		const ACU = window.AutoCardUpdaterAPI;
+		const ACU = window.parent.AutoCardUpdaterAPI;
 		if (!ACU || typeof ACU.updateCell !== "function") {
 			console.warn("[liyuan-瑟瑟状态栏] 自检：updateCell 缺失");
 			return;
@@ -405,12 +408,15 @@ setTimeout(() => {
 	}
 }, 2000);
 
-// 4c. ST 世界书 API 桩（脚本内本地覆盖，**不改 Liyuan 宿主代码**）：
+// 4c. ST 世界书 API 桩（bundle 注入宿主执行后，宿主 realm 读 window.TavernHelper）：
 //     bundle play-wb 模块调用 TavernHelper.getCharWorldbookNames 等 7 个 ST 世界书方法，
-//     宿主 helper.ts 无这些方法（按「无对等 → 桩」原则在脚本侧补桩，宿主零改动）。
+//     宿主 helper.ts 无这些方法（按「无对等 → 桩」原则在脚本侧补桩）。
 //     generateRaw/generate 不再降级：ext_generate 服务端通道已实现（2026-08-09 批准），
 //     走真实通道（回退原 TavernHelper invoke 面）。
+//     合并策略：宿主原版（tavernShim）保留在 __lyOrigHostTavernHelper；
+//     window.parent.TavernHelper = 世界书桩 → iframe 完整 invoke 面 → 宿主原版 兜底。
 const __lyOrigTavernHelper = window.TavernHelper;
+const __lyOrigHostTavernHelper = window.parent.TavernHelper;
 const __lyWorldbookStubs = {
 	getCharWorldbookNames: () => [],
 	getWorldbookNames: () => [],
@@ -420,50 +426,55 @@ const __lyWorldbookStubs = {
 	deleteWorldbook: () => undefined,
 	rebindGlobalWorldbooks: () => undefined,
 };
-window.TavernHelper = new Proxy({}, {
+window.parent.TavernHelper = new Proxy({}, {
 	get(_t, method) {
 		if (typeof method === "string" && method in __lyWorldbookStubs) {
 			return __lyWorldbookStubs[method];
 		}
-		return __lyOrigTavernHelper[method];
+		if (typeof method === "string" && method in __lyOrigTavernHelper) {
+			return __lyOrigTavernHelper[method];
+		}
+		return __lyOrigHostTavernHelper && __lyOrigHostTavernHelper[method];
 	},
 });
 
 // 4d. 发送聊天替身（P3 交互）：bundle 的「写 #send_textarea + 点 #send_but」DOM 操作
-//     （D()/R() 邂逅与选项栏发送）→ 脚本注入隐藏替身元素；send_but 点击 → triggerSlash
-//     （exp-1 确认的唯一「带文本直接发送并生成」入口）。宿主零改动。
+//     （D()/R() 邂逅与选项栏发送）→ 注入隐藏替身元素到**宿主 body**（bundle 宿主 realm 读取）；
+//     send_but 点击 → triggerSlash（exp-1 确认的唯一「带文本直接发送并生成」入口）。
 (function __lyInstallSendStub() {
-	const ta = document.createElement("textarea");
+	const ta = parent.document.createElement("textarea");
 	ta.id = "send_textarea";
 	ta.style.display = "none";
-	document.body.appendChild(ta);
-	const btn = document.createElement("button");
+	parent.document.body.appendChild(ta);
+	const btn = parent.document.createElement("button");
 	btn.id = "send_but";
 	btn.style.display = "none";
-	document.body.appendChild(btn);
+	parent.document.body.appendChild(btn);
 	btn.addEventListener("click", () => {
 		const text = (ta.value || "").trim();
 		if (!text) return;
 		ta.value = "";
 		// 注意：主脚本模板内禁反引号，用字符串拼接
-		TavernHelper.triggerSlash("/send " + text + "|/trigger").catch(() => {});
+		window.parent.triggerSlash ? window.parent.triggerSlash("/send " + text + "|/trigger").catch(() => {}) : TavernHelper.triggerSlash("/send " + text + "|/trigger").catch(() => {});
 	});
 })();
 
-// 4e. SillyTavern 增强（地图树状态持久化桥，宿主零改动）：
+// 4e. SillyTavern 增强（地图树状态持久化桥，宿主零改动）——定义到**宿主 window**
+//     （bundle 宿主 realm 读 window.SillyTavern；宿主有 tavernShim 版时以本增强覆盖，
+//     宿主无则新建）：
 //     地图模块（模块 118）把地图树索引存 UnifiedStatusbar_StoryState_v1（聊天消息状态），
 //     经 saveChat 持久化；Liyuan 桥的 saveChat 是 no-op → 写回失败 → 弹空候选框
 //     （用户实测 bug）。这里覆盖 window.SillyTavern：getContext 从 localStorage 恢复状态
-//     到最后一条 chat 消息、saveChat 把状态持久化到 localStorage（沙箱代理可用）——
+//     到最后一条 chat 消息、saveChat 把状态持久化到 localStorage——
 //     读写闭环打通，地图创建成功不再弹空框。
 (function __lyInstallSTBridge() {
 	const KEY = "UnifiedStatusbar_StoryState_v1";
 	const LS_KEY = "liyuan-statusbar-storystate";
 	let __lyChatCache = null;
-	const __lyDesc = Object.getOwnPropertyDescriptor(window, "SillyTavern");
+	const __lyDesc = Object.getOwnPropertyDescriptor(window.parent, "SillyTavern");
 	const __lyBaseGet = __lyDesc && typeof __lyDesc.get === "function" ? __lyDesc.get : () => ({});
 	try {
-		Object.defineProperty(window, "SillyTavern", {
+		Object.defineProperty(window.parent, "SillyTavern", {
 			configurable: true,
 			get() {
 				const base = __lyBaseGet() || {};
@@ -509,41 +520,127 @@ window.TavernHelper = new Proxy({}, {
 	}
 })();
 
-// 4b. Vue 全局注入（bundle 引用 ST 宿主全局 Vue；Liyuan iframe 无——异步加载 CDN 后注入 bundle）
+// 4b. Vue + jQuery 全局注入（bundle 引用 ST 宿主全局 Vue/jQuery/$；宿主页面无——
+//     注入到**宿主 head**，宿主 window.Vue/jQuery/$ 供 bundle 宿主 realm 读取。
+//     关键：jQuery 必须绑定**宿主 document**（bundle 宿主 realm 用 $ 做 #ac-content 事件委托）——
+//     因此**内联注入本地 vendor jQuery 源码**（2026-08-09 实测 code.jquery.com / unpkg.com
+//     网络不可达，CDN 方案失败；本地副本在宿主 realm 执行 → 绑定宿主 document）。）
+const __lyInjectedScripts = [];
 const __liyuanLoadScript = (src) =>
 	new Promise((resolve) => {
-		const s = document.createElement("script");
+		const s = parent.document.createElement("script");
 		s.src = src;
 		s.onload = () => resolve(true);
 		s.onerror = () => resolve(false);
-		document.head.appendChild(s);
+		parent.document.head.appendChild(s);
+		__lyInjectedScripts.push(s);
 	});
 
-// ---------- 5. bundle 注入执行（module 脚本，import 远程 html2canvas 等） ----------
+// ---------- 5. bundle 注入执行（核心：2026-08-09 用户裁决 bundle 注入**宿主 document** 执行——
+//     与 ST 宿主执行完全一致：裸 document = 宿主 document，UI 长在宿主页面、弹层全屏；
+//     module 脚本，import 远程 html2canvas 等） ----------
 (async () => {
+	// jQuery 内联注入宿主 head（宿主 realm 执行 → window.jQuery/$ 绑定宿主 document；
+	// bundle 事件委托（#ac-content .on(...)）据此生效）
+	try {
+		const __jq = parent.document.createElement("script");
+		__jq.textContent = ${JSON.stringify(JQUERY_SRC)};
+		parent.document.head.appendChild(__jq);
+		__lyInjectedScripts.push(__jq);
+		window.parent.$ = window.parent.jQuery = parent.window.jQuery;
+	} catch (e) {
+		console.warn("[liyuan-瑟瑟状态栏] jQuery 内联注入失败", e);
+	}
 	// Vue 优先加载（bundle 内全局 Vue 引用；ST 用 Vue 2.x，CDN 主备）
 	const vueLoaded = await __liyuanLoadScript("https://unpkg.com/vue@2.6.14/dist/vue.min.js");
 	if (!vueLoaded) {
 		console.warn("[liyuan-瑟瑟状态栏] Vue CDN 加载失败，bundle 可能报 Vue 未定义");
 	}
-	const __liyuanBundle = document.createElement("script");
+	const __liyuanBundle = parent.document.createElement("script");
 	__liyuanBundle.type = "module";
 	__liyuanBundle.textContent = ${JSON.stringify(bundleFixed)};
-	document.head.appendChild(__liyuanBundle);
+	parent.document.head.appendChild(__liyuanBundle);
+	__lyInjectedScripts.push(__liyuanBundle);
 })();
 
+// ---------- 5.5 宿主注入清理钩子（2026-08-09 用户裁决：bundle 直操宿主 DOM——
+//     脚本停用/删除时由宿主 runtime.destroy 调用本钩子，移除宿主页面注入的骨架/样式/脚本，
+//     避免停用后 UI 残留）。按已知 id 清单 + 注入 script 引用清理。 ----------
+window.parent.__lyHostCleanup = function __lyHostCleanup() {
+	try {
+		const ids = [
+			"ac-content",
+			"ac-statusbar-wrapper",
+			"ac-persistent-settings",
+			"ac-fixed-toggle",
+			"ac-options-bar-floating",
+			"nsfwOverlay",
+			"panelOverlay",
+			"settingsOverlay",
+			"ubDecisionOverlay",
+			"helpTooltipGlobal",
+		];
+		for (let i = 0; i < ids.length; i++) {
+			const el = parent.document.getElementById(ids[i]);
+			if (el) el.remove();
+		}
+		const styles = parent.document.querySelectorAll('style[id^="statusbar-"], style[id^="ub-"], style[id="ac-diary-css"], style[id="ub-onboarding-style"], style[id="statusbar-encounter-style"]');
+		for (let j = 0; j < styles.length; j++) styles[j].remove();
+		for (let k = 0; k < __lyInjectedScripts.length; k++) {
+			const s = __lyInjectedScripts[k];
+			if (s && s.parentNode) s.parentNode.removeChild(s);
+		}
+	} catch (e) {}
+};
+
 // ---------- 5. 事件桥（Liyuan 前端投影 → bundle 期望的全局事件；bridge 已提供 window.eventOn） ----------
+// 2026-08-09 用户裁决：bundle 注入宿主 document 执行（宿主 realm）。iframe 桥仍是
+// jsrunner 投影事件的接收面（postMessage 通道不受 sandbox 影响），外壳在 iframe 内订阅
+// bridge 事件后转发到宿主本地 bus（parent.window.eventEmit）——bundle 宿主 realm 用
+// window.eventOn 订阅（宿主 tavernShim 本地 bus）即可收到。
+// 全局镜像：bundle 宿主 realm 需要的 bridge 函数镜像到宿主 window（函数闭包跨 realm 可用）。
+try {
+	window.parent.getContext = window.getContext;
+} catch (e) {}
+try {
+	window.parent.toastr = window.toastr;
+} catch (e) {}
+// jQuery 不在此镜像：4b 段把本地 vendor jQuery 源码内联注入宿主 head（宿主 realm 执行 →
+// 绑定宿主 document → bundle 事件委托生效）。镜像 iframe 版（绑定 iframe document）会让
+// 宿主 #ac-content 事件委托失效（2026-08-09 冒烟实测），故不再镜像。
+try {
+	if (!window.parent.getCurrentChatId) window.parent.getCurrentChatId = window.getCurrentChatId;
+} catch (e) {}
+try {
+	if (!window.parent.substituteParams) window.parent.substituteParams = window.substituteParams;
+} catch (e) {}
+
+// 投影事件转发：iframe 订阅 → 宿主本地 bus（bundle 宿主 realm 的 eventOn 订阅者收到）
+const __lyForwardToHost = (name) => {
+	try {
+		eventOn(name, (...args) => {
+			try {
+				window.parent.eventEmit && window.parent.eventEmit(name, args);
+			} catch (e) {}
+		});
+	} catch (e) {}
+};
+__lyForwardToHost("MESSAGE_RECEIVED");
+__lyForwardToHost("MESSAGE_SENT");
+__lyForwardToHost("GENERATION_STARTED");
+__lyForwardToHost("GENERATION_ENDED");
+__lyForwardToHost("WORLD_STATE_CHANGED");
+
 // Liyuan 无 CHAT_CHANGED 投影（exp-1）：MESSAGE_RECEIVED/GENERATION_ENDED 回调里比对
-// currentChatId 变化即触发本地 CHAT_CHANGED（适配层包装）。
+// currentChatId 变化即触发本地 CHAT_CHANGED（适配层包装）→ 转发宿主 bus。
 let __liyuanLastChatId = getContext().currentChatId || null;
 eventOn("MESSAGE_RECEIVED", () => {
 	const id = getContext().currentChatId || null;
 	if (id !== __liyuanLastChatId) {
 		__liyuanLastChatId = id;
-		window.dispatchEvent(new CustomEvent("liyuan-chat-changed"));
 		try {
-			// 触发原脚本 CHAT_CHANGED 重建链（若 bundle 挂过 tavern_events.CHAT_CHANGED）
-			window.eventEmit("CHAT_CHANGED", [{ sessionId: id }]);
+			// 触发原脚本 CHAT_CHANGED 重建链（bundle 宿主 realm 的 tavern_events.CHAT_CHANGED）
+			window.parent.eventEmit && window.parent.eventEmit("CHAT_CHANGED", [{ sessionId: id }]);
 		} catch (e) {}
 	}
 });
@@ -588,43 +685,9 @@ eventOn("WORLD_STATE_CHANGED", function () {
 	__lyPushStatusSlots();
 });
 
-// ---------- 7. 弹层全屏化（C 路径延伸）：bundle 弹层（设置/大调查/数据库/成就/技能等 4 个
-//     overlay）在 iframe 内 position:fixed，被容器裁剪。监听 show class——任一弹层打开 →
-//     请求宿主全屏模态（openManager("fullscreen")，iframe 搬家不重载、状态保留）；
-//     全部关闭 → closeManager() 还原到状态栏原位。宿主侧通道（ModalPanel 全屏变体）已就绪。
-(function __lyInstallOverlayFullscreen() {
-	const __lyOverlayIds = ["settingsOverlay", "panelOverlay", "nsfwOverlay", "ubDecisionOverlay"];
-	let __lyOverlayOpen = false;
-	function __lyAnyOverlayOpen() {
-		for (let i = 0; i < __lyOverlayIds.length; i++) {
-			const el = document.getElementById(__lyOverlayIds[i]);
-			if (el && el.classList.contains("show")) return true;
-		}
-		return false;
-	}
-	function __lySyncOverlayFullscreen() {
-		const next = __lyAnyOverlayOpen();
-		if (next === __lyOverlayOpen) return;
-		__lyOverlayOpen = next;
-		try {
-			if (next) {
-				TavernHelper.openManager("fullscreen").catch(function () {});
-			} else {
-				TavernHelper.closeManager().catch(function () {});
-			}
-		} catch (e) {}
-	}
-	const mo = new MutationObserver(__lySyncOverlayFullscreen);
-	function __lyBindOverlayObserver() {
-		for (let i = 0; i < __lyOverlayIds.length; i++) {
-			const el = document.getElementById(__lyOverlayIds[i]);
-			if (el) mo.observe(el, { attributes: true, attributeFilter: ["class"] });
-		}
-	}
-	__lyBindOverlayObserver();
-	setInterval(__lyBindOverlayObserver, 300); // overlay 可能被 Vo() 移出移入 body，兜底重绑
-	__lySyncOverlayFullscreen(); // 初始同步（万一已有弹层开着）
-})();
+// ---------- 7. （已删除）弹层全屏搬运——2026-08-09 用户裁决：bundle 注入宿主 document 执行后，
+//     弹层 overlay 直接 append 宿主 body（position:fixed 相对宿主视口）→ 天然全屏独立弹窗；
+//     不再需要 openManager("fullscreen")/closeManager 的 iframe 搬家机制。 ----------
 
 console.log("[liyuan-瑟瑟状态栏] 适配版已就绪（P1 外壳）");
 `;
