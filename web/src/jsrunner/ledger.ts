@@ -46,6 +46,12 @@ export interface LedgerPanelSnapshot {
 /** 宿主 toast 处理函数（级别对齐宿主 Toast.level；success 由调用方映射为 info） */
 export type LedgerToastHandler = (level: "info" | "warning" | "error", text: string) => void;
 
+/** 模态打开请求选项（C 路径延伸：全屏模态变体；脚本 openManager("fullscreen" / { fullscreen:true }）触发） */
+export interface ManagerRequestOptions {
+	/** 全屏变体：宿主渲染占满视口的全屏模态（base 为 720×640 居中弹窗） */
+	fullscreen?: boolean;
+}
+
 /** 面板注册表：scriptId → 条目 */
 const panels = new Map<string, LedgerEntry>();
 /** 订阅者监听器 */
@@ -62,8 +68,10 @@ let order: string[] = [];
 let activeTab = "standard";
 /** V2-5：tab 面板 id 缓存（status 区域 position="tab" 的面板，按 order 排序，rebuildSnapshot 重建） */
 let tabIdsCache: readonly string[] = [];
-/** manager 请求订阅者（P4，ModalPanel 单例） */
-const managerSubs = new Set<(scriptId: string) => void>();
+/** manager 打开请求订阅者（P4，ModalPanel 单例；C 路径延伸：带 opts 全屏载荷） */
+const managerSubs = new Set<(scriptId: string, opts?: ManagerRequestOptions) => void>();
+/** manager 关闭请求订阅者（C 路径延伸：脚本 closeManager → requestManagerClose） */
+const closeSubs = new Set<(scriptId: string) => void>();
 /** toast 处理函数（宿主注入；未注册时 notifyToast 静默） */
 let toastHandler: LedgerToastHandler | null = null;
 /**
@@ -339,11 +347,15 @@ export const ledger = {
 		return tabIdsCache;
 	},
 
-	/** P4：openManager 请求通道（helper.openManager → requestManager → 宿主 ModalPanel） */
-	requestManager(scriptId: string): void {
+	/**
+	 * P4 + C 路径延伸：openManager 请求通道（helper.openManager → requestManager →
+	 * 宿主 ModalPanel）。opts?.fullscreen 让订阅者按全屏变体打开；不传 opts 行为与
+	 * 原签名一致（普通居中模态）。
+	 */
+	requestManager(scriptId: string, opts?: ManagerRequestOptions): void {
 		for (const cb of [...managerSubs]) {
 			try {
-				cb(scriptId);
+				cb(scriptId, opts);
 			} catch (e) {
 				console.warn("[ledger] manager 请求回调出错", e);
 			}
@@ -351,10 +363,29 @@ export const ledger = {
 	},
 
 	/** P4：订阅独立管理界面请求；返回退订函数（ModalPanel 挂载时注册） */
-	onManagerRequest(cb: (scriptId: string) => void): () => void {
+	onManagerRequest(cb: (scriptId: string, opts?: ManagerRequestOptions) => void): () => void {
 		managerSubs.add(cb);
 		return () => {
 			managerSubs.delete(cb);
+		};
+	},
+
+	/** C 路径延伸：程序化关闭当前模态（helper.closeManager → requestManagerClose → 宿主 ModalPanel） */
+	requestManagerClose(scriptId: string): void {
+		for (const cb of [...closeSubs]) {
+			try {
+				cb(scriptId);
+			} catch (e) {
+				console.warn("[ledger] manager 关闭请求回调出错", e);
+			}
+		}
+	},
+
+	/** C 路径延伸：订阅模态关闭请求；返回退订函数（幂等） */
+	onManagerClose(cb: (scriptId: string) => void): () => void {
+		closeSubs.add(cb);
+		return () => {
+			closeSubs.delete(cb);
 		};
 	},
 };

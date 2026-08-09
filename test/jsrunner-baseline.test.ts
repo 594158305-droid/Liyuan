@@ -89,6 +89,26 @@ test("ledger: manager 请求通道（P4 openManager）", () => {
 	assert.deepEqual(got, ["s5", "s6"], "退订后不再收到");
 });
 
+test("ledger: manager 全屏载荷 opts + 关闭通道（C 路径延伸）", () => {
+	const opened: Array<[string, boolean | undefined]> = [];
+	const closed: string[] = [];
+	const offOpen = ledger.onManagerRequest((id, opts) => opened.push([id, opts?.fullscreen]));
+	const offClose = ledger.onManagerClose((id) => closed.push(id));
+	ledger.requestManager("s8", { fullscreen: true });
+	ledger.requestManager("s9"); // 不传 opts：行为不变
+	ledger.requestManagerClose("s8");
+	ledger.requestManagerClose("s9");
+	assert.deepEqual(opened, [
+		["s8", true],
+		["s9", undefined],
+	], "opts 载荷透传；不传 opts 时 undefined");
+	assert.deepEqual(closed, ["s8", "s9"]);
+	offOpen();
+	offClose();
+	ledger.requestManagerClose("s10");
+	assert.deepEqual(closed, ["s8", "s9"], "退订后不再收到关闭请求");
+});
+
 test("ledger: toast 通道（setToastHandler / notifyToast）", () => {
 	const got: Array<[string, string]> = [];
 	setToastHandler((level, text) => got.push([level, text]));

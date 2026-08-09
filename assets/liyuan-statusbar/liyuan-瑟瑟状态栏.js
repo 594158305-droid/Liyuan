@@ -481,4 +481,42 @@ eventOn("WORLD_STATE_CHANGED", function () {
 	__lyPushStatusSlots();
 });
 
+// ---------- 7. 弹层全屏化（C 路径延伸）：bundle 弹层（设置/大调查/数据库/成就/技能等 4 个
+//     overlay）在 iframe 内 position:fixed，被容器裁剪。监听 show class——任一弹层打开 →
+//     请求宿主全屏模态（openManager("fullscreen")，iframe 搬家不重载、状态保留）；
+//     全部关闭 → closeManager() 还原到状态栏原位。宿主侧通道（ModalPanel 全屏变体）已就绪。
+(function __lyInstallOverlayFullscreen() {
+	const __lyOverlayIds = ["settingsOverlay", "panelOverlay", "nsfwOverlay", "ubDecisionOverlay"];
+	let __lyOverlayOpen = false;
+	function __lyAnyOverlayOpen() {
+		for (let i = 0; i < __lyOverlayIds.length; i++) {
+			const el = document.getElementById(__lyOverlayIds[i]);
+			if (el && el.classList.contains("show")) return true;
+		}
+		return false;
+	}
+	function __lySyncOverlayFullscreen() {
+		const next = __lyAnyOverlayOpen();
+		if (next === __lyOverlayOpen) return;
+		__lyOverlayOpen = next;
+		try {
+			if (next) {
+				TavernHelper.openManager("fullscreen").catch(function () {});
+			} else {
+				TavernHelper.closeManager().catch(function () {});
+			}
+		} catch (e) {}
+	}
+	const mo = new MutationObserver(__lySyncOverlayFullscreen);
+	function __lyBindOverlayObserver() {
+		for (let i = 0; i < __lyOverlayIds.length; i++) {
+			const el = document.getElementById(__lyOverlayIds[i]);
+			if (el) mo.observe(el, { attributes: true, attributeFilter: ["class"] });
+		}
+	}
+	__lyBindOverlayObserver();
+	setInterval(__lyBindOverlayObserver, 300); // overlay 可能被 Vo() 移出移入 body，兜底重绑
+	__lySyncOverlayFullscreen(); // 初始同步（万一已有弹层开着）
+})();
+
 console.log("[liyuan-瑟瑟状态栏] 适配版已就绪（P1 外壳）");

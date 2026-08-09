@@ -9510,6 +9510,18 @@ label.drawer-btn {
 	}
 }
 
+/* C 路径延伸：脚本全屏模态变体（openManager("fullscreen" / {fullscreen:true})） */
+.modal-panel-overlay--fullscreen {
+	/* 继承 base .modal-panel-overlay（fixed inset:0 / z-index:1000 / 居中遮罩）即可 */
+}
+.modal-panel--fullscreen {
+	width: calc(100vw - 16px);
+	height: calc(100vh - 16px);
+	max-width: none;
+	max-height: none;
+	border-radius: var(--radius);   /* 覆盖 base 的 720×640 封顶；留 8px 边距避免贴边 */
+}
+
 /* ════ 共享文件管理（D4 PART 2 V2-3）════ */
 .shared-files-list {
 	margin-top: 6px;

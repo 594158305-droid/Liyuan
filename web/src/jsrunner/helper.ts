@@ -415,9 +415,17 @@ function implSetExtData(args: unknown[]): Promise<void> {
 	return putExtData(scope, key, value);
 }
 
-/** P4：请求宿主弹出该脚本的独立管理界面（模态；ledger.requestManager → ModalPanel） */
-function implOpenManager(scriptId: string): { ok: true } {
-	ledger.requestManager(scriptId);
+/**
+ * P4 + C 路径延伸：请求宿主弹出该脚本的独立管理界面（模态；ledger.requestManager →
+ * ModalPanel）。args[0] 为 "fullscreen" 或 { fullscreen: true } 时按全屏模态打开，
+ * 否则普通居中模态（与既有 openManager() 行为一致）。
+ */
+function implOpenManager(scriptId: string, args: unknown[]): { ok: true } {
+	const raw = args[0];
+	const fullscreen =
+		raw === "fullscreen" ||
+		(raw !== null && typeof raw === "object" && (raw as { fullscreen?: unknown }).fullscreen === true);
+	ledger.requestManager(scriptId, fullscreen ? { fullscreen: true } : undefined);
 	return { ok: true };
 }
 
@@ -507,9 +515,14 @@ export const tavernHelperImpl: Record<string, TavernHelperMethod> = {
 	setExtData(scriptId, args) {
 		return implSetExtData(args);
 	},
-	// P4：独立管理界面（模态）
-	openManager(scriptId) {
-		return implOpenManager(scriptId);
+	// P4：独立管理界面（模态；C 路径延伸：args[0]="fullscreen"/{fullscreen:true} 全屏）
+	openManager(scriptId, args) {
+		return implOpenManager(scriptId, args);
+	},
+	// C 路径延伸：程序化关闭当前模态（脚本侧关闭通道；与 ✕/遮罩/Esc 同关闭路径）
+	closeManager(scriptId, args) {
+		ledger.requestManagerClose(scriptId);
+		return { ok: true };
 	},
 	// C 路径 L1：状态栏默认编辑区显隐（只有显式 false 才隐藏；恢复显示传 true 或缺省）
 	setStatusCardEditorVisible(scriptId, args) {
