@@ -49,6 +49,29 @@ window.AutoCardUpdaterAPI = {
 	switchTemplatePreset: () => ({ ok: true }),
 };
 
+// 4c. ST 世界书 API 桩（脚本内本地覆盖，**不改 Liyuan 宿主代码**）：
+//     bundle play-wb 模块调用 TavernHelper.getCharWorldbookNames 等 7 个 ST 世界书方法，
+//     宿主 helper.ts 无这些方法（按「无对等 → 桩」原则在脚本侧补桩，宿主零改动）。
+//     用本地 Proxy 包装：已知世界书方法返回空值桩，其余方法回退原 TavernHelper（invoke 面）。
+const __lyOrigTavernHelper = window.TavernHelper;
+const __lyWorldbookStubs = {
+	getCharWorldbookNames: () => [],
+	getWorldbookNames: () => [],
+	getGlobalWorldbookNames: () => [],
+	getWorldbook: () => null,
+	getOrCreateChatWorldbook: () => null,
+	deleteWorldbook: () => undefined,
+	rebindGlobalWorldbooks: () => undefined,
+};
+window.TavernHelper = new Proxy({}, {
+	get(_t, method) {
+		if (typeof method === "string" && method in __lyWorldbookStubs) {
+			return __lyWorldbookStubs[method];
+		}
+		return __lyOrigTavernHelper[method];
+	},
+});
+
 // 4b. Vue 全局注入（bundle 引用 ST 宿主全局 Vue；Liyuan iframe 无——异步加载 CDN 后注入 bundle）
 const __liyuanLoadScript = (src) =>
 	new Promise((resolve) => {
