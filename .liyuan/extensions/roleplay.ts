@@ -1234,7 +1234,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				"IN-STORY co-creation gate (not OOC assistant chat). Pause narrative and show a choice card so the user picks the next beat. MUST call FIRST when: (1) user seeks direction — 该做什么/怎么办/怎么走/下一步/给选项, even inside IC prose; (2) user asks to generate/define identity or persona — 生成身份/开始生成身份/建档/捏角色/人设 — do NOT write a full identity dossier yourself, split key choices into options; (3) scene has 2+ clear forks that change the next turns; (4) new important character, major irreversible plot turn, or locking world-canon. Do NOT write option lists in narrative prose — only this tool shows clickable cards. Provide 2-4 concrete IC options in the story language; user may type custom or stop. After answer, continue as the character/world, never as a system assistant. Skip only pure atmosphere with no real fork. Do NOT use this tool to ask whether to save/write something into the lorebook or knowledge database — those writes execute directly when the user requests them (lorebook_write / codex_write), never through this choice card.",
 			parameters: Type.Object({
 				question: Type.String({
-					description: "Question on the choice card, in story language, e.g. '御书房里文舒婉请试墨——你想这一步怎么走？'",
+					description: "Question on the choice card, in story language, e.g. '岔路口到了——你想这一步怎么走？'",
 				}),
 				options: Type.Array(Type.String(), {
 					description: "2-4 concrete, distinct in-scene options (actions/attitudes), not abstract meta labels.",
