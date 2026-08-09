@@ -54,6 +54,10 @@ function invalidateAfterWrite(writePath: string): void {
 		{ test: /^\/api\/channels/, prefixes: ["/api/models", "/api/agent-config", "/api/agent-profiles"] },
 		{ test: /^\/api\/config/, prefixes: ["/api/config"] },
 		{ test: /^\/api\/upload/, prefixes: ["/api/uploads"] },
+		// 自定义表格直写：改当前聊天的世界状态（WS 会推 state 帧，REST 缓存同样要清）
+		{ test: /^\/api\/state/, prefixes: ["/api/state"] },
+		// 模板 CRUD / 物化：清模板列表缓存；apply 物化会改 state.tables → 连带清 state
+		{ test: /^\/api\/templates/, prefixes: ["/api/templates", "/api/state"] },
 	];
 	let hit = false;
 	for (const r of rules) {

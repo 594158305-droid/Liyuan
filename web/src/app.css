@@ -1,4 +1,4 @@
-﻿/* ============================================================
+/* ============================================================
    梨园 · 白瓷朱砂(F4 + 二次质感加厚)
    命题:明亮白色;层次与戏文感加强,布局结构不动
    · 宣纸底微纹理 + 暖白浮层,投影更深一档
@@ -1911,7 +1911,8 @@ html[data-theme="dark"] .msg-md-code {
 	left: 50%;
 	transform: translateX(-50%);
 	width: min(92vw, 460px);
-	z-index: 40;
+	/* 300：浮于全屏页/灯箱（z-200，如表格管理页、图片灯箱）之上；仅低于脚本模态（1000） */
+	z-index: 300;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -9683,3 +9684,1153 @@ label.drawer-btn {
 	border-color: var(--accent-wash-strong);
 }
 
+
+/* ============================================================
+   自定义表格 + 模板管理（全屏页，DESIGN-custom-tables §7 UI）
+   配色跟随梨园底座主题（:root 的 --bg/--surface/--accent 等，
+   随 html[data-theme] 浅/深自动切换）；三栏 + 卡片式布局。
+   ============================================================ */
+
+/* 全屏页：portal 到 body，fixed 相对视口（脱离聊天流式布局）；
+   z-index 200 高于主界面所有层（顶栏 50 / 下拉 45），低于通知（300）与脚本模态（1000）。 */
+.tbl-page {
+	position: fixed;
+	inset: 0;
+	z-index: 200;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	background:
+		radial-gradient(900px 420px at 85% -10%, color-mix(in srgb, var(--accent) 6%, transparent) 0%, transparent 55%),
+		radial-gradient(700px 380px at 0% 110%, color-mix(in srgb, var(--accent) 4%, transparent) 0%, transparent 45%),
+		var(--bg);
+	color: var(--text);
+	font-size: 13.5px;
+	animation: tbl-page-in 0.22s ease-out;
+}
+@keyframes tbl-page-in {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+.tbl-page ::-webkit-scrollbar-thumb {
+	background: var(--hairline-strong);
+	border-color: transparent;
+	background-clip: content-box;
+}
+.tbl-page ::-webkit-scrollbar-thumb:hover {
+	background: var(--text-faint);
+	background-clip: content-box;
+}
+
+/* ── 顶部导航栏 ── */
+.tbl-top {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 16px;
+	padding-top: calc(10px + env(safe-area-inset-top));
+	background: color-mix(in srgb, var(--surface) 84%, transparent);
+	backdrop-filter: blur(14px) saturate(1.15);
+	-webkit-backdrop-filter: blur(14px) saturate(1.15);
+	border-bottom: 1px solid var(--hairline);
+	flex: none;
+}
+.tbl-top-close {
+	display: grid;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	flex: none;
+	border-radius: var(--radius-s);
+	border: 1px solid var(--hairline);
+	background: var(--surface-dim);
+	color: var(--text-soft);
+	cursor: pointer;
+	transition: all 0.15s;
+}
+.tbl-top-close:hover {
+	color: var(--accent-strong);
+	border-color: var(--accent);
+	background: var(--accent-wash);
+}
+.tbl-crumb {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	min-width: 0;
+	flex: 1;
+}
+.tbl-crumb-main {
+	font-size: 15px;
+	font-weight: 700;
+	color: #fff;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 240px;
+}
+.tbl-crumb-sep {
+	color: var(--text-faint);
+}
+.tbl-crumb-sub {
+	color: var(--text-soft);
+	font-size: 13px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 220px;
+}
+.tbl-tabs {
+	display: flex;
+	gap: 2px;
+	padding: 2px;
+	flex: none;
+	background: var(--surface-dim);
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+}
+.tbl-tabs button {
+	padding: 5px 16px;
+	border: none;
+	border-radius: 4px;
+	background: none;
+	color: var(--text-soft);
+	font-size: 12.5px;
+	font-weight: 550;
+	cursor: pointer;
+	transition: all 0.15s;
+}
+.tbl-tabs button:hover {
+	color: var(--text-strong);
+}
+/* 选中态：accent（朱砂红）底 + 白字，保证对比清晰；hover 保持白字不被覆盖 */
+.tbl-tabs button.on,
+.tbl-tabs button.on:hover {
+	background: var(--accent);
+	color: #fff;
+	font-weight: 650;
+	box-shadow: 0 1px 3px rgb(0 0 0 / 18%);
+}
+.tbl-top-actions {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+}
+.tbl-dirty-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--accent-strong);
+	box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* ── 按钮（平面：无阴影） ── */
+.tbl-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 6px 13px;
+	border-radius: var(--radius-s);
+	background: var(--surface-dim);
+	border: 1px solid var(--hairline-strong);
+	color: var(--text-soft);
+	font-size: 12.5px;
+	cursor: pointer;
+	transition: all 0.15s;
+}
+.tbl-btn:hover:not(:disabled) {
+	color: var(--text-strong);
+	border-color: var(--accent);
+	background: var(--surface-deep);
+}
+.tbl-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.tbl-btn-primary {
+	background: linear-gradient(145deg, var(--accent-bright) 0%, var(--accent) 100%);
+	border-color: var(--accent);
+	color: #fff;
+	font-weight: 600;
+}
+.tbl-btn-primary:hover:not(:disabled) {
+	background: linear-gradient(145deg, var(--accent) 0%, var(--accent-strong) 100%);
+	border-color: var(--accent-strong);
+}
+.tbl-btn-sm {
+	padding: 3px 9px;
+	font-size: 11.5px;
+}
+/* 危险操作按钮（删除表等）：hover 转红，强调破坏性 */
+.tbl-btn-danger,
+.tbl-btn-danger:not(:disabled) {
+	border-color: color-mix(in srgb, #f87171 45%, var(--hairline-strong));
+	color: #f87171;
+	background: rgb(248 113 113 / 8%);
+}
+.tbl-btn-danger:hover:not(:disabled) {
+	color: #fff;
+	background: #f87171;
+	border-color: #f87171;
+}
+.tbl-icon-btn {
+	display: grid;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	flex: none;
+	border-radius: 4px;
+	border: none;
+	background: none;
+	color: var(--text-faint);
+	cursor: pointer;
+	transition: all 0.15s;
+}
+.tbl-icon-btn:hover:not(:disabled) {
+	color: var(--accent-strong);
+	background: var(--accent-wash);
+}
+.tbl-icon-btn.on {
+	color: var(--accent-strong);
+	background: var(--accent-wash);
+}
+.tbl-icon-btn.danger:hover:not(:disabled) {
+	color: #f87171;
+	background: rgb(248 113 113 / 12%);
+}
+.tbl-icon-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+/* 二击确认态（页内）：确认文字横向显示，窄图标按钮 armed 时自动撑宽，避免逐字竖排 */
+.tbl-page .confirm-arming,
+.tbl-page .confirm-arming:hover {
+	white-space: nowrap;
+	width: auto;
+	min-width: max-content;
+	padding: 0 10px;
+	background: var(--accent-bright);
+	border-color: var(--accent-bright);
+	color: #fff;
+}
+
+/* ── 三栏骨架：顶部导航 / 左侧边栏（约 20%） / 右侧主区 ── */
+.tbl-body {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	gap: 12px;
+	padding: 12px 14px;
+}
+.tbl-side {
+	width: min(280px, 21%);
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	min-height: 0;
+}
+.tbl-side-sec {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	background: var(--surface);
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	overflow: hidden;
+}
+.tbl-side-sec:first-child {
+	flex: 1.25;
+}
+.tbl-side-sec:last-child {
+	flex: 1;
+}
+.tbl-side-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 10px 8px 12px;
+	border-bottom: 1px solid var(--hairline);
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	color: var(--text-soft);
+	flex: none;
+}
+.tbl-side-head .tbl-count-badge {
+	margin-left: 6px;
+}
+.tbl-side-list {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.tbl-side-empty {
+	padding: 14px 12px;
+	color: var(--text-faint);
+	font-size: 12px;
+	line-height: 1.7;
+	text-align: center;
+}
+.tbl-side-err {
+	color: #f87171;
+}
+
+/* ── 模板条目 ── */
+.tbl-tmpl {
+	padding: 8px 10px;
+	border-radius: var(--radius-s);
+	border: 1px solid transparent;
+	cursor: pointer;
+	transition: all 0.13s;
+}
+.tbl-tmpl:hover {
+	background: var(--surface-dim);
+	border-color: var(--hairline);
+}
+.tbl-tmpl.on {
+	background: var(--accent-wash);
+	border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.tbl-tmpl-line {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+.tbl-tmpl-name {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text-strong);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.tbl-count-badge {
+	flex: none;
+	min-width: 18px;
+	height: 18px;
+	padding: 0 5px;
+	border-radius: 999px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--surface-deep);
+	color: var(--text-soft);
+	font-size: 10.5px;
+	font-weight: 650;
+	border: 1px solid var(--hairline-strong);
+}
+.tbl-badge {
+	flex: none;
+	font-size: 10px;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: var(--accent);
+	color: var(--accent-strong);
+	border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+	white-space: nowrap;
+}
+.tbl-tmpl-sub {
+	margin-top: 2px;
+	font-size: 11.5px;
+	color: var(--text-faint);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.tbl-tmpl-acts {
+	display: none;
+	gap: 2px;
+	margin-top: 6px;
+	padding-top: 6px;
+	border-top: 1px dashed var(--hairline);
+}
+.tbl-tmpl:hover .tbl-tmpl-acts,
+.tbl-tmpl.on .tbl-tmpl-acts {
+	display: flex;
+}
+
+/* ── 表条目 ── */
+.tbl-tbl {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 7px 10px;
+	border-radius: var(--radius-s);
+	border: 1px solid transparent;
+	cursor: pointer;
+	transition: all 0.13s;
+}
+.tbl-tbl:hover {
+	background: var(--surface-dim);
+	border-color: var(--hairline);
+}
+.tbl-tbl.on {
+	background: var(--accent-wash);
+	border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.tbl-tbl-name {
+	color: var(--text);
+	font-size: 12.5px;
+	font-weight: 550;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+/* 表条目右侧：行数/auto 徽标 + 删除按钮（已物化表） */
+.tbl-tbl-right {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: none;
+}
+.tbl-tbl-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: none;
+	color: var(--text-faint);
+	font-size: 11px;
+}
+/* 表删除小钮：平时弱显，条目 hover/选中时浮现，armed 态横向撑宽 */
+.tbl-tbl-del {
+	opacity: 0;
+	transition: opacity 0.13s;
+}
+.tbl-tbl:hover .tbl-tbl-del,
+.tbl-tbl.on .tbl-tbl-del {
+	opacity: 1;
+}
+.tbl-badge-auto {
+	font-size: 9.5px;
+	font-weight: 650;
+	letter-spacing: 0.05em;
+	padding: 0 5px;
+	border-radius: 999px;
+	background: var(--surface-deep);
+	color: var(--accent-strong);
+	border: 1px solid var(--hairline-strong);
+}
+
+/* ── 右侧主内容区（卡片容器） ── */
+.tbl-main {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow: hidden;
+}
+.tbl-data-view,
+.tbl-structure-view {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 2px 2px 4px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+/* ── 卡片（分区块：标题 + 可折叠箭头） ── */
+.tbl-card {
+	background: var(--surface);
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+/* 数据页：单张数据网格卡填满剩余高度，网格内部滚动（flex:1 + min-height:0 链） */
+.tbl-data-view .tbl-card {
+	flex: 1;
+	min-height: 0;
+}
+/* 结构页：多张卡纵向堆叠，高度自适应内容（flex:none 禁止收缩——
+   否则内容多时卡片被压扁、配合 overflow:hidden 裁切内容而非触发外层滚动） */
+.tbl-structure-view .tbl-card {
+	flex: none;
+}
+.tbl-card-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 10px 14px;
+	background: var(--surface-dim);
+	border-bottom: 1px solid var(--hairline);
+	cursor: pointer;
+	user-select: none;
+	font-size: 12.5px;
+	font-weight: 650;
+	letter-spacing: 0.04em;
+	color: #fff;
+	transition: background 0.13s;
+}
+.tbl-card-head:hover {
+	background: var(--surface-deep);
+}
+.tbl-card-head-right {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-left: auto;
+}
+.tbl-card-fold {
+	display: grid;
+	place-items: center;
+	width: 22px;
+	height: 22px;
+	border: none;
+	border-radius: 4px;
+	background: none;
+	color: var(--text-faint);
+	cursor: pointer;
+	transition: transform 0.18s, color 0.15s;
+}
+.tbl-card-fold:hover {
+	color: var(--accent-strong);
+}
+.tbl-card-fold.folded {
+	transform: rotate(-90deg);
+}
+.tbl-card-body {
+	padding: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+.tbl-card-hint {
+	font-size: 11.5px;
+	line-height: 1.6;
+	color: var(--text-faint);
+}
+
+/* 数据网格卡内的工具栏 */
+.tbl-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex: none;
+}
+.tbl-row-count {
+	font-size: 12px;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+.tbl-auto-row {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	font-size: 12.5px;
+	color: var(--text-soft);
+}
+.tbl-auto-hint {
+	color: var(--text-faint);
+	font-size: 11.5px;
+}
+.tbl-toolbar-actions {
+	display: flex;
+	gap: 8px;
+}
+
+/* ── 数据网格 ── */
+.tbl-grid-wrap {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	background: var(--surface);
+}
+
+/* ── 行数据 = 竖向卡片网格（参考图：一行最多 3 张，竖向排列 + 外层滚动） ── */
+.tbl-data-view .tbl-card-body {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto; /* 卡片网格的滚动容器（卡头/工具栏固定，记录网格随内容滚动） */
+}
+.tbl-records {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr)); /* 一行最多 3 张 */
+	gap: 14px;
+	align-items: start;
+}
+@media (max-width: 1200px) {
+	.tbl-records {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
+@media (max-width: 700px) {
+	.tbl-records {
+		grid-template-columns: 1fr;
+	}
+}
+.tbl-records-empty {
+	grid-column: 1 / -1;
+	padding: 26px 14px;
+	text-align: center;
+	color: var(--text-faint);
+	font-size: 12.5px;
+}
+/* 单张记录卡：靠背景色差区分（无边框）、圆角、充足间距 */
+.tbl-record {
+	background: var(--surface-dim);
+	border-radius: 8px;
+	padding: 10px 12px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	min-width: 0;
+	transition: background 0.13s;
+}
+.tbl-record:hover {
+	background: var(--surface-deep);
+}
+.tbl-record-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	min-height: 26px;
+}
+.tbl-record-title {
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.05em;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+/* 字段区：标签在上、值框在下；短字段并排各占 50%，长文本跨满整行 */
+.tbl-record-fields {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 14px 10px;
+}
+.tbl-record-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+}
+.tbl-record-field.span {
+	grid-column: 1 / -1;
+}
+.tbl-record-label {
+	font-size: 11px;
+	color: var(--text-soft);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+/* 值框：独立浅色圆角框，长文本自动换行；内嵌 DataCell（单击编辑、回车/失焦保存） */
+.tbl-record-value {
+	background: var(--surface);
+	border-radius: 6px;
+	min-height: 34px;
+	display: flex;
+	align-items: stretch;
+}
+.tbl-record-value .tbl-cell {
+	min-width: 0;
+	width: 100%;
+	padding: 8px 10px;
+	white-space: normal; /* 长文本换行 */
+	word-break: break-word;
+}
+.tbl-record-value .tbl-cell-bool {
+	min-width: 0;
+}
+.tbl-grid {
+	border-collapse: separate;
+	border-spacing: 0;
+	width: 100%;
+	min-width: max-content;
+}
+.tbl-grid th {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	background: var(--surface-dim);
+	color: var(--text-soft);
+	font-size: 11.5px;
+	font-weight: 650;
+	letter-spacing: 0.02em;
+	text-align: left;
+	padding: 8px 10px;
+	white-space: nowrap;
+	border-bottom: 1px solid var(--hairline-strong);
+	border-right: 1px solid var(--hairline);
+}
+.tbl-grid td {
+	padding: 0;
+	border-bottom: 1px solid var(--hairline);
+	border-right: 1px solid var(--hairline);
+	vertical-align: top;
+}
+.tbl-grid tbody tr:last-child td {
+	border-bottom: none;
+}
+.tbl-grid tbody tr:hover td {
+	background: rgb(255 255 255 / 2.5%);
+}
+.tbl-rowno {
+	width: 44px;
+	min-width: 44px;
+	text-align: center !important;
+	color: var(--text-faint) !important;
+	font-variant-numeric: tabular-nums;
+}
+.tbl-rowact {
+	width: 38px;
+	min-width: 38px;
+	padding: 4px !important;
+	text-align: center;
+}
+.tbl-col-type {
+	display: block;
+	margin-top: 1px;
+	font-size: 9.5px;
+	font-weight: 500;
+	color: var(--text-faint);
+	letter-spacing: 0.02em;
+}
+.tbl-grid-empty {
+	padding: 22px 14px !important;
+	text-align: center;
+	color: var(--text-faint);
+	font-size: 12.5px;
+}
+
+/* ── 单元格 ── */
+.tbl-cell {
+	display: block;
+	width: 100%;
+	min-width: 130px;
+	padding: 8px 10px;
+	background: none;
+	border: none;
+	color: var(--text);
+	font: inherit;
+	text-align: left;
+	cursor: text;
+	transition: background 0.12s;
+}
+.tbl-cell:hover:not(:disabled) {
+	background: var(--accent-wash);
+}
+.tbl-cell:disabled {
+	cursor: default;
+}
+.tbl-cell-empty {
+	color: var(--text-faint);
+	font-style: italic;
+}
+.tbl-cell-bool {
+	display: grid;
+	place-items: center;
+	width: 100%;
+	min-width: 60px;
+	height: 34px;
+	background: none;
+	border: none;
+	color: transparent;
+	font-size: 14px;
+	font-weight: 700;
+	cursor: pointer;
+}
+.tbl-cell-bool.on {
+	color: var(--accent-strong);
+}
+.tbl-cell-bool:hover:not(:disabled) {
+	background: var(--accent-wash);
+}
+.tbl-cell-input {
+	width: 100%;
+	min-width: 130px;
+	padding: 7px 9px;
+	background: var(--surface-deep);
+	border: 1px solid var(--accent);
+	border-radius: 4px;
+	color: var(--text-strong);
+	font: inherit;
+	outline: none;
+	box-shadow: 0 0 0 2px var(--accent-wash-strong);
+}
+
+/* ── 空态 ── */
+.tbl-empty {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 30px;
+	text-align: center;
+	color: var(--text-soft);
+}
+.tbl-empty svg {
+	color: var(--text-faint);
+	opacity: 0.8;
+	margin-bottom: 4px;
+}
+.tbl-empty > div {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-strong);
+}
+.tbl-empty p {
+	margin: 0 0 6px;
+	max-width: 420px;
+	font-size: 12.5px;
+	line-height: 1.7;
+	color: var(--text-faint);
+}
+
+/* ── 结构页表单 ── */
+.tbl-form-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 10px 14px;
+}
+.tbl-form-field {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+.tbl-form-field > span {
+	font-size: 11.5px;
+	color: var(--text-soft);
+}
+.tbl-form-field-toggle {
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	padding-top: 4px;
+}
+.tbl-input {
+	width: 100%;
+	padding: 6px 9px;
+	background: var(--surface-dim);
+	border: 1px solid var(--hairline-strong);
+	border-radius: 4px;
+	color: var(--text);
+	font: inherit;
+	font-size: 12.5px;
+	outline: none;
+	transition: border-color 0.15s;
+}
+.tbl-input:focus {
+	border-color: var(--accent);
+}
+.tbl-input::placeholder {
+	color: var(--text-faint);
+}
+.tbl-input-ta {
+	resize: vertical;
+	line-height: 1.55;
+	/* 长内容时内部滚动兜底（textarea 原生可滚），min-height 保证可点不塌 */
+	min-height: 64px;
+	overflow-y: auto;
+}
+.tbl-input-select {
+	appearance: none;
+	-webkit-appearance: none;
+	background-image: linear-gradient(45deg, transparent 50%, var(--text-soft) 50%),
+		linear-gradient(135deg, var(--text-soft) 50%, transparent 50%);
+	background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%;
+	background-size: 5px 5px;
+	background-repeat: no-repeat;
+	padding-right: 26px;
+	cursor: pointer;
+}
+.tbl-input-select option {
+	background: var(--surface-dim);
+	color: var(--text);
+}
+
+/* 列定义：每项一张浅色卡片（序号徽章 #1/#2 + 列名 + 类型 + 删除 + 说明行） */
+.tbl-cols {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+/* 列项 = 主行（序号/列名/类型/删除）+ 说明行，两行一组（参考图每列带说明字段） */
+.tbl-col-item {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.tbl-col-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 10px 0;
+	background: var(--surface-dim);
+	border: 1px solid var(--hairline);
+	border-top-left-radius: var(--radius-s);
+	border-top-right-radius: var(--radius-s);
+	transition: border-color 0.13s, background 0.13s;
+}
+.tbl-col-item:focus-within .tbl-col-row {
+	border-color: var(--accent);
+}
+.tbl-col-idx {
+	flex: none;
+	min-width: 30px;
+	height: 22px;
+	padding: 0 6px;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--surface-deep);
+	border: 1px solid var(--hairline-strong);
+	color: var(--accent-strong);
+	font-size: 10.5px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+.tbl-col-row .tbl-input {
+	flex: 1;
+}
+.tbl-col-row .tbl-input-select {
+	flex: none;
+	width: 190px;
+}
+.tbl-col-desc {
+	padding: 0 10px 8px;
+	background: var(--surface-dim);
+	border: 1px solid var(--hairline);
+	border-top: none;
+	border-bottom-left-radius: var(--radius-s);
+	border-bottom-right-radius: var(--radius-s);
+}
+.tbl-col-desc .tbl-input {
+	font-size: 11.5px;
+	padding: 5px 8px;
+	background: var(--surface);
+}
+
+/* 维护规则（触发器）区块：初始化 / 新增 / 更新 / 删除 */
+.tbl-trigger {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+.tbl-trigger-label {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	font-size: 12px;
+	font-weight: 650;
+	color: var(--text-soft);
+}
+.tbl-trigger-hint {
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--text-faint);
+}
+
+/* ── 底部操作栏：保存状态提示 + 保存/刷新按钮 ── */
+.tbl-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 10px 16px;
+	padding-bottom: calc(10px + env(safe-area-inset-bottom));
+	background: color-mix(in srgb, var(--surface) 92%, transparent);
+	border-top: 1px solid var(--hairline);
+	flex: none;
+}
+.tbl-save-status {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--text-faint);
+}
+.tbl-save-dirty {
+	color: #fbbf24;
+	font-weight: 600;
+}
+.tbl-save-clean {
+	color: var(--accent-strong);
+	font-weight: 600;
+}
+.tbl-footer-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/* ── 模态：实色背景（不依赖作用域变量，任何渲染位置不透明可读） ── */
+.tbl-modal-scrim {
+	position: absolute;
+	inset: 0;
+	z-index: 6;
+	display: grid;
+	place-items: center;
+	padding: 16px;
+	background: rgb(3 7 8 / 68%);
+	backdrop-filter: blur(3px);
+	-webkit-backdrop-filter: blur(3px);
+}
+.tbl-modal {
+	width: min(92vw, 460px);
+	max-height: 84vh;
+	display: flex;
+	flex-direction: column;
+	background: var(--surface); /* 底座实色，保证不透明 */
+	border: 1px solid var(--hairline-strong);
+	border-radius: 8px;
+	box-shadow: 0 24px 64px rgb(0 0 0 / 55%);
+	animation: tbl-pop 0.16s ease-out;
+}
+@keyframes tbl-pop {
+	from {
+		opacity: 0;
+		transform: scale(0.96) translateY(8px);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1) translateY(0);
+	}
+}
+.tbl-modal-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--hairline);
+	font-size: 13.5px;
+	font-weight: 650;
+	color: var(--text-strong);
+}
+.tbl-modal-body {
+	padding: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	overflow-y: auto;
+	color: var(--text);
+}
+.tbl-modal-body .tbl-input {
+	background: var(--surface-dim);
+	border-color: var(--hairline-strong);
+}
+.tbl-modal-body .tbl-input:focus {
+	border-color: var(--accent);
+}
+.tbl-modal-foot {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 12px 14px;
+	border-top: 1px solid var(--hairline);
+}
+.tbl-modal-hint {
+	font-size: 11.5px;
+	line-height: 1.65;
+	color: var(--text-faint);
+}
+.tbl-import-ta {
+	font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+	font-size: 11.5px;
+}
+
+/* 导入：文件选择行 + 高级粘贴折叠项 */
+.tbl-file-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 32px;
+}
+.tbl-file-name {
+	min-width: 0;
+	font-size: 12px;
+	color: var(--text-soft);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.tbl-file-preview {
+	color: var(--accent-strong);
+	font-weight: 600;
+}
+.tbl-import-advanced {
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius-s);
+	padding: 8px 10px;
+	background: var(--surface-dim);
+}
+.tbl-import-advanced summary {
+	cursor: pointer;
+	font-size: 12px;
+	color: var(--text-soft);
+	user-select: none;
+}
+.tbl-import-advanced summary:hover {
+	color: var(--text-strong);
+}
+.tbl-import-advanced textarea {
+	margin-top: 8px;
+	background: var(--surface);
+}
+
+/* ── 窄屏：侧栏退化为顶部横向条 ── */
+@media (max-width: 860px) {
+	.tbl-body {
+		flex-direction: column;
+	}
+	.tbl-side {
+		width: auto;
+		flex-direction: row;
+		flex: none;
+	}
+	.tbl-side-sec {
+		flex: 1;
+		min-height: 150px;
+		max-height: 200px;
+	}
+	.tbl-crumb-main {
+		max-width: 120px;
+	}
+	.tbl-form-grid {
+		grid-template-columns: 1fr;
+	}
+	.tbl-top {
+		flex-wrap: wrap;
+	}
+	.tbl-tabs {
+		order: 3;
+		width: 100%;
+	}
+	.tbl-tabs button {
+		flex: 1;
+	}
+}

@@ -69,6 +69,7 @@ import {
 	IconSessions,
 	IconSettings,
 	IconStop,
+	IconTable,
 	IconUploads,
 	IconWorldline,
 } from "./components/icons.tsx";
@@ -105,6 +106,7 @@ import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { SessionStatsBar, StatusStrip } from "./components/StatusStrip.tsx";
 import { UploadsPanel } from "./components/UploadsPanel.tsx";
 import { StoreModal, WorldlinePanel } from "./components/WorldlinePanel.tsx";
+import { TablesPage } from "./components/TablesPage.tsx";
 import { useWire, type ConnState } from "./ws.ts";
 import type {
 	AssistantModelInfo,
@@ -358,6 +360,8 @@ export default function App() {
 	/** /store 存档命名弹窗 */
 	const [storeOpen, setStoreOpen] = useState(false);
 	const [storeDefaultName, setStoreDefaultName] = useState("");
+	/** 自定义表格 + 模板管理全屏页（DESIGN-custom-tables §7 UI）：顶栏「表格」按钮开合 */
+	const [tablesOpen, setTablesOpen] = useState(false);
 	const [ttsBusy, setTtsBusy] = useState(false);
 	/** 消息工具栏「配图」防重入（手动管线旋钮，对账裁决 #6） */
 	const [illustrateBusy, setIllustrateBusy] = useState(false);
@@ -1862,6 +1866,15 @@ export default function App() {
 						<BrandLogo className="brand-logo" size={28} />
 						<span className="brand-text">梨园</span>
 					</button>
+					<button
+						type="button"
+						className={`tb-btn ${tablesOpen ? "active" : ""}`}
+						onClick={() => setTablesOpen((v) => !v)}
+						aria-label="表格"
+						data-tip="表格"
+					>
+						<IconTable size={18} />
+					</button>
 				</div>
 				{/* 左 4 / 右 4：贴对话框左右缘；中间留白给绝对定位的中 2 */}
 				<div className="tb-groups tb-groups-tri">
@@ -2511,6 +2524,10 @@ export default function App() {
 			)}
 			{/* 脚本独立管理界面模态（D4 A4，P4）：App 顶层单例，与既有模态同层；无打开请求时渲染 null */}
 			<ModalPanel />
+			{/* 自定义表格 + 模板管理全屏页：覆盖主界面，关掉返回聊天 */}
+			{tablesOpen && (
+				<TablesPage worldState={worldState} toast={pushToast} onClose={() => setTablesOpen(false)} />
+			)}
 		</div>
 		</PanelRefreshContext.Provider>
 	);

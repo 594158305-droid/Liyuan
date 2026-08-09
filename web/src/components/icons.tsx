@@ -421,3 +421,28 @@ export const IconBroom = (p: IconProps) => (
 		<path d="m9.5 12.5 3 3" />
 	</Icon>
 );
+
+/** 表格（自定义表格管理页入口）：田字格 + 横竖线 */
+export const IconTable = (p: IconProps) => (
+	<Icon {...p}>
+		<rect x="3" y="3" width="18" height="18" rx="2" />
+		<path d="M3 9h18" />
+		<path d="M3 15h18" />
+		<path d="M12 3v18" />
+	</Icon>
+);
+
+/** 钉（模板绑定到当前卡） */
+export const IconLink = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+		<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+	</Icon>
+);
+
+/** 文件夹（导入文件选择） */
+export const IconFolderOpen = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+	</Icon>
+);
