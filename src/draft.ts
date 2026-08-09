@@ -611,6 +611,15 @@ export interface DraftReport {
 
 const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * 格式模块标签是否已出现（成对 `<tag>`、带属性 `<tag …>`、自闭合 `<tag/>` 都算）。
+ * 谢幕判定用（8/09 输出形式）：状态栏等格式块该不该催，看文本里有没有，
+ * 不看模型思考里说没说。
+ */
+export function hasFormatTag(text: string, tag: string): boolean {
+	return new RegExp(`<${escapeReg(tag)}[\\s/>]`, "i").test(text);
+}
+
 /** 剥掉全部顶层标签块与 HTML 注释后的正文 */
 export function extractDraftBody(turnText: string): string {
 	let t = turnText.replace(/<!--[\s\S]*?-->/g, "");
@@ -633,6 +642,15 @@ export function extractDraftBody(turnText: string): string {
 	return t.trim();
 }
 
+/**
+ * 引号内区域抹平——只看叙述层。
+ *
+ * 主权检查用它（角色在对白里说「你决定吧」是合法的）；比喻词规则同样需要
+ * （见 checkDraft 内的 metaphorRule）。
+ */
+const stripQuotedSpans = (t: string): string =>
+	t.replace(/「[^」\n]*」|『[^』\n]*』|“[^”\n]*”|"[^"\n]*"/g, "〔对白〕");
+
 /** 机械项核验：violations=必须修；notes=提示性（不拦） */
 export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 	const violations: string[] = [];
@@ -642,19 +660,13 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 
 	if (rules.wordRange) {
 		const { min, max } = rules.wordRange;
-		// 字数由预设 prompt 引导即可，harness 层不再硬拒——双重执法导致模型把思考
-		// 全浪费在"怎么砍到 800 以内"的算术上。只有极端偏差（>50%）才算 violation；
-		// 正常偏差降为 note（报字数不打回，模型自己决定要不要改）。
+		// 字数只作提示（note），不作违规（violation）——8/09 定案：
+		// 字数目标已由规划轮分配 + 【续写】卡兜底，封笔后不再判违规逼模型扩写
+		// （那是末端修复的诱因：封笔报「字数不足」→ 模型在稿纸里补内容）。
 		if (bodyChars < min) {
-			const ratio = (min - bodyChars) / min;
-			const msg = `正文 ${bodyChars} 字（不含标签模块），预设建议下限 ${min}。`;
-			if (ratio > 0.5) violations.push(msg);
-			else notes.push(msg);
+			notes.push(`正文 ${bodyChars} 字（不含标签模块），预设建议下限 ${min}。`);
 		} else if (bodyChars > max) {
-			const ratio = (bodyChars - max) / max;
-			const msg = `正文 ${bodyChars} 字（不含标签模块），预设建议上限 ${max}。`;
-			if (ratio > 0.5) violations.push(msg);
-			else notes.push(msg);
+			notes.push(`正文 ${bodyChars} 字（不含标签模块），预设建议上限 ${max}。`);
 		}
 	}
 
@@ -669,43 +681,76 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 	}
 	if (bannedHits > 5) violations.push(`（禁词共 ${bannedHits} 处，以上仅列前 5）`);
 
+	// 正文不是文档（机械格式纪律，无条件判）：行首 markdown 标题符号是结构标记不是
+	// 叙事语言——模型偶发拿 ##/### 给拟声词放大字号（8/09 实弹「### *啪……啪……*」），
+	// 渲染端按纯文本走，裸符号直接上屏。强调交给文字本身。
+	{
+		const mdHeading = /^#{1,6}\s*\S.*$/m.exec(body);
+		if (mdHeading) {
+			violations.push(
+				`正文含 markdown 标题符号「${mdHeading[0].slice(0, 24)}」——正文不是文档，删掉行首的 # 号，强调用文字本身表达。`,
+			);
+		}
+	}
+
 	if (rules.banNegPos) {
 		const m = /不是[^。！？\n]{1,24}[，,]?\s*而?是/.exec(body);
 		if (m) violations.push(`「不是…是…」句式：${ctxQuote(body, m.index, m[0].length)}`);
 	}
 
 	if (rules.metaphorRule) {
-		const words = body.match(/像|仿佛|如同|宛如|好似|犹如/g) ?? [];
+		// 只扫叙述层：对白里的「像吗？」是人物在说话，不是作者在打比方。
+		// 8/08 实弹——自然对白被计成 5 次比喻，模型两段思考全花在跟计数搏斗上，
+		// 最后把对白改僵。可精确计数的文风判决会被当成待优化的分数（与字数螺旋同构）。
+		// 8/09 实弹二修：单字「像」误伤复合词——「摄像机」被数成比喻，模型连修 9 轮
+		// 死活找不到（验收器数的字它不该改也改不掉）；且旧报告只给计数不给位置，
+		// 模型只能盲猜。现在：复合词排除 + 每处命中给引文。
+		const narrationOnly = stripQuotedSpans(body);
+		// 复合词排除宁漏勿误：误报会把模型拖进修复循环（改不掉验收数的字），漏计
+		// 只是文风松一格。名单里不收「神/人/群/影」——「眼神像刀」「人像影子」
+		// 「人群像潮水」「背影像山」是高频叙事句式，比「神像/人像/群像/影像」值钱。
+		const METAPHOR_RE =
+			/(?<![摄录图画头塑雕肖遗想偶佛镜成显])像(?![素机片册章])|仿佛|如同|宛如|好似|犹如/g;
+		const hits = [...narrationOnly.matchAll(METAPHOR_RE)];
 		const paras = body.split(/\n\s*\n|\n/).filter((s) => s.trim().length > 0).length || 1;
 		const limit = Math.max(1, Math.ceil(paras / 5));
-		if (words.length > limit) {
-			violations.push(`比喻词 ${words.length} 次 / ${paras} 段（预设约 5 段 1 次，上限约 ${limit}）——保留最必要的一处，其余改白描。`);
-		} else if (words.length > 0) {
-			notes.push(`比喻词 ${words.length} 次 / ${paras} 段，在限内。`);
+		if (hits.length > limit) {
+			const quotes = hits
+				.slice(0, 5)
+				.map((m) => ctxQuote(narrationOnly, m.index ?? 0, m[0].length))
+				.join("；");
+			violations.push(
+				`比喻词 ${hits.length} 次 / ${paras} 段（预设约 5 段 1 次，上限约 ${limit}）：${quotes}——保留最必要的一处，其余改白描。`,
+			);
+		} else if (hits.length > 0) {
+			notes.push(`比喻词 ${hits.length} 次 / ${paras} 段，在限内。`);
 		}
 	}
 
-	for (const tag of rules.requiredTags) {
-		if (!new RegExp(`<${escapeReg(tag)}[\\s>]`, "i").test(turnText)) {
-			violations.push(`缺模块 <${tag}>——按预设格式补在正文之后。`);
-		}
-	}
-	if (rules.statusBarTagGroup.length > 0) {
-		// [\s/>] 兼容三种形态：<tag>（成对）、<tag >、<tag/>（自闭合占位符——界面由卡渲染）
-		const hit = rules.statusBarTagGroup.some((tag) => new RegExp(`<${escapeReg(tag)}[\\s/>]`, "i").test(turnText));
-		if (!hit) violations.push(`缺状态栏模块（${rules.statusBarTagGroup.map((t) => `<${t}>`).join(" 或 ")}）。`);
-	}
+	// 末端修复已彻底删除（8/09 定案）：requiredTags / statusBarTagGroup 不再判违规——
+	// 状态栏/格式模块归**输出层**（模型最后一轮走 text 通道输出，mergeFinalText 拼接），
+	// 不属于稿纸验收项。判违规会把模型逼进「封笔后稿纸里补」的末端修复，
+	// 造成状态栏补两次、续写被未修违规拦截等连锁问题。
+	// 字段保留（rulesAreEmpty / 提取逻辑仍引用），只是不再产生 violations。
 
 	return { violations, notes, bodyChars, pass: violations.length === 0 };
 }
 
 /** 核验报告 → 回喂模型的文本 */
-export function formatDraftReport(r: DraftReport): string {
+/**
+ * 核验报告转可读回喂。
+ *
+ * `showChars=false`（未封笔）时不报字数：整拍字数目标 + 每段回传实测值会闭成误差环，
+ * 实弹里模型的反思整段变成「还差 19 字」的算术，不再想戏（8/08 定案）。
+ * 封笔后是验收场合，读数可见无害。
+ */
+export function formatDraftReport(r: DraftReport, showChars = true): string {
+	const chars = showChars ? `（正文 ${r.bodyChars} 字）` : "";
 	if (r.pass) {
-		return `核验通过（正文 ${r.bodyChars} 字）。${r.notes.length ? `\n${r.notes.join("\n")}` : ""}\n机械项无违规——不要再回头自查这些；若无其他修订，直接停笔收轮。`;
+		return `核验通过${chars}。${r.notes.length ? `\n${r.notes.join("\n")}` : ""}\n机械项无违规——不要再回头自查这些；若无其他修订，直接停笔收轮。`;
 	}
 	const lines = [
-		`核验发现 ${r.violations.length} 处待修（正文 ${r.bodyChars} 字）：`,
+		`核验发现 ${r.violations.length} 处待修${chars}：`,
 		...r.violations.map((v, i) => `${i + 1}. ${v}`),
 		...r.notes,
 		`逐处用 draft_edit 定点替换修正（old 逐字引用现稿原文、须唯一，可一次给多处）——不要重交全文；套用后会自动复验。`,
@@ -714,10 +759,6 @@ export function formatDraftReport(r: DraftReport): string {
 }
 
 // ---------------- 用户主权红线（R5 第二层不变量，规则先行） ----------------
-
-/** 引号内区域抹平——主权检查只看叙述层（角色在对白里说"你决定吧"是合法的） */
-const stripQuotedSpans = (t: string): string =>
-	t.replace(/「[^」\n]*」|『[^』\n]*』|“[^”\n]*”|"[^"\n]*"/g, "〔对白〕");
 
 /** 命中点前若是建议/假设语气则放行（"你可以选择…"不是代做决定） */
 const SOV_GUARD_RE = /(?:可以|可|能|能否|是否|要不要|不妨|请|建议|若|如果|假如|要是|除非|万一|无论)\s*$/;

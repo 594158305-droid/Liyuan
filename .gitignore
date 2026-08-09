@@ -33,6 +33,8 @@ liyuan-preset.json
 .liyuan-memory/
 rp.config*.json
 liyuan-profiles/
+# docker compose 的宿主数据目录（含 API Key 的 liyuan.agent.json）
+data/
 *.bak
 *.bak2
 .env

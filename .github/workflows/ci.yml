@@ -110,3 +110,66 @@ jobs:
           ! grep -q $'\r' start.command
           bash -n start.sh
           bash -n start.command
+
+  # issue #1：文件级 bind mount 让干净 clone 直接崩，而当时 CI 完全不碰 Docker。
+  # 这个 job 走的就是 README 那条路：clone 后什么都不准备，直接 up。
+  docker:
+    name: docker compose (clean clone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: entrypoint is LF-only bash
+        run: |
+          head -n1 docker-entrypoint.sh | grep -q '#!/usr/bin/env bash'
+          ! grep -q $'\r' docker-entrypoint.sh
+          bash -n docker-entrypoint.sh
+
+      - name: No file-level bind mounts in compose
+        run: |
+          # 挂 *.json 单文件 = issue #1 的成因；只允许目录挂载
+          ! grep -nE '^\s*-\s*\./[^:]*\.json:' docker-compose.yml
+
+      - name: Up from a pristine tree
+        run: docker compose up -d --build --wait --wait-timeout 300
+
+      - name: Config seeded as real files (not directories)
+        run: |
+          test -f data/config/liyuan.config.json
+          test -f data/config/liyuan.agent.json
+          python3 -c "import json;json.load(open('data/config/liyuan.agent.json'))"
+          python3 -c "import json;json.load(open('data/config/liyuan.config.json'))"
+
+      - name: Default assets survive the volume mount
+        run: test -f data/cards/default_Qingwu.json
+
+      - name: HTTP probe
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7620/)
+          test "$code" = 200 || { echo "GET / -> $code"; docker compose logs --tail=60; exit 1; }
+
+      - name: Restart is idempotent (config not clobbered)
+        run: |
+          # 容器以 root 跑，播种出的文件属主是 root，非 root 的 runner 写不进去。
+          # 从容器内改也更贴近真实场景：用户在网页改 Key 时写入方就是容器。
+          docker compose exec -T liyuan node -e "
+            const fs=require('fs'), p='/app/liyuan.agent.json';
+            const d=JSON.parse(fs.readFileSync(p,'utf8'));
+            d.__ci_probe='survives-restart';
+            fs.writeFileSync(p, JSON.stringify(d,null,'\t'));
+          "
+          # 写穿软链后宿主机应立刻可见
+          grep -q __ci_probe data/config/liyuan.agent.json
+          # restart 不吃 --wait（只有 up 有），自己轮询探活
+          docker compose restart
+          for i in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7620/)" = 200 ] && break
+            [ "$i" = 60 ] && { echo "重启后 60s 内没起来"; docker compose logs --tail=60; exit 1; }
+            sleep 2
+          done
+          grep -q __ci_probe data/config/liyuan.agent.json
+          docker compose exec -T liyuan test -L /app/liyuan.agent.json
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=200

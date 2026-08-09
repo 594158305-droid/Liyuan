@@ -7,7 +7,7 @@
 > 见文末 §8「实弹后修订」。读本文档请先看 §8，再看正文。实施记录在 EXEC §4.5。
 >
 > 渠道一：思考考古（`_obs-ma/2026-08-03T14-12-33-988Z/floor-{1,2}.json`，M-C 两拍）
-> 渠道二：源码类比（Claude Code 系统提示 + Codex 源码 `E:\silly-agent\_codex-src` HEAD 8922a78）
+> 渠道二：源码类比（Claude Code 系统提示 + Codex 源码本地检出 HEAD 8922a78）
 
 ## 0. TL;DR
 

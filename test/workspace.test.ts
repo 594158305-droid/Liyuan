@@ -5,7 +5,12 @@ import { emptyDraftRules } from "../src/draft.ts";
 import { defaultState } from "../src/state.ts";
 import {
 	createWorkspace,
+	finalTimeline,
+	formatPlan,
+	MAX_STEPS,
+	MAX_STEP_LEN,
 	projectedState,
+	recordSegment,
 	runWriteTool,
 	type WorkspaceDeps,
 } from "../src/stage/workspace.ts";
@@ -18,18 +23,138 @@ const deps = (): WorkspaceDeps => ({
 	baseState: defaultState(),
 });
 
-test("writeTools：写侧六件在清单里，draft_write 声明唯一交稿入口、draft_edit 声明批量原子", () => {
+test("writeTools：写侧十一件在清单里，beat_plan 列首为落笔前构思、draft_edit 声明批量原子", () => {
 	const names = writeTools("中文").map((t) => t.name);
+	// 顺序本身就是导流：先构思成清单（beat_plan），再一段一段演（append 在 write 之前）
 	assert.deepEqual(names, [
+		"beat_plan",
+		"beat_step_done",
+		"draft_append",
 		"draft_write",
+		"draft_seal",
 		"draft_edit",
 		"draft_read",
 		"draft_search",
 		"draft_check",
 		"world_state_update",
+		"ask",
 	]);
-	assert.match(writeTools("中文")[0].description, /唯一交稿方式/);
-	assert.match(writeTools("中文")[1].description, /整批不套用/);
+	const byName = new Map(writeTools("中文").map((t) => [t.name, t.description]));
+	assert.match(byName.get("draft_write") ?? "", /全量/);
+	// draft_write 收窄为「这一拍没有戏」，描述须自证其适用面
+	assert.match(byName.get("draft_write") ?? "", /没有戏|寒暄/);
+	assert.match(byName.get("draft_append") ?? "", /追加|续写/);
+	assert.match(byName.get("draft_seal") ?? "", /封笔/);
+	assert.match(byName.get("draft_edit") ?? "", /整批不套用/);
+	// beat_plan 的描述必须自证「路标是抽象层，怎么演留给各段」——粒度是这个工具的全部价值
+	assert.match(byName.get("beat_plan") ?? "", /路标/);
+	assert.match(byName.get("beat_plan") ?? "", /抽象/);
+	assert.match(byName.get("beat_plan") ?? "", /怎么演.*再想|留给演到/);
+	// 计划是草图：描述须声明可改写，否则模型会把它当成必须演完的剧本
+	assert.match(byName.get("beat_plan") ?? "", /草图|改写/);
+});
+
+test("beat_plan：记下路标清单，渲染为方框待办；重拟保留已勾条目的进度", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	const r = runWriteTool(ws, d, "beat_plan", {
+		steps: ["推门进院", "被值守弟子拦下", "亮出师门信物"],
+	});
+	assert.equal(r.ok, true);
+	assert.equal(ws.plan.length, 3);
+	assert.equal(ws.planWrites, 1);
+	assert.ok(ws.plan.every((s) => !s.done), "新计划默认全未完成");
+	assert.match(r.text, /□ 推门进院/, "未完成条目渲染成方框待办");
+
+	runWriteTool(ws, d, "beat_step_done", { step: 1 });
+	// 重拟：走岔了改写后两条，但已经演过的第一条不该因此丢掉进度
+	const again = runWriteTool(ws, d, "beat_plan", {
+		steps: ["推门进院", "院里空无一人", "听见后堂有响动"],
+	});
+	assert.equal(again.ok, true);
+	assert.equal(ws.planWrites, 2);
+	assert.equal(ws.plan[0]?.done, true, "文字未变的已完成步保留勾选");
+	assert.equal(ws.plan[1]?.done, false, "改写出来的新步未完成");
+	assert.match(again.text, /重拟/);
+});
+
+test("beat_plan 粒度门禁：条目写成正文即拒收（构思与排练的结构性分界）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	const prose = "她推开院门，晨雾还没散尽，青石板上凝着一层薄薄的水汽，脚步踩上去几乎没有声音，" +
+		"远处传来隐约的诵经声，像是从很久以前的时光里飘过来的。";
+	assert.ok(prose.length > MAX_STEP_LEN, "用例前提：这条确实超长");
+	const r = runWriteTool(ws, d, "beat_plan", { steps: ["推门进院", prose] });
+	assert.equal(r.ok, false, "计划里写正文必须走不通");
+	assert.equal(ws.plan.length, 0, "拒收即一条不记");
+	assert.match(r.text, new RegExp(`${MAX_STEP_LEN}`), "回喂说明粒度上限");
+	assert.match(r.text, /正文留给 draft_append/, "把正文导回稿纸");
+
+	// 条数上限：一拍是一小段戏，不是整章大纲
+	const many = Array.from({ length: MAX_STEPS + 1 }, (_, i) => `第${i + 1}步`);
+	const tooMany = runWriteTool(ws, d, "beat_plan", { steps: many });
+	assert.equal(tooMany.ok, false);
+	assert.match(tooMany.text, /整章大纲/);
+
+	// 非数组 / 空数组都拒收，且不抛
+	assert.equal(runWriteTool(ws, d, "beat_plan", { steps: [] }).ok, false);
+	assert.equal(runWriteTool(ws, d, "beat_plan", {}).ok, false);
+});
+
+test("beat_step_done：按序号勾掉并回报剩余；越界/重复勾/无计划都拒收", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 1 }).ok, false, "没有计划时无从勾起");
+
+	runWriteTool(ws, d, "beat_plan", { steps: ["推门进院", "被弟子拦下"] });
+	const ok = runWriteTool(ws, d, "beat_step_done", { step: 1 });
+	assert.equal(ok.ok, true);
+	assert.equal(ws.plan[0]?.done, true);
+	assert.match(ok.text, /还剩 1 条/);
+	assert.match(ok.text, /☑ ~~推门进院~~/, "已完成条目打勾划掉");
+
+	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 1 }).ok, false, "重复勾拒收");
+	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 9 }).ok, false, "越界拒收");
+	assert.equal(runWriteTool(ws, d, "beat_step_done", {}).ok, false, "缺参数拒收");
+
+	// 全部勾完：只报状态转折（收笔评估由轮次卡接手），不继续催段、不重复评估导向
+	const last = runWriteTool(ws, d, "beat_step_done", { step: 2 });
+	assert.equal(last.ok, true);
+	assert.match(last.text, /路标已全部演完/);
+	assert.doesNotMatch(last.text, /接着演|draft_append/, "勾完不催段");
+	assert.doesNotMatch(last.text, /ask|收笔前/, "回执不带评估导向（8/09：评估归轮次卡，回执重复会逼模型每勾一步纠结一遍）");
+});
+
+test("续写回执不含字数读数：目标可持有，测量值不回传（8/08 定案）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "beat_plan", { steps: ["推门进院", "被弟子拦下"] });
+	const r = runWriteTool(ws, d, "draft_append", { segment: "她推开院门，晨雾还没散尽。" });
+	assert.equal(r.ok, true);
+	// 「正文 N 字」这类读数会与目标闭成误差环，把思考吃成算术（8/08 实弹 829→797）
+	assert.ok(!/正文 \d+ 字/.test(r.text), "未封笔回执不报正文字数");
+	assert.ok(!/\d+ 字/.test(r.activity ?? ""), "过程条也不报字数");
+	assert.match(r.text, /计划还剩 2 条/, "改以计划进度代替字数进度（此时尚未勾选）");
+
+	// 未封笔的定点改稿同样不带读数
+	const e = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "晨雾", new: "薄雾" }] });
+	assert.equal(e.ok, true);
+	assert.ok(!/正文 \d+ 字/.test(e.text), "未封笔改稿回执不报正文字数");
+
+	// 封笔后是验收场合：字数可见无害，验收报告照常给
+	const sealed = runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(sealed.ok, true);
+	assert.equal(ws.sealed, true);
+});
+
+test("formatPlan：空计划有可读兜底，混合状态各按其形渲染", () => {
+	assert.match(formatPlan([]), /还没有计划/);
+	const rendered = formatPlan([
+		{ text: "推门进院", done: true },
+		{ text: "被弟子拦下", done: false },
+	]);
+	assert.match(rendered, /1\. ☑ ~~推门进院~~/);
+	assert.match(rendered, /2\. □ 被弟子拦下/);
 });
 
 test("draft_write：收稿落工作区并自动验收；空 content 拒收", () => {
@@ -45,6 +170,196 @@ test("draft_write：收稿落工作区并自动验收；空 content 拒收", () 
 	assert.equal(ws.writes, 1);
 	assert.equal(ws.checks, 1); // 收稿即验，省一轮往返
 	assert.match(r.text, /已收稿（第 1 稿/);
+});
+
+test("draft_write 门禁：查过世界＝这拍有戏，一次交完被拒收并导向 draft_append", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	ws.lookups = 2; // 引擎在读侧工具执行后打点（lorebook / memory / world_state_get）
+
+	const r = runWriteTool(ws, d, "draft_write", { content: "山门外的雪落了一夜。" });
+	assert.equal(r.ok, false, "拒收而不是放行后再劝");
+	assert.equal(ws.draft, "", "拒收不留痕：稿子没被写进去");
+	assert.equal(ws.writes, 0);
+	assert.match(r.text, /draft_append/, "把正确的路回喂给模型");
+	assert.match(r.text, /查过 2 次世界/, "回喂里带上判据本身");
+});
+
+test("draft_write 门禁：没查过世界（寒暄拍）照常收稿", () => {
+	const ws = createWorkspace();
+	const r = runWriteTool(ws, deps(), "draft_write", { content: "山门外的雪落了一夜。" });
+	assert.equal(r.ok, true);
+	assert.equal(ws.writes, 1);
+});
+
+test("draft_write 门禁：writing_guide 不计入 lookups，故读过方法论仍可一次交完", () => {
+	// lookups 只认「查世界」；读写作方法论不是遇到了要处理的事
+	const ws = createWorkspace();
+	assert.equal(ws.lookups, 0, "新工作区从 0 起");
+	const r = runWriteTool(ws, deps(), "draft_write", { content: "山门外的雪落了一夜。" });
+	assert.equal(r.ok, true);
+});
+
+test("draft_write 门禁：续写到一半改用全量重交不拦（另有 draft_edit 的劝导）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	ws.lookups = 1;
+	runWriteTool(ws, d, "draft_append", { segment: "第一段。" });
+	const r = runWriteTool(ws, d, "draft_write", { content: "整篇重写过的正文。" });
+	assert.equal(r.ok, true, "appends>0 时门禁让路");
+	assert.equal(ws.draft, "整篇重写过的正文。");
+});
+
+test("draft_write 门禁：internal 代收绕过门禁——兜底路径不能把正文丢掉", () => {
+	// 宽进严出：模型直出正文由引擎代收为 draft_write。被门禁拦下就等于这拍白演。
+	const ws = createWorkspace();
+	ws.lookups = 3;
+	const r = runWriteTool(ws, deps(), "draft_write", { content: "直出的正文。" }, true);
+	assert.equal(r.ok, true);
+	assert.equal(ws.draft, "直出的正文。");
+});
+
+// ---------------- M-E：draft_append / draft_seal（分段续写） ----------------
+
+const minRules = (): WorkspaceDeps => ({
+	...deps(),
+	rules: { ...emptyDraftRules(), wordRange: { min: 800, max: 2000 } },
+});
+
+test("draft_append：追加不覆盖；字数全程只提示不违规（8/09 末端修复删除）", () => {
+	const ws = createWorkspace();
+	const d = minRules();
+	// 第一段只有 300 字——若按完整稿 800 字下限判，必违规；但这是分段续写的第一段
+	const r1 = runWriteTool(ws, d, "draft_append", { segment: "山门外雪落了一夜。他推门进屋，炉火将熄。" });
+	assert.equal(r1.ok, true);
+	assert.equal(ws.draft, "山门外雪落了一夜。他推门进屋，炉火将熄。");
+	assert.equal(ws.appends, 1);
+	assert.equal(ws.sealed, false);
+	assert.doesNotMatch(r1.text, /待修/); // 未封笔：字数不算违规（无待修项）
+	assert.match(r1.text, /续写中/);
+	// 追加第二段：不覆盖，续在末尾
+	runWriteTool(ws, d, "draft_append", { segment: "她还在窗边坐着，像在等什么。" });
+	assert.ok(ws.draft.includes("山门外雪落了一夜。"));
+	assert.ok(ws.draft.includes("她还在窗边坐着"));
+	assert.equal(ws.appends, 2);
+	// 未封笔时 lastGreen 恒 false（谢幕判定：稿子还没写完，不算完成）
+	assert.equal(ws.lastGreen, false);
+	// 封笔：字数不足也只是提示，不再是违规（8/09）
+	const r3 = runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(ws.sealed, true);
+	assert.match(r3.text, /已封笔/);
+	assert.doesNotMatch(r3.text, /待修/, "封笔后字数不足不判违规——字数归规划层（8/09）");
+});
+
+test("draft_append：追加进时间线是追加段（draft=true），不塌成替换", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "draft_append", { segment: "第一段。" });
+	runWriteTool(ws, d, "draft_append", { segment: "第二段。" });
+	const draftSegs = ws.timeline.filter((s) => s.kind === "text" && s.draft === true);
+	assert.equal(draftSegs.length, 2, "两段续写应为两个独立稿段");
+	assert.equal((draftSegs[0] as { text: string }).text, "第一段。");
+	assert.equal((draftSegs[1] as { text: string }).text, "第二段。");
+});
+
+test("draft_append：续写后 draft_edit 改一处，时间线保持分段不塌成一整块", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "draft_append", { segment: "山门外的雪落了一夜。" });
+	runWriteTool(ws, d, "draft_append", { segment: "他推门进屋，炉火将熄。" });
+	const r = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "推门进屋", new: "推门进了屋" }] });
+	assert.equal(r.ok, true);
+	assert.equal(ws.edits, 1);
+	const segs = ws.timeline.filter((s) => s.kind === "text" && s.draft === true);
+	assert.equal(segs.length, 2, "改稿后仍是两个稿段（分段形态不塌）");
+});
+
+test("finalTimeline：分段同构——稿段原位保留，尾巴收独立末段（8/09 输出形式）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	recordSegment(ws, { kind: "thinking", text: "构思第一段。" });
+	runWriteTool(ws, d, "draft_append", { segment: "第一段。" });
+	recordSegment(ws, { kind: "thinking", text: "构思第二段。" });
+	runWriteTool(ws, d, "draft_append", { segment: "第二段。" });
+	// 尾巴（状态栏）流式记档：非稿 text，不得黏进稿段
+	recordSegment(ws, { kind: "text", text: "<StatusBlock>地点：山门</StatusBlock>" });
+	const finalText = `${ws.draft}\n\n<StatusBlock>地点：山门</StatusBlock>`;
+	const tl = finalTimeline(ws, finalText);
+	const textSegs = tl.filter((s): s is Extract<(typeof tl)[number], { kind: "text" }> => s.kind === "text");
+	assert.equal(textSegs.length, 3, "两个稿段 + 一个尾巴段");
+	assert.equal(textSegs[0].text, "第一段。");
+	assert.equal(textSegs[0].draft, true);
+	assert.equal(textSegs[1].text, "第二段。");
+	assert.equal(textSegs[1].draft, true);
+	assert.ok(textSegs[2].text.includes("StatusBlock"), "尾巴独立末段");
+	assert.notEqual(textSegs[2].draft, true, "尾巴段不带 draft 标记");
+	// 内容一致：稿段拼接 + 尾巴 = finalText
+	assert.equal([textSegs[0].text, textSegs[1].text].join("\n\n") + "\n\n" + textSegs[2].text, finalText);
+});
+
+test("finalTimeline：无稿（直出路径）回退单段全文", () => {
+	const ws = createWorkspace();
+	recordSegment(ws, { kind: "thinking", text: "直接说。" });
+	recordSegment(ws, { kind: "text", text: "你好。" });
+	const tl = finalTimeline(ws, "你好。");
+	const textSegs = tl.filter((s) => s.kind === "text");
+	assert.equal(textSegs.length, 1, "直出路径仍是单段");
+	assert.equal((textSegs[0] as { text: string }).text, "你好。");
+});
+
+test("draft_seal：回执谢幕导向——卡定义状态栏时点名「最后一步」（8/09 输出形式）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	d.rules.statusBarTagGroup = ["StatusBlock"];
+	runWriteTool(ws, d, "draft_append", { segment: "他推门进屋，炉火将熄。" });
+	const r = runWriteTool(ws, d, "draft_seal", {});
+	assert.match(r.text, /最后一步/, "封笔回执点名谢幕");
+	assert.match(r.text, /StatusBlock/, "点名状态栏标签");
+	assert.match(r.text, /本拍结束/, "状态栏 = 结束标志");
+	// 卡没定义状态栏：不加谢幕导向（没有就不硬造）
+	const ws2 = createWorkspace();
+	const d2 = deps();
+	runWriteTool(ws2, d2, "draft_append", { segment: "他推门进屋，炉火将熄。" });
+	const r2 = runWriteTool(ws2, d2, "draft_seal", {});
+	assert.doesNotMatch(r2.text, /最后一步/, "无状态栏卡不催谢幕");
+});
+
+test("修复死循环安全阀：同批违规连修 3 轮未消 → 放行推进（8/09 实弹误报保护）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	d.rules.bannedWords = ["闪过"];
+	// 段里带禁词；三次 edit 都改别处（模拟「修不掉」——实弹是验收误报，模型无从下手）
+	runWriteTool(ws, d, "draft_append", { segment: "她推门进来，眼中闪过一道冷光。屋里点着灯。" });
+	assert.ok(ws.pendingViolations.length > 0, "禁词违规挂起");
+	runWriteTool(ws, d, "draft_edit", { edits: [{ old: "屋里点着灯", new: "屋内点着灯" }] });
+	assert.ok(ws.pendingViolations.length > 0, "第 1 修未消仍拦");
+	runWriteTool(ws, d, "draft_edit", { edits: [{ old: "点着灯", new: "燃着灯" }] });
+	assert.ok(ws.pendingViolations.length > 0, "第 2 修未消仍拦");
+	const r3 = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "燃着灯", new: "亮着灯" }] });
+	assert.match(r3.text, /已放行/, "第 3 修未消 → 放行说明");
+	assert.equal(ws.pendingViolations.length, 0, "放行后不再拦推进");
+	// 放行持久：seal 重跑验收，同批违规不再回填 pending
+	runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(ws.pendingViolations.length, 0, "封笔复验不撤销放行");
+});
+
+test("draft_seal：空工作区封笔被拒", () => {
+	const ws = createWorkspace();
+	const r = runWriteTool(ws, deps(), "draft_seal", {});
+	assert.equal(r.ok, false);
+	assert.match(r.text, /draft_write|draft_append/);
+});
+
+test("draft_seal：封笔后 draft_edit 仍可改（封笔≠锁稿，改完再验）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "draft_append", { segment: "山门外的雪落了一夜。" });
+	runWriteTool(ws, d, "draft_append", { segment: "她还在窗边。" });
+	runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(ws.sealed, true);
+	const r = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "窗边", new: "廊下" }] });
+	assert.equal(r.ok, true);
+	assert.ok(ws.draft.includes("廊下"));
 });
 
 test("draft_write：全量替换语义——第二稿覆盖第一稿", () => {
@@ -115,12 +430,13 @@ test("未知写侧工具名：可读文本，不抛", () => {
 
 // ---------------- M-B：draft_edit / draft_read / draft_search ----------------
 
-test("draft_edit：无稿时拒绝——初稿必须走 draft_write（唯一交稿入口不被绕过）", () => {
+test("draft_edit：无稿时拒绝——改稿之前必须先落笔（两种写法都指路）", () => {
 	const ws = createWorkspace();
 	const r = runWriteTool(ws, deps(), "draft_edit", { edits: [{ old: "甲", new: "乙" }] });
 	assert.equal(r.ok, false);
 	assert.equal(ws.edits, 0);
-	assert.match(r.text, /先用 draft_write/);
+	assert.match(r.text, /draft_append/);
+	assert.match(r.text, /draft_write/);
 });
 
 test("draft_edit：多处定点替换一次套用，改稿即验，稿次不增而 edits 增", () => {

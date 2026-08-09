@@ -160,9 +160,10 @@ test("system prompt：字节稳定、宏替换、主权红线随预设让位", (
 	const b = buildStageSystemPrompt(opts);
 	assert.equal(a, b, "同素材两次装配必须逐字节一致");
 	assert.ok(a.includes("沈舟的同门师姐"), "{{user}} 宏应替换");
-	assert.ok(a.includes("用户主权"), "无预设：harness 兜底纪律在场");
+	assert.ok(a.includes("绝不替 沈舟 说话、行动"), "无预设：harness 兜底纪律在场（叙事与文风节）");
 	assert.ok(a.includes("state1"), "状态栏格式线索在场");
-	assert.ok(a.includes("一拍演完即停"), "一拍即停是 harness 缺省");
+	assert.ok(a.includes("停在 沈舟 可以接话"), "演完即停是 harness 缺省（正面祈使句）");
+	assert.ok(a.includes("一场长篇沉浸式角色扮演"), "舞台只声明角色扮演（不抢预设身份工作）");
 
 	const withPreset = buildStageSystemPrompt({
 		...opts,
@@ -177,18 +178,28 @@ test("system prompt：字节稳定、宏替换、主权红线随预设让位", (
 	assert.ok(!withPreset.includes("用户主权"), "让位后 harness 不重复立规");
 	assert.ok(withPreset.includes("破限框架原文。"), "A 类原文进场（预设指令段）");
 	assert.ok(withPreset.includes("文风块：要生动。"), "B 类进「文风与写法」节");
-	assert.ok(withPreset.indexOf("# 文风与写法") > 0 && withPreset.includes("不要在思考里逐条自查"), "B 节引导语点明纪律归验收器");
+	assert.ok(withPreset.indexOf("# 文风与写法") > 0 && !withPreset.includes("不要在思考里逐条自查"), "P10：机械纪律去重，B 节不再重复自查指令");
 	assert.ok(withPreset.includes("不替用户做重大决定。"), "C 类进「行为边界」节");
 });
 
-test("system prompt：writing_guide 主题在场才提，空则只字不提（不凭空点名）", () => {
+test("system prompt：构思成清单 + 最小稿纸循环，其他工具仍由 schema 自我说明", () => {
 	const opts = { card, config, constantLore: [], statusBarFormats: [] };
 	const without = buildStageSystemPrompt(opts);
-	assert.ok(!without.includes("writing_guide"), "无 skill 包不点名工具");
 	const withSkill = buildStageSystemPrompt({ ...opts, skillTopics: ["general", "nsfw"] });
-	assert.ok(withSkill.includes("writing_guide"), "有 skill 包才提");
-	assert.ok(withSkill.includes("general / nsfw"), "主题列表写进契约");
-	assert.ok(/参考不是验收清单/.test(withSkill), "skill 定位：参考非验收");
+	for (const p of [without, withSkill]) {
+		assert.ok(p.includes("角色扮演"), "先说清在做什么");
+		// P2：删「始终思考剧情的发展走向」越权句，全貌思考不再合法化到每一轮
+		assert.ok(!p.includes("始终思考剧情"), "不把全貌思考合法化到每一轮");
+		assert.ok(p.includes("资深作家"), "身份激活：把自己当成资深作家");
+		assert.ok(p.includes("你需要读懂本拍处境"), "第 1 轮祈使句");
+		assert.ok(p.includes("发挥自己职业作家的水平"), "每轮开始祈使句（身份激活）");
+		assert.ok(p.includes("倾尽所有的去构思"), "写作过程中祈使句（强度上限）");
+		assert.ok(p.includes("以注入为准"), "具体步骤以每轮注入的轮次卡为准");
+		assert.ok(p.includes("重新评估"), "写完后评估（ask/重拟/seal）");
+		for (const tool of ["writing_guide", "draft_write", "lorebook_search"]) {
+			assert.ok(!p.includes(tool), `不把无关工具写进工作流 ${tool}`);
+		}
+	}
 });
 
 test("末端注入：世界状态最前、导演备注最后、拆层归拢节各就位、语言自愈", () => {
@@ -214,7 +225,7 @@ test("末端注入：世界状态最前、导演备注最后、拆层归拢节�
 	assert.ok(!inj.includes("【登场名录】"), "无名录不出块");
 });
 
-test("末端注入：wordRange 显式注入目标字数（构成性目标写作时在场，验算归代码）", () => {
+test("末端注入：wordRange 是背景信息，不带验收暗示（8/08 定案：目标可持有，不当考试）", () => {
 	const inj = buildStageInjection({
 		state: defaultState(),
 		activatedLore: [],
@@ -223,8 +234,15 @@ test("末端注入：wordRange 显式注入目标字数（构成性目标写作�
 		presetActive: true,
 		wordRange: { min: 500, max: 800 },
 	});
-	assert.ok(inj.includes("500–800 字"), "目标字数一行在导演备注");
-	assert.ok(inj.includes("验收器核验"), "点明验算归代码");
+	assert.ok(inj.includes("500–800 字"), "篇幅信息仍在场——目标本身不是病");
+	assert.ok(inj.includes("心里有数即可"), "口径是背景信息");
+	// 「由验收器核验 / 朝这个量落笔」把篇幅变成落笔前要对准的考试：8/08 实弹里模型
+	// 逐字引用这一行后当场脑内写完整篇初稿（13587 字思考）。这类措辞不得回归。
+	assert.ok(!inj.includes("验收器核验"), "不把篇幅说成待通过的验收");
+	assert.ok(!inj.includes("朝这个量落笔"), "不要求落笔前对准总量");
+	// 末尾权重留给真纪律（语言/主权/状态栏），篇幅不占最后一句
+	const tail = inj.slice(inj.lastIndexOf("【导演备注】"));
+	assert.ok(!tail.trimEnd().endsWith("心里有数即可，不必核算。"), "篇幅不是导演备注的最后一句");
 });
 
 test("detectsLanguageMismatch：中文目标才判、样本要够长", () => {
@@ -361,10 +379,11 @@ test("断粮注入：不点名规划区标签——draft_notes 格式栈已随�
 	assert.ok(!without.includes("draft_notes"), "任何情况下都不点名格式栈标签（8/02 <user> 块事故同理）");
 });
 
-test("断粮注入：默认不注入，显式开启才注入（2026-08-03 high 档实测证伪后默认关）", () => {
-	// 默认（无 rehearsalGuard 字段）= 不注入
+test("断粮注入：默认不注入，显式开启才注入", () => {
+	// 默认（无 rehearsalGuard 字段）= 不注入（buildStageInjection 层面；
+	// 引擎侧 P14 已改为默认开，config.rehearsalGuard !== false）
 	const defaultInj = buildStageInjection(injOpts() as never);
-	assert.ok(!defaultInj.includes("【思考的用法】"), "默认不注入（证伪后默认关）");
+	assert.ok(!defaultInj.includes("【思考的用法】"), "默认不注入");
 
 	// 显式 true 才注入
 	const on = buildStageInjection(injOpts({ rehearsalGuard: true }) as never);

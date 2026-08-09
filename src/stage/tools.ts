@@ -26,7 +26,9 @@ import type { WorldState } from "../types.ts";
 export const MAX_LOOKUPS = 3;
 
 /** agent 循环安全阀（PLAN-RP-AGENT-EXEC §2.3）：开放式循环的轮数上限，触阀以现稿定稿 */
-export const MAX_ROUNDS = 12;
+// 8/09 提额：ask 接回 + 续写出口后，正常一拍可达 12+ 轮（规划/3段/3勾/修/ask/重拟/续写…）——
+// 12 轮在实弹中被正常演出耗尽（安全阀吞掉了第三段与状态栏）。20 = 正常上限 × 安全余量。
+export const MAX_ROUNDS = 20;
 
 /** @liyuan/ai Tool 的结构子集（parameters 用裸 JSON Schema，避免 src/ 依赖 typebox） */
 export interface StageTool {
@@ -85,8 +87,7 @@ export function writingGuideTool(language: string, topics: string[]): StageTool 
 		name: "writing_guide",
 		description:
 			`读取本预设附带的写作方法论（${language}）。可用主题：${topics.join(" / ")}。` +
-			`动笔前按本拍场景读相关主题一次，照着写即可。这是**参考不是验收清单**——` +
-			`字数/禁词/格式等机械纪律由验收器在交稿时程序化把关，不要在思考里逐条自查。`,
+			`演到相关段落时读对应主题一次，照着写即可——这是**参考不是验收清单**，机械纪律由剧场在交稿时程序化把关。`,
 		parameters: {
 			type: "object",
 			properties: { topic: { type: "string", enum: topics, description: "要读取的方法论主题" } },
@@ -102,17 +103,77 @@ export function writingGuideTool(language: string, topics: string[]): StageTool 
 export function writeTools(language: string): StageTool[] {
 	return [
 		{
+			name: "beat_plan",
+			description:
+				`列出这一拍要演的几步（${language}）——落笔前先在这里构思。` +
+				`每条写**这一步发生什么**，一句话的**抽象路标**（如「被值守弟子拦下」「褪衣取砚」），` +
+				`不写这一步怎么演（动作细节、神态、情绪、对白留给演到那一段时再想），也不写字数。` +
+				`2~8 条，几条就写几段。列路标时按本拍总字数把篇幅分配到各步（几步分几份，每段心里有数）。` +
+				`这是草图不是剧本：演到中途剧情走岔了，随时重调本工具改写剩下的步骤。`,
+			parameters: {
+				type: "object",
+				properties: {
+					steps: {
+						type: "array",
+						description: "本拍的步骤清单，每条一句话路标（不超过 60 字）",
+						items: { ...STR, description: "一步：一个动作或一个转折" },
+					},
+				},
+				required: ["steps"],
+			},
+		},
+		{
+			name: "beat_step_done",
+			description:
+				"勾掉计划里已经演完的一条（写完一段就勾一条；一段盖过几条就连着勾几条，不必分轮）。" +
+				"返回更新后的清单与剩余条数。",
+			parameters: {
+				type: "object",
+				properties: {
+					step: { type: "number", description: "要勾掉的步骤序号（从 1 开始）" },
+				},
+				required: ["step"],
+			},
+		},
+		{
+			name: "draft_append",
+			description:
+				`往下演一段（${language}）——你落笔的方式。` +
+				`在现稿末尾追加，不覆盖已写部分：交出去的就是已经发生的事，不会被打回。` +
+				`落笔前先在思考里想清这段的戏（人物此刻的状态、动作、对白、情绪），并回看已写内容重新评估：` +
+				`接下来要不要 ask 用户、剩余路标是否需要重拟、戏是否到停点。` +
+				`一段大约一个自然段就交。全部演完调用 draft_seal 收笔。`,
+			parameters: {
+				type: "object",
+				properties: {
+					segment: {
+						...STR,
+						description: "这一段正文（一个自然段，不含状态栏等格式区块）",
+					},
+				},
+				required: ["segment"],
+			},
+		},
+		{
 			name: "draft_write",
 			description:
-				`提交本拍正文（${language}）。这是**唯一交稿方式**——不调用此工具即无正文产出。` +
-				`全量替换语义：每次提交完整正文，覆盖上一稿。写完一稿就提交，验收报告会告诉你哪里要改；` +
-				`不要在思考里反复排练——先交稿，再按报告修。` +
+				`一次交完整拍正文（${language}），全量替换语义（覆盖上一稿）。` +
+				`只用于**这一拍没有戏**的时候：用户只是寒暄、确认、应一声，场面没有动。` +
+				`有戏的一拍用 draft_append 一段一段演。` +
+				`先落笔，再按验收报告改。` +
 				`**已有稿之后的局部修改一律用 draft_edit 定点改，不要重交全文。**`,
 			parameters: {
 				type: "object",
 				properties: { content: { ...STR, description: "完整正文（纯剧情文字，不含状态栏等格式区块）" } },
 				required: ["content"],
 			},
+		},
+		{
+			name: "draft_seal",
+			description:
+				"封笔：声明正文已全部写完，按完整稿验收（字数/禁词/模块/主权全量判定）。" +
+				"分段续写（draft_append）结束后必须调用本工具，否则本拍没有最终正文。",
+			parameters: { type: "object", properties: {}, required: [] },
 		},
 		{
 			name: "draft_edit",
@@ -183,6 +244,35 @@ export function writeTools(language: string): StageTool[] {
 					},
 				},
 				required: ["patch"],
+			},
+		},
+		{
+			name: "ask",
+			description:
+				"剧情共创决策（P7 接回）：把该由用户拍板的选择交给用户。三种触发：\n" +
+				"① **主动触发**（随时，含第 1 轮）：用户输入本身在求方向/递笔（「接下来去找谁」「怎么办」" +
+				"「给个选项」「让我选」）——这不需要上文支撑，直接问。\n" +
+				"② **变量触发**（演出中、落笔前）：剧情里的未定变量**此刻**要实际影响剧情了——即将落笔的段落" +
+				"取决于它（如：新人物如何对待用户取决于还没定的性格；神秘身份到了揭幕的关口）。" +
+				"判断是**动态的**：变量不因「新」而重要——新人物的性格/身份不是全都要问，洞府里不是每件资源" +
+				"都值得问；只在**它对当前剧情的影响程度大**（定不下来会显著改变后续怎么演）的时刻才升格为" +
+				"该问的变量，其余自己顺着演，不事事上报。禁止代写用户身份的完整档案、禁止替用户定重大变量。\n" +
+				"③ **末尾触发**（收笔评估时）：自然下文涉及用户的行动或选择。\n" +
+				"给出 2~4 个具体、可落地、彼此不同的选项（${language}），用户作答后按答案继续演。\n" +
+				"用户点了停止 = 笔还给用户，本拍就此收束。\n" +
+				"**选择框分流**：用户预设自带选择框格式（如 <w2g>）时，岔路与回合末选项**按预设格式写进正文**，" +
+				"不要调本工具；只有预设没有选择框格式时才用 ask。",
+			parameters: {
+				type: "object",
+				properties: {
+					question: { ...STR, description: "要交给用户定夺的问题（一句话说清当前局面）" },
+					options: {
+						type: "array",
+						description: "2~4 个具体选项（可落地、彼此不同）",
+						items: { ...STR, description: "一个选项" },
+					},
+				},
+				required: ["question", "options"],
 			},
 		},
 	];

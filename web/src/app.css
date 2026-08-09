@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    梨园 · 白瓷朱砂(F4 + 二次质感加厚)
    命题:明亮白色;层次与戏文感加强,布局结构不动
    · 宣纸底微纹理 + 暖白浮层,投影更深一档
@@ -9769,6 +9769,368 @@ label.drawer-btn {
 }
 .tbl-crumb-main {
 	font-size: 15px;
+	line-height: 1.55;
+}
+.msg-edit-ta:focus {
+	outline: none;
+	border-color: var(--accent);
+	box-shadow: 0 0 0 2px var(--accent-wash);
+}
+.msg-edit-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+.msg-edit-actions .drawer-btn {
+	min-width: 5.5em;
+}
+
+.act {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	background: none;
+	border: none;
+	color: var(--text-faint);
+	font-size: 12px;
+	cursor: pointer;
+	padding: 3px 4px;
+	border-radius: 6px;
+	text-decoration: none;
+	transition: color 0.15s;
+}
+.act:hover {
+	color: var(--accent);
+}
+.act:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+/* 桌面端消息操作按钮:悬停楼层时浮现,平时退场 */
+@media (hover: hover) {
+	.msg .msg-actions {
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+	.msg:hover .msg-actions,
+	.msg:focus-within .msg-actions {
+		opacity: 1;
+	}
+}
+
+.info-line {
+	text-align: center;
+	color: var(--text-faint);
+	font-size: 12.5px;
+	margin: 14px auto;
+	max-width: 80%;
+}
+
+.pulse {
+	animation: blink 1.6s infinite;
+}
+
+/* 空会话:品牌空态(serif 大字 + 朱砂印点 + 宣纸圈) */
+.empty-state {
+	text-align: center;
+	padding: 14vh 20px 0;
+	user-select: none;
+}
+.empty-brand {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 14px;
+	position: relative;
+	padding: 12px 20px 8px;
+}
+.empty-logo {
+	width: 96px;
+	height: 96px;
+	border-radius: 22px;
+	object-fit: contain;
+	background: var(--surface);
+	box-shadow: var(--shadow-2);
+}
+.empty-title {
+	font-family: var(--font-serif);
+	font-size: 28px;
+	font-weight: 600;
+	letter-spacing: 10px;
+	margin-left: 10px;
+	color: var(--text-strong);
+}
+.empty-hint {
+	margin-top: 8px;
+	color: var(--text-faint);
+	font-size: 13.5px;
+	letter-spacing: 0.04em;
+}
+
+/* 思维链:纯文本折叠(模型原始输出,与正文区隔) */
+.thinking {
+	margin: 0 0 10px;
+}
+.thinking summary {
+	cursor: pointer;
+	color: var(--text-em);
+	font-size: 12.5px;
+	user-select: none;
+	list-style: none;
+}
+.thinking summary::-webkit-details-marker {
+	display: none;
+}
+.thinking summary::before {
+	content: "▸ ";
+}
+.thinking[open] summary::before {
+	content: "▾ ";
+}
+.thinking summary:hover {
+	color: var(--text-soft);
+}
+.thinking-body {
+	color: var(--text-em);
+	font-size: 13px;
+	line-height: 1.75;
+	margin-top: 6px;
+	padding-left: 12px;
+	border-left: 2px solid var(--hairline);
+	/* 思维链常整段贴 URL/代码：禁止撑宽外层出横向滑动 */
+	word-break: break-word;
+	overflow-wrap: anywhere;
+}
+.thinking-body p {
+	margin: 0 0 0.5em;
+}
+
+/* 过程条:agent 工作过程折叠行(元信息层,与正文区隔) */
+.turn-activity {
+	margin-top: 9px;
+	border-top: 1px dashed var(--hairline);
+	padding-top: 7px;
+}
+
+/* 两层折叠(8/09):扮演中过程组(第一层,收紧轮次间距) + 定稿历程汇总(第二层) */
+.turn-process {
+	margin: 10px 0 0;
+	border-top: 1px dashed var(--hairline);
+	padding-top: 7px;
+}
+.turn-process summary {
+	cursor: pointer;
+	color: var(--text-faint);
+	font-size: 12px;
+	user-select: none;
+	list-style: none;
+}
+.turn-process summary::-webkit-details-marker {
+	display: none;
+}
+.turn-process summary::before {
+	content: "▸ ";
+}
+.turn-process[open] summary::before {
+	content: "▾ ";
+}
+.turn-process summary:hover {
+	color: var(--text-soft);
+}
+.turn-process-body {
+	margin-top: 6px;
+	padding-left: 10px;
+	border-left: 2px solid var(--hairline);
+}
+/* 组内的思考/工具行去掉各自的分隔线与大间距——间距由组统一管理,轮次贴紧 */
+.turn-process-body .thinking {
+	margin: 0 0 4px;
+}
+.turn-process-body .turn-activity {
+	margin-top: 0;
+	margin-bottom: 4px;
+	border-top: none;
+	padding-top: 0;
+}
+/* 扮演中组:行距更紧(流式跟读密度) */
+.turn-process-live {
+	margin: 6px 0;
+	border-top: none;
+	padding-top: 0;
+}
+.turn-activity summary {
+	cursor: pointer;
+	color: var(--text-faint);
+	font-size: 12px;
+	user-select: none;
+	list-style: none;
+}
+.turn-activity summary::-webkit-details-marker {
+	display: none;
+}
+.turn-activity summary::before {
+	content: "▸ ";
+}
+.turn-activity[open] summary::before {
+	content: "▾ ";
+}
+.turn-activity summary:hover {
+	color: var(--text-soft);
+}
+.turn-activity ul {
+	margin: 6px 0 0;
+	padding: 0;
+	list-style: none;
+}
+.turn-activity li,
+.sp-acts li {
+	font-size: 12px;
+	color: var(--text-soft);
+	margin: 4px 0;
+	line-height: 1.55;
+}
+.ta-call,
+.ta-result {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 6px 10px;
+}
+.ta-result {
+	color: var(--text-faint);
+	padding-left: 2px;
+}
+.ta-error {
+	color: var(--accent);
+}
+.ta-label {
+	flex: 0 0 auto;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--text-soft);
+	background: color-mix(in srgb, var(--surface-elevated, var(--surface)) 80%, var(--hairline));
+	border: 1px solid var(--hairline);
+	border-radius: 999px;
+	padding: 1px 8px;
+	line-height: 1.5;
+}
+.ta-detail {
+	flex: 1 1 12rem;
+	display: inline;
+	color: var(--text-soft);
+	word-break: break-word;
+	font-size: 12.5px;
+	line-height: 1.55;
+}
+.ta-detail-muted {
+	color: var(--text-faint);
+	font-style: italic;
+}
+
+.import-block {
+	background: color-mix(in srgb, var(--surface) 55%, transparent);
+	border: 1px dashed var(--hairline-strong);
+	border-radius: var(--radius);
+	padding: 11px 15px;
+	margin: 0 0 24px;
+	font-size: 13.5px;
+	line-height: 1.75;
+	color: var(--text-soft);
+}
+.import-block summary {
+	cursor: pointer;
+	color: var(--text-soft);
+	font-size: 13px;
+}
+
+/* 戏外轮分组:中间步骤区隔线 + 可折叠最终报告 */
+.bs-step {
+	padding: 8px 0;
+	border-bottom: 1px dashed var(--hairline-strong);
+}
+.bs-step:last-child {
+	border-bottom: none;
+}
+.bs-final > summary {
+	cursor: pointer;
+	color: var(--text-soft);
+	font-size: 13px;
+	user-select: none;
+}
+.bs-final[open] > summary {
+	margin-bottom: 4px;
+}
+
+/* 插图(show_image 交付):白卡装裱,与正文明确区隔 */
+.msg-image {
+	margin: 0 0 24px;
+	padding: 8px;
+	background: var(--surface);
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-1);
+	max-width: 480px;
+}
+.msg-image img {
+	display: block;
+	width: 100%;
+	border-radius: calc(var(--radius) - 5px);
+}
+.msg-image figcaption {
+	margin-top: 7px;
+	font-size: 12.5px;
+	color: var(--text-soft);
+	text-align: center;
+}
+
+/* ── 消息内附件(附件随消息):图片进对话显示,文件显示名+类型 ── */
+.msg-attach {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 2px 0 20px;
+}
+.msg-attach-img {
+	display: block;
+	max-width: 260px;
+	border: 1px solid var(--hairline);
+	border-radius: var(--radius);
+	overflow: hidden;
+	background: var(--surface);
+	box-shadow: var(--shadow-1);
+}
+.msg-attach-img img {
+	display: block;
+	width: 100%;
+	max-height: 320px;
+	object-fit: cover;
+}
+.file-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	max-width: 280px;
+	padding: 8px 12px;
+	background: var(--surface);
+	border: 1px solid var(--hairline-strong);
+	border-radius: var(--radius);
+	color: var(--text);
+	text-decoration: none;
+	font-size: 13.5px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	transition: border-color 0.15s;
+}
+.file-chip:hover {
+	border-color: var(--text-faint);
+}
+.file-ext {
+	flex: none;
+	font-size: 10px;
 	font-weight: 700;
 	color: #fff;
 	white-space: nowrap;

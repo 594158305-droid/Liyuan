@@ -176,7 +176,7 @@ test("extractDraftBody：剥标签模块与注释，只剩正文", () => {
 	assert.ok(!body.includes("检查表") && !body.includes("选项一") && !body.includes("🕰️"));
 });
 
-test("checkDraft：字数/禁词/句式/缺状态栏全报；通过态干净", () => {
+test("checkDraft：禁词/句式全报；状态栏与字数只提示不违规（8/09 末端修复删除）", () => {
 	const rules = extractDraftRules(
 		[
 			"字数限制：正文的字数控制在50-150字之间。",
@@ -192,8 +192,9 @@ test("checkDraft：字数/禁词/句式/缺状态栏全报；通过态干净", (
 	assert.ok(r1.violations.some((v) => v.includes("禁词「像是」")));
 	assert.ok(r1.violations.some((v) => v.includes("不是…是…")));
 	assert.ok(!r1.violations.some((v) => v.includes("<w2g>")), "格式栈块不再逼补（M-C）");
-	assert.ok(r1.violations.some((v) => v.includes("状态栏")));
-	assert.ok(r1.violations.some((v) => v.includes("下限")), "17 字低于 50 下限");
+	assert.ok(!r1.violations.some((v) => v.includes("状态栏")), "状态栏归输出层，不判稿纸违规（8/09）");
+	assert.ok(!r1.violations.some((v) => v.includes("下限")), "字数只提示不违规（8/09）");
+	assert.ok(r1.notes.some((n) => n.includes("下限")), "字数不足进 notes 提示");
 
 	const good =
 		"他看起来很平静，眼神里带着敬畏，手却收得很稳。灯芯晃了一下，他伸手拨正，指腹压住案上的纸角，把那句没说出口的话也一并压住了。窗外更声过了三巡。\n<state1>🕰️: x</state1>";
@@ -203,22 +204,71 @@ test("checkDraft：字数/禁词/句式/缺状态栏全报；通过态干净", (
 	assert.ok(formatDraftReport(r1).includes("draft_edit"));
 });
 
-test("checkDraft：自闭合占位符状态栏（<StatusPlaceHolderImpl/>）命中验收——不报缺状态栏", () => {
-	// 模拟修仙卡：findRegex 是自闭合占位符，界面由卡渲染——模型原样输出即可过验
+test("checkDraft：markdown 标题符号判违规——正文不是文档（8/09 实弹「### *啪……*」）", () => {
+	const rules = emptyDraftRules();
+	const bad = "他抬手落下。\n\n### *啪……啪……啪*\n\n她闷哼一声。";
+	const r1 = checkDraft(bad, rules);
+	assert.ok(
+		r1.violations.some((v) => v.includes("markdown 标题符号")),
+		"行首 # 号判违规（无预设也判——机械格式纪律）",
+	);
+	// 正文中非行首的 #（罕见）不误伤；状态栏标签块内的内容不参与（extractDraftBody 已剥）
+	const ok = "他抬手落下，啪、啪、啪，三声脆响。\n<StatusBlock>\n# 无关\n</StatusBlock>";
+	const r2 = checkDraft(ok, rules);
+	assert.ok(!r2.violations.some((v) => v.includes("markdown")), "标签块内与无标题正文不误伤");
+});
+
+test("checkDraft：比喻词复合词不误伤 + 违规带引文（8/09 实弹「摄像机」连修 9 轮）", () => {
+	const rules = emptyDraftRules();
+	rules.metaphorRule = true;
+	// 「摄像机」×2 + 「录像」「图像」——全是复合词，一处比喻都没有
+	const clean =
+		"长桌上架着一台摄像机。她跪到桌前。\n\n摄像机上的红灯亮起来。屏幕上的图像晃了晃，录像开始了。";
+	const r1 = checkDraft(clean, rules);
+	assert.ok(!r1.violations.some((v) => v.includes("比喻")), "复合词「摄像机/图像/录像」不计比喻");
+	// 真比喻照计，且违规文案带命中引文（模型不用盲猜位置）
+	const bad = "她站在那里，像一尊沉默的碑。\n他仿佛没听见。\n风好似停了。";
+	const r2 = checkDraft(bad, rules);
+	const v = r2.violations.find((x) => x.includes("比喻"));
+	assert.ok(v, "真比喻超限判违规");
+	assert.ok(v!.includes("像一尊沉默"), "违规带命中处引文");
+});
+
+test("checkDraft：状态栏不再参与验收（8/09：归输出层，mergeFinalText 拼接）", () => {
+	// 状态栏/格式模块彻底从稿纸验收摘除——无论缺不缺、什么形态，都不报
 	const rules = extractDraftRules([], ["`<StatusPlaceHolderImpl/>`"]);
 	assert.deepEqual(rules.statusBarTagGroup, ["StatusPlaceHolderImpl"]);
 
 	const withSelfClose = "正文一段。\n<StatusPlaceHolderImpl/>\n<catsay>点评</catsay>";
 	const r1 = checkDraft(withSelfClose, rules);
-	assert.ok(!r1.violations.some((v) => v.includes("状态栏")), "自闭合形态必须命中（8/05：否则验收逼模型展开成对写法）");
+	assert.ok(!r1.violations.some((v) => v.includes("状态栏")), "自闭合形态不报");
 
 	const withPaired = "正文一段。\n<StatusPlaceHolderImpl>\n地点：徐州城\n</StatusPlaceHolderImpl>";
 	const r2 = checkDraft(withPaired, rules);
-	assert.ok(!r2.violations.some((v) => v.includes("状态栏")), "成对形态照旧命中");
+	assert.ok(!r2.violations.some((v) => v.includes("状态栏")), "成对形态不报");
 
 	const missing = "只有正文。";
 	const r3 = checkDraft(missing, rules);
-	assert.ok(r3.violations.some((v) => v.includes("状态栏")), "真缺了才报");
+	assert.ok(!r3.violations.some((v) => v.includes("状态栏")), "缺了也不报——状态栏归输出层（8/09）");
+	assert.equal(r3.pass, true, "缺状态栏不再是稿纸违规");
+});
+
+test("checkDraft：比喻词只扫叙述层——对白里的「像」不计数（8/08 实弹回归）", () => {
+	const rules = extractDraftRules(["比喻使用原则：频率：5个段落内只允许使用1次比喻。"]);
+	// 实弹原形：三句对白全是人物在说「像」，叙述层一个比喻都没有。
+	// 旧规则计成 3 次并判违规，模型两段思考全花在跟计数搏斗、最后把对白改僵。
+	const dialogue = "“像吗？真的像吗？”她问。\n\n“像。”我说，“挺像回事的。”\n\n她笑了。";
+	const r = checkDraft(dialogue, rules);
+	assert.equal(r.violations.length, 0, "对白里的像不是作者在打比方");
+	assert.ok(!r.notes.some((n) => n.includes("比喻词")), "既不计数也不提示");
+
+	// 叙述层的真比喻照旧受管——修的是误判，不是把规则关掉
+	const narration = "夜像墨。\n\n风像刀。\n\n人像影。";
+	assert.ok(checkDraft(narration, rules).violations.some((v) => v.includes("比喻词 3 次")));
+
+	// 混合稿：只数叙述层那一处，对白不计入
+	const mixed = "夜像墨。\n\n“像吗？”她问。\n\n“像。”我说。";
+	assert.equal(checkDraft(mixed, rules).violations.length, 0);
 });
 
 test("checkDraft：比喻频率超限报违规，限内只进 notes", () => {
@@ -366,31 +416,33 @@ test("isAuditLine：动笔前一次性读题/规划不摘——只摘逐句逐�
 	assert.ok(isAuditLine("写完后检查：这段反应是否只是在表演人设标签？"));
 });
 
-test("checkDraft：字数偏差适度时降为 note，极端偏差才是 violation", () => {
+test("checkDraft：字数一律只提示不违规（8/09：末端修复删除，字数归规划层）", () => {
 	const rules = { ...emptyDraftRules(), wordRange: { min: 50, max: 60 } };
 
-	// 超标 33%（80 vs 60）→ 不到 50%，降为 note 不打回
+	// 超标 → note 不打回
 	const over = checkDraft("一".repeat(80), rules);
-	assert.ok(!over.violations.find((x) => x.includes("字")), "适度超标不应是 violation");
-	assert.ok(over.notes.find((x) => x.includes("上限")), "适度超标应出 note");
+	assert.ok(!over.violations.find((x) => x.includes("字")), "超标不应是 violation");
+	assert.ok(over.notes.find((x) => x.includes("上限")), "超标应出 note");
 
-	// 极端超标（200 vs 60 = 233%）→ violation
+	// 极端超标 → 也只是 note
 	const extreme = checkDraft("一".repeat(200), rules);
-	assert.ok(extreme.violations.find((x) => x.includes("上限")), "极端超标应是 violation");
+	assert.ok(!extreme.violations.find((x) => x.includes("上限")), "极端超标也不再是 violation（8/09）");
+	assert.ok(extreme.notes.find((x) => x.includes("上限")), "极端超标进 note");
 
-	// 不足 40%（30 vs 50）→ 不到 50%，降为 note
+	// 不足 → note 不打回
 	const under = checkDraft("一".repeat(30), rules);
-	assert.ok(!under.violations.find((x) => x.includes("字")), "适度不足不应是 violation");
-	assert.ok(under.notes.find((x) => x.includes("下限")), "适度不足应出 note");
+	assert.ok(!under.violations.find((x) => x.includes("字")), "不足不应是 violation");
+	assert.ok(under.notes.find((x) => x.includes("下限")), "不足应出 note");
 
-	// 极端不足（5 vs 50 = 90% 缺口）→ violation
+	// 极端不足 → 也只是 note
 	const extremeUnder = checkDraft("一".repeat(5), rules);
-	assert.ok(extremeUnder.violations.find((x) => x.includes("下限")), "极端不足应是 violation");
+	assert.ok(!extremeUnder.violations.find((x) => x.includes("下限")), "极端不足也不再是 violation（8/09）");
+	assert.ok(extremeUnder.notes.find((x) => x.includes("下限")), "极端不足进 note");
 });
 
 test("formatDraftReport：指路 draft_edit 定点改，不再说「重交全文」", () => {
 	const rules = { ...emptyDraftRules(), wordRange: { min: 500, max: 800 } };
 	const txt = formatDraftReport(checkDraft("短", rules));
-	assert.match(txt, /draft_edit/);
-	assert.match(txt, /不要重交全文/);
+	assert.match(txt, /核验通过/, "字数只提示 → 短稿仍通过核验（8/09）");
+	assert.ok(txt.includes("下限"), "字数提示仍在报告里");
 });

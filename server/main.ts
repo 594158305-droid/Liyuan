@@ -2994,6 +2994,9 @@ const stage = new StageEngine({
 		},
 		callTool: (serverId, toolName, args, signal) => getMcpHub(cwd).callTool(serverId, toolName, args, signal),
 	},
+	// P7 剧情决策门禁（ask 工具）：复用 Phase 4 柱 1 的选择卡通道——
+	// 弹卡 → 用户作答（选项原文/自由输入）回喂模型重拟计划；停止 → 本拍收束，笔还给用户。
+	askUser: (question, options, signal) => askChoice(question, options, undefined, signal),
 	// 媒体交付（8/06 重接）：show_image/audio/video/html + tts。
 	// 与 MCP 同源的断链——wire.ts 的消费端一直健在，缺的只是台上生产端。
 	media: true,
@@ -3062,6 +3065,8 @@ const stage = new StageEngine({
 		onTurnStart: () => broadcast({ type: "agent", state: "start" }),
 		onDelta: (kind, delta, draft, reset) =>
 			broadcast({ type: "delta", kind, delta, ...(draft ? { draft: true } : {}), ...(reset ? { reset: true } : {}) }),
+		onDraftResync: (segments) => broadcast({ type: "draft_resync", segments }),
+		onStreamClear: () => broadcast({ type: "stream", state: "clear" }),
 		onNotify: (level, text) => broadcast({ type: "notify", level, text }),
 		onActivity: (detail) => broadcast({ type: "activity", activity: { kind: "note", name: "stage", detail } }),
 		onTurnEnd: (info) => {

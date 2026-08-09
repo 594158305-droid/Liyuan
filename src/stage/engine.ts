@@ -70,6 +70,7 @@ import {
 	type MemoryHitLike,
 	type StageTool,
 	type StageToolDeps,
+	type ToolRunResult,
 } from "./tools.ts";
 import { unifiedStageToolNames } from "../tools/adapters/stage.ts";
 import {
@@ -86,9 +87,11 @@ import {
 } from "./media-stage.ts";
 import { assistantStageTool, runAssistantStageTool } from "./assistant-stage.ts";
 import type { MemoryChunkLike } from "../tools/memory.ts";
+import { extractDraftBody, hasFormatTag } from "../draft.ts";
 import {
 	createWorkspace,
 	finalTimeline,
+	splitDraftSegments,
 	projectedState,
 	recordSegment,
 	runWriteTool,
@@ -165,6 +168,18 @@ export interface StageEvents {
 	 * reset=true 表示本次调用的首个分片（前端据此清掉旧稿）。
 	 */
 	onDelta?: (kind: "text" | "thinking", delta: string, draft?: boolean, reset?: boolean) => void;
+	/**
+	 * 中间轮旁白清理：稿落地前的工具轮吐出的 text（读题/计划旁白）已流式上屏，
+	 * 但不是正文——通知前端把它收进过程条并从正文区移除（8/09 实弹：读题文字
+	 * 先挂在正文顶部、落树后又拼到正文尾部）。
+	 */
+	onStreamClear?: () => void;
+	/**
+	 * 稿件分段重同步（修复后）：前端把屏上全部稿段**原位**替换为 segments。
+	 * 与 onDelta 的稿件流互补——流式分片管「一段段长出来」，resync 管「原地变新」：
+	 * draft_edit 改稿成功后按当前稿全量重切下发，修后的段就是用户看到的段。
+	 */
+	onDraftResync?: (segments: string[]) => void;
 	onTurnEnd?: (info: StageTurnEndInfo) => void;
 	/** 面向用户的告警（宏降级等）；每种只发一次 */
 	onNotify?: (level: "info" | "warning" | "error", text: string) => void;
@@ -233,6 +248,13 @@ export interface StageEngineDeps {
 	media?: boolean;
 	/** TTS 环境是否就绪（未就绪则 tts 不上清单——依赖缺失的工具不上清单） */
 	ttsAvailable?: () => boolean;
+	/**
+	 * 剧情决策询问（ask 工具，P7 接回）：弹出选择卡等用户应答。
+	 * 应答 = 用户选择的选项原文（作为新输入回喂模型，计划据此重拟）；
+	 * undefined = 用户停止（笔还给用户，本拍收束）。
+	 * 未注入 = 台上无 ask 工具（依赖缺失的工具不上清单）。
+	 */
+	askUser?: (question: string, options: string[], signal?: AbortSignal) => Promise<string | undefined>;
 	streamFn: StageStreamFn;
 	events?: StageEvents;
 }
@@ -253,6 +275,109 @@ const textOfAssistant = (m: AssistantMsgLike | null): string => {
 		.join("")
 		.trim();
 };
+
+/**
+ * 轮次卡（P1 注入层）：按工作区状态给出「你现在在第几步」的显式信号。
+ *
+ * 对照 opencode 的 plan-mode / build-switch 每轮注入：模型从注入状态知道自己
+ * 在流程的哪个位置，而不是从静态系统提示词里猜。卡只在状态切换时注入一轮
+ * （见 agentLoop 的 lastCard 去重），不在历史里累积。
+ */
+function roundCardFor(
+	ws: TurnWorkspace,
+	userName: string,
+	wordRange?: { min: number; max: number },
+	statusBarTags?: string[],
+): string | undefined {
+	if (ws.plan.length === 0 && ws.draft.trim() === "") {
+		const range = wordRange ? `，本拍总字数约 ${wordRange.min}–${wordRange.max} 字，列路标时把字数分配到每一步（几步就分几份，心里有数）` : "";
+		return (
+			`【第 1 步·规划】你还没有落笔、也还没有计划。这一轮思考只做三件事：` +
+			`读题（谁在场、上文到哪、用户要什么）、探索（拿不准就查设定/记忆/账本）、` +
+			`列路标（\`beat_plan\`）${range}。\`beat_plan\` 被接受前，不要落任何正文。` +
+			`预设的文风与行为边界从落笔起生效，这一轮不用逐条读。\n` +
+			`用户输入本身在求方向/递笔的（「接下来去找谁」「给个选项」）——直接 \`ask\`，那不需要上文。` +
+			`读题发现的**未定型重大变量**（如新人物还没定的性格/立场）——不要脑补定型：记着它，` +
+			`演到它实际影响剧情的段落之前再 \`ask\` 请用户定（那时用户手里有上文才好选；哪些变量值得问是动态的，` +
+			`看它此刻对剧情的影响程度，不是新的就要问）。\n` +
+			`**路标只写到「发生什么」的抽象层**（如「被值守弟子拦下」「褪衣取砚」）——` +
+			`具体怎么演（动作的先后、神态的变化、对白的语气、情绪的流转）留给演到那一段时再想，` +
+			`不要在这一轮预演各段的细节。\n` +
+			`思考全程用中文，与正文同语言。`
+		);
+	}
+	if (ws.plan.length > 0 && ws.appends === 0 && ws.draft.trim() === "") {
+		return (
+			`【开工】计划已接受。从现在起进入演出：把自己当成一位资深作家，发挥强大的剧情构思能力，肆意展现你的文笔。` +
+			`按第一条未完成的演，一段一段交（\`draft_append\`，一个自然段就交）。正文只在稿纸上诞生。思考全程用中文，与正文同语言。`
+		);
+	}
+	// 修复卡（8/09 问题：修复注入缺失）：上一段验收出的违规未修，优先注入修复指令——
+	// 否则模型被「演段回看卡」的构思引导带走，把修复攒到末尾统一做（实弹：四段写完才修）。
+	// 修复是这一步唯一该做的事：先修干净，再谈下一段。
+	if (ws.appends > 0 && ws.pendingViolations.length > 0) {
+		return (
+			`【修复】上一段还有 ${ws.pendingViolations.length} 处未修：\n` +
+			ws.pendingViolations.map((v) => `- ${v}`).join("\n") +
+			`\n先用 \`draft_edit\` 逐处修掉（old 逐字引用现稿原文、须唯一，可一次给多处），` +
+			`验收过了再构思下一段——已经交给用户看的段落必须是定稿。\n思考全程用中文。`
+		);
+	}
+	// 谢幕卡（8/09 review）：已封笔后不再催演/催构思——sealed 语境下回看/续写/
+	// 收笔评估卡全部失效（实弹：seal 后的记账轮被回看卡催「构思下一段」）。
+	// 封笔后的剩余正务只有记账与谢幕：状态栏等格式块是本拍最后的产出。
+	if (ws.appends > 0 && ws.sealed) {
+		const sb =
+			statusBarTags && statusBarTags.length > 0
+				? `然后输出状态栏（${statusBarTags.map((t) => `<${t}>`).join(" 或 ")}）等格式块——` +
+					`状态栏意味着本拍结束，输出完即停`
+				: `没有格式块要输出就直接停笔`;
+		return `【谢幕】已封笔，不要再写正文。世界有变动就先 \`world_state_update\` 记账；${sb}。`;
+	}
+	if (ws.appends > 0 && ws.plan.some((s) => !s.done)) {
+		return (
+			`【演段回看】已演 ${ws.appends} 段。你需要在落笔前完成这一轮的工作：\n` +
+			`\u2460 回看：读一遍刚写下的段落，接住它的气口。\n` +
+			`\u2461 构思剧情走向：发挥自己职业作家的水平，思考这一段剧情往哪走、人物此刻的状态与下一步的抉择。\n` +
+			`\u2462 全力构思文笔：倾尽所有的去构思这一段怎么写得精彩——镜头、动作、感官细节、神态情绪、节奏、点睛。力求为用户提供最好的体验。\n` +
+			`\u2463 按需调写作方法论：写作上拿不准就调 \`writing_guide\` 读对应主题（general/nsfw），读完照着写。\n` +
+			`\u2464 重新评估：剧情到岔路就用 \`ask\` 问用户；路标不成立就重拟 \`beat_plan\`；戏到停点就收笔——收笔前先确认自然下文是否涉及 ${userName} 的行动或选择，涉及就先 \`ask\`，再 \`draft_seal\`（清单没勾完也没关系）。\n` +
+			`思考全程用中文。正文只在稿纸上写——思考里想戏与文笔，落笔交给 \`draft_append\`。`
+		);
+	}
+	// 路标已全部演完（或本来就没有计划）：这一拍的主体已完成。按字数决定去向——
+	// 字数不够 → 续写自然下文（8/09 定案：续写是「用户输入少 + 字数目标高」时的出口，
+	// 模型绞尽脑汁扩写不如承接世界书里的下一步；续写会自然走到岔路触发 ask，
+	// 也杜绝了「路标演完自由发散」——扶南女王那次就是没有续写出口、卡催构思导致的）。
+	// 字数达标 → 收笔评估。
+	const draftBodyChars = ws.draft.trim() ? extractDraftBody(ws.draft).replace(/\s+/g, "").length : 0;
+	if (ws.appends > 0) {
+		if (wordRange && draftBodyChars < wordRange.min) {
+			return (
+				`【续写】路标已全部演完，但本拍正文还没到目标（当前约 ${draftBodyChars} 字 / 目标 ${wordRange.min}–${wordRange.max} 字）。` +
+				`承接刚写下的，续写这一拍的自然下文——设定/世界书里的下一步（如「润墨之后的试墨」）。一段一段演。\n` +
+				`续写中涉及 ${userName} 的行动或选择，用 \`ask\` 停下来问；` +
+				`写到字数达标、戏到停点，用 \`draft_seal\` 收笔。` +
+				`状态栏等格式块是本拍**最后**的产出——续写全部完成之前不要输出。思考全程用中文。`
+			);
+		}
+		// 收笔评估卡（8/09 卡序纠正）：ask/续写判断必须在 seal **之前**——旧卡把
+		// 「到停点就 seal」排在第一步，模型照卡执行：封完笔才评估出「下文是用户的
+		// 行动、该 ask」，全成马后炮（实弹：想 ask 却已 seal，转头记账收场，
+		// ask 没发、状态栏也没了，还替用户把下一步演进了正文）。卡序 = 行为序。
+		return (
+			`【收笔评估】路标已全部演完，戏到了一个停点。按顺序评估，评估完再动手：\n` +
+			`① 这一拍的自然下文是否涉及 ${userName} 的行动或选择（如「润墨之后该试墨」）——` +
+			`涉及就先用 \`ask\` 问用户、按答案续写，此时不要收笔；\n` +
+			`② 不涉及，再看剧情是否停在 ${userName} 可以接话、可以行动的位置——不在就续写到停点；\n` +
+			`③ 以上都满足，\`draft_seal\` 收笔；\n` +
+			`④ 封笔之后最后一步：输出状态栏等格式块——状态栏意味着本拍结束，` +
+			`必须是这拍的最后产出（续写/ask 全部完成之前不要输出）。\n` +
+			`思考全程用中文。`
+		);
+	}
+	return undefined;
+}
 
 /**
  * 定稿合并：稿件为主体；text 通道里**格式特征**的尾巴（状态栏占位 / catsay / w2g…）
@@ -467,10 +592,12 @@ export class StageEngine {
 		const mediaTools = this.#deps.media ? mediaStageTools(config.language, mediaOpts) : [];
 		// 助手委托（8/06 重接）：runner 未注册时不上清单
 		const assistantTool = assistantStageTool();
+		// P7：ask 工具依赖宿主注入 askUser（选择卡通道）；未注入则从清单剔除
+		const askEnabled = !!this.#deps.askUser;
 		const tools = [
 			...stageTools(config.language, readDeps),
 			...(skillTopics.length > 0 ? [writingGuideTool(config.language, skillTopics)] : []),
-			...writeTools(config.language),
+			...writeTools(config.language).filter((t) => t.name !== "ask" || askEnabled),
 			...mediaTools,
 			...(assistantTool ? [assistantTool] : []),
 			...mcpTools,
@@ -514,8 +641,9 @@ export class StageEngine {
 			statusBarFormats: materials.statusBarFormats,
 			languageMismatch,
 			panelIndex,
-			// 默认关：high 档 3 轮对照实测无效（见契约 §6 提速实测）。显式置 true 才注入。
-			rehearsalGuard: config.rehearsalGuard === true,
+			// P14：rehearsalGuard 默认开——「思考的用法」是轮次纪律的一部分（只读题、
+			// 不排练正文）。显式置 false 才关闭（速度基线对照用）。
+			rehearsalGuard: config.rehearsalGuard !== false,
 			...(wsDeps.rules.wordRange ? { wordRange: wsDeps.rules.wordRange } : {}),
 			loreIndex: formatLoreIndex(materials.entries),
 			rosterIndex: formatRosterIndex(state),
@@ -529,7 +657,12 @@ export class StageEngine {
 		// 于是既不检索也不正面回应——8/03 实测：同一提问，挪到注入之后立刻触发 lorebook_search。
 		const endsWithUser = history[history.length - 1]?.role === "user";
 		const past = endsWithUser ? history.slice(0, -1) : history;
-		const tailText = endsWithUser ? `${injection}\n\n${history[history.length - 1].text}` : injection;
+		// P1 注入层：首轮（规划轮）卡并入注入块（用户话之前）——用户当拍的话必须保持
+		// 上下文最后一句（8/03 教训：注入块压提问之后，模型会把提问读成历史旧话）。
+		// 轮次卡是工作指令（如 opencode 的 system-reminder），随注入区在用户话前送达。
+		const firstCard = roundCardFor(ws, config.userName, wsDeps.rules.wordRange, wsDeps.rules.statusBarTagGroup);
+		const injWithCard = firstCard ? `${injection}\n\n${firstCard}` : injection;
+		const tailText = endsWithUser ? `${injWithCard}\n\n${history[history.length - 1].text}` : injWithCard;
 
 		const messages: unknown[] = [
 			// M4 前情提要：被 rp-summary 覆盖的早期剧情在此回读（历史里那段已整体不存在）。
@@ -608,6 +741,9 @@ export class StageEngine {
 			}
 		}
 
+		// 尾巴口径（8/09）：稿落地后的 text 通道产出。稿落地前工具轮的旁白（读题/计划）
+		// 不算——旁白曾被 mergeFinalText 当尾巴拼到正文尾部（实弹：读题文字跑进正文）。
+		let loopTail = "";
 		// M-A agent 循环（PLAN-RP-AGENT-EXEC §2.3）：思考→工具→看结果→再思考，直到交稿定稿。
 		// 首轮无论 stopReason 都进循环——模型直出正文不调工具时由循环做宽进严出代收（D2）。
 		if (!errored && final && final.stopReason !== "aborted") {
@@ -627,17 +763,25 @@ export class StageEngine {
 			if (turn.final) final = turn.final;
 			if (turn.errored) errored = turn.errored;
 			text += turn.text;
+			loopTail = turn.tailText ?? turn.text;
 		}
 
 		const aborted = final?.stopReason === "aborted";
 		if (!text) text = textOfAssistant(final);
+
+		// M-E 兜底封笔：分段续写完但模型始终没调 draft_seal（催告已给过一轮）。
+		// 不封笔的稿从未按完整稿验收过——此处程序化补一次，让字数/模块/主权
+		// 与一次性交稿走同一口径；报告只进日志，不再回喂模型（本拍已谢幕）。
+		if (ws.appends > 0 && !ws.sealed && ws.draft.trim()) {
+			runWriteTool(ws, wsDeps, "draft_seal", {});
+		}
 
 		// 定稿 = 工作区稿（工件）；工作区空（中断半拍/循环认栽）退回直出正文
 		// **但**模型常把格式栈尾巴（状态栏/catsay 等）走 text 通道而非 draft_write 参数：
 		// 二选一会把那部分连内容一起扔掉（8/05 实锤：模型宣告要出「正文+状态栏+咪咪点评」，
 		// draft_write 只交了正文，屏上流式见过三样、落树只剩一样）。故此处**合并**：
 		// 稿件为主体，text 里**格式特征**的尾巴补回（纯文本闲聊不进正文）。
-		const finalText = mergeFinalText(ws.draft, text);
+		const finalText = mergeFinalText(ws.draft, ws.draft.trim() ? loopTail : text);
 
 		// 落树：正文以定稿为准（保留思考块，剥离工具调用轨迹）；纯错误/空拍不落
 		let entryId: string | undefined;
@@ -823,7 +967,7 @@ export class StageEngine {
 		readDeps: StageToolDeps;
 		/** 首轮直出正文（调用方已流式外发） */
 		directText: string;
-	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string }> {
+	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string; tailText?: string }> {
 		const ev = this.#deps.events ?? {};
 		const readDeps = o.readDeps;
 		// 走 tools.ts 派发的工具（统一层世界书族/向量库族 + 台上读侧两件）；其余归工作区执行器。
@@ -846,7 +990,18 @@ export class StageEngine {
 		let text = "";
 		let nudged = false; // 逼稿/报告喂回各只给一轮机会，防空转
 		let tailPass = false; // 收尾放行（模型停手且有稿时，给一轮机会写格式栈尾巴）
+		let sealNudged = false; // 封笔催告（M-E：分段续写完但忘了 draft_seal），只给一轮
+		let askEarlyNudged = false; // ask 时机门禁：首轮无上文时暂缓一次，坚持再调放行（求选项例外）
+		let userStopped = false; // P7：用户在 ask 选择卡上点了停止——本拍收束
 		let lastConsumed = 0; // 本轮开始时 text 长度——判定「本轮新产出文本」用
+		// 稿首次落地时的 text 长度：之前的 text 是读题/计划旁白（工具轮的 text 通道产出），
+		// 不算正文也不算尾巴；之后的 text 才是尾巴候选（状态栏等）。-1 = 稿未落地。
+		let tailStart = -1;
+		// 尾巴口径：稿落地后的 text 通道产出（未落地=全量，直出正文路径要整段保留）
+		const tailOf = () => (tailStart >= 0 ? text.slice(tailStart) : text);
+		// P1 注入层：轮次卡去重——只在工作区状态跨卡类型切换时注入，历史不累积。
+		// 首轮（规划卡）已在装配时随 tailText 送达，这里从「开工」状态起跟踪。
+		let lastCard = o.ws.plan.length > 0 ? "open" : "plan";
 
 		for (let round = 0; round < MAX_ROUNDS; round++) {
 			lastConsumed = text.length; // 本轮之前的累计文本
@@ -865,8 +1020,45 @@ export class StageEngine {
 				// 故：有稿、本轮零产出、且上一轮思考宣告过写尾巴的意图时，
 				// 放行一轮收尾（tailPass 只给一次，防空转）。
 				if (o.ws.draft.trim()) {
-					if (text.trim()) break; // 本轮已有产出（可能正是尾巴）→ 正常谢幕
-					if (tailPass || (!hasTailIntent(last) && !hasTailIntent(o.first))) break;
+					// M-E：分段续写忘了封笔——稿在但从未按完整稿验收过。催一次封笔
+					// （只给一次，防空转）；仍不封则谢幕时兜底封笔，不让本拍丢正文。
+					if (o.ws.appends > 0 && !o.ws.sealed && !sealNudged) {
+						sealNudged = true;
+						convo.push(last);
+						convo.push({
+							role: "user",
+							content: [
+								{
+									type: "text",
+									text:
+										`你用 draft_append 续写了 ${o.ws.appends} 段但还没封笔。` +
+										`正文写完了就调用 draft_seal 按完整稿验收（字数/禁词/格式/主权全量判定）；还没写完就接着续写。`,
+								},
+							],
+							timestamp: Date.now(),
+						});
+						continue;
+					}
+					if (tailPass) break; // 谢幕轮只给一次，防空转
+					// 程序化谢幕（8/09 输出形式定案）：状态栏 = 本拍结束的标志，必须最后出现。
+					// 卡/预设定义了格式块而稿与 text 通道都还没出现过 → 必开一轮谢幕并点名清单，
+					// 不再靠思考关键词（hasTailIntent）碰运气——实弹：模型记完账思考里没提
+					// 状态栏三个字，直接收场，状态栏整拍蒸发。关键词判定仅兜「rules 没
+					// 提取到但模型自己宣告了尾巴」的残余场景。
+					// 首轮直出的正文（o.directText）也算已产出——寒暄拍模型第一轮就带状态栏时不再重催
+					const producedSoFar = `${o.ws.draft}\n${o.directText}\n${text}`;
+					const missingReq = o.wsDeps.rules.requiredTags.filter((t) => !hasFormatTag(producedSoFar, t));
+					const sbGroup = o.wsDeps.rules.statusBarTagGroup;
+					const sbMissing = sbGroup.length > 0 && !sbGroup.some((t) => hasFormatTag(producedSoFar, t));
+					const wanted = [
+						...(sbMissing ? [`状态栏（${sbGroup.map((t) => `<${t}>`).join(" 或 ")}）`] : []),
+						...missingReq.map((t) => `<${t}>`),
+					];
+					// 缺格式块时无论本轮有无产出都催（产出里已有就不算缺）；不缺按旧逻辑收场
+					if (wanted.length === 0) {
+						if (text.trim()) break; // 本轮已有产出（可能正是尾巴）→ 正常谢幕
+						if (!hasTailIntent(last) && !hasTailIntent(o.first)) break;
+					}
 					tailPass = true;
 					convo.push(last);
 					convo.push({
@@ -874,9 +1066,11 @@ export class StageEngine {
 						content: [
 							{
 								type: "text",
-								text:
-									`正文已收稿。若本拍还有正文之外的收尾内容（状态栏、点评等预设格式块），` +
-									`现在直接输出；没有则回空，本拍就此收束。`,
+								text: wanted.length
+									? `剧情已收笔。最后一步：输出 ${wanted.join("、")}——预设定义的谢幕格式块，` +
+										`在正文之外直接输出（不进稿纸），输出完本拍结束。不要再写正文。`
+									: `正文已收稿。若本拍还有正文之外的收尾内容（状态栏、点评等预设格式块），` +
+										`现在直接输出；没有则回空，本拍就此收束。`,
 							},
 						],
 						timestamp: Date.now(),
@@ -884,10 +1078,13 @@ export class StageEngine {
 				} else {
 				const direct = `${o.directText}${text}`.trim();
 				if (direct) {
-					// 宽进严出：直出正文代收为 draft_write（已流式外发过，不重复上屏）
-					const r = runWriteTool(o.ws, o.wsDeps, "draft_write", { content: direct });
+					// 宽进严出：直出正文代收为 draft_write（已流式外发过，不重复上屏）。
+					// internal=true 跳过门禁——代收是兜底，被拦下就等于把这拍正文丢了。
+					const r = runWriteTool(o.ws, o.wsDeps, "draft_write", { content: direct }, true);
 					ev.onActivity?.("直出正文已代收为 draft_write");
-					if (o.ws.lastGreen || nudged) break;
+					// 有计划 = 这拍有戏（8/09 实弹：列了 3 条路标却 385 字一次直出，代收全绿
+						// 静默放行，又短又糙还没状态栏）——即使全绿也喂一轮让模型自决续/收
+						if ((o.ws.lastGreen && o.ws.plan.length === 0) || nudged) break;
 					nudged = true;
 					convo.push(last);
 					convo.push({
@@ -897,7 +1094,10 @@ export class StageEngine {
 								type: "text",
 								text:
 									`你的正文已被代收为 draft_write（正文本应经此工具提交）。验收报告：\n${r.text}\n` +
-									`如需修改请调用 draft_write 重新提交完整正文；无需修改则直接结束。`,
+									(o.ws.plan.length > 0
+											? `你列了路标却把整拍一次直出——已代收，不推倒重来。接下来自决：` +
+												`戏还没演完就用 draft_append 接着演；演完了就输出状态栏等格式块（若本卡定义）收场。`
+											: `如需修改请调用 draft_write 重新提交完整正文；无需修改则直接结束。`),
 							},
 						],
 						timestamp: Date.now(),
@@ -910,7 +1110,13 @@ export class StageEngine {
 					convo.push({
 						role: "user",
 						content: [
-							{ type: "text", text: "你还没有交稿——必须调用 draft_write 提交本拍正文，否则本拍无产出。" },
+							{
+							type: "text",
+							text:
+								o.ws.lookups > 0
+									? "你还没有落笔——用 draft_append 一段一段演（一段约一个自然段），演完 draft_seal 收笔，否则本拍无产出。"
+									: "你还没有落笔——用 draft_append 演一段（这一拍没有戏才用 draft_write 一次交完），否则本拍无产出。",
+						},
 						],
 						timestamp: Date.now(),
 					});
@@ -918,11 +1124,185 @@ export class StageEngine {
 				}
 			} else {
 				convo.push(last);
+				// 演段轮连发门禁（8/08 晚定案）：同一轮生成里只允许演**一段**。
+				// 模型连发 append+done+append 时，轮次卡（下一轮才注入）追不上它——
+				// 「回看→重新评估→再演」必须在两次生成之间发生，不能靠工具连发绕过。
+				// 故：本轮已 append 过后，再来的 draft_append 拒收，回喂四问，强制停下思考。
+				let appendedThisRound = false;
 				for (const call of calls) {
 					const name = call.name ?? "";
+					// P7：ask 工具——弹出选择卡等用户应答，答案作为新输入回喂（计划据此重拟）。
+					// 用户停止（undefined）→ 本拍收束：不再续轮，直接以现稿定稿。
+					let r: ToolRunResult | MediaStageResult;
+					if (name === "ask" && this.#deps.askUser) {
+						// ask 时机门禁（8/09 三分类）：①主动触发（用户在求方向/递笔）随时可问，含第 1 轮；
+						// ②变量触发需要正文上文——没落笔时暂缓一次，导向「记着变量，演到跟前再问」。
+						// 引擎分不清 ①②（意图在用户输入里），故软硬结合：首拦一次；模型坚持再调
+						// ＝它判断属于①类（拒收文案已给出该例外），放行。
+						if (o.ws.appends === 0 && !o.ws.draft.trim() && !askEarlyNudged) {
+							askEarlyNudged = true;
+							r = {
+								text:
+									`还没落笔，暂缓一步：**变量类**的拍板要等用户看到段落上文才好选——记着这个变量，` +
+									`演到它实际影响剧情的段落之前再 ask。` +
+									`但如果用户本轮输入本身就是在求方向/递笔（「接下来去找谁」「给个选项」「让我选」），` +
+									`那属于主动触发、不需要上文——再调一次 ask 即可，会照常弹给用户。`,
+								activity: "ask 被暂缓（变量类需演出上文）",
+								ok: false,
+							};
+							ev.onActivity?.(r.activity);
+							recordSegment(o.ws, {
+								kind: "tool",
+								activity: { kind: "tool_start", name: "ask", detail: r.activity },
+							});
+							convo.push({
+								role: "toolResult",
+								toolCallId: call.id,
+								toolName: "ask",
+								content: [{ type: "text", text: r.text }],
+								isError: false,
+								timestamp: Date.now(),
+							});
+							continue;
+						}
+						const q = String(call.arguments?.question ?? "").trim() || "请你定夺";
+						const raw = call.arguments?.options;
+						const options = Array.isArray(raw)
+							? raw.map((s) => String(s).trim()).filter(Boolean)
+							: [];
+						// 停下来等用户：回合制共创，不设超时；abort 信号透传（用户点停止即收敛）
+						const answer = await this.#deps.askUser(q, options, this.#abort?.signal);
+						o.ws.lookups++; // 用户参与选择＝这一拍有戏（draft_write 门禁判据）
+						if (answer === undefined) {
+							// 用户停止：笔还给用户，本拍收束——标记后跳出循环
+							ev.onActivity?.(`ask「${q.slice(0, 24)}」· 用户停止`);
+							userStopped = true;
+							recordSegment(o.ws, {
+								kind: "tool",
+								activity: { kind: "tool_start", name: "ask", detail: "用户停止——笔还给用户" },
+							});
+							break;
+						}
+						r = {
+							text:
+								`用户已作答：「${answer}」。按这个答案继续演——` +
+								`如果它改变了剧情走向，先 beat_plan 重拟剩下的步骤再往下写。`,
+							activity: `ask「${q.slice(0, 24)}」· 用户作答`,
+						};
+						ev.onActivity?.(r.activity);
+						recordSegment(o.ws, {
+							kind: "tool",
+							activity: { kind: "tool_start", name: "ask", detail: r.activity },
+						});
+						convo.push({
+							role: "toolResult",
+							toolCallId: call.id,
+							toolName: "ask",
+							content: [{ type: "text", text: r.text }],
+							timestamp: Date.now(),
+						});
+						continue;
+					}
+					// 演段轮连发门禁（8/08 晚定案）：同一轮生成里只允许演**一段**。
+					// 模型连发 append+done+append 时，轮次卡（下一轮才注入）追不上——
+					// 「回看→重新评估→再演」必须在两次生成之间发生。本轮已 append 过，
+					// 再来的 draft_append 拒收并回喂四问，强制模型停下思考再生成。
+					if (name === "draft_append" && appendedThisRound) {
+						r = {
+							text:
+								`已收上一段。同一轮里只演一段——先回看刚写下的，重新评估：` +
+								`这段的戏接下去怎么演、要不要 \`ask\` 用户（剧情到岔路了吗）、` +
+								`剩余路标还成立吗（不成立就 \`beat_plan\` 重拟）、戏到停点了吗。` +
+								`想清楚，下一轮再落下一段。`,
+							activity: "同轮连演被拦下（需回看思考）",
+							ok: false,
+						};
+						ev.onActivity?.(r.activity);
+						recordSegment(o.ws, {
+							kind: "tool",
+							activity: { kind: "tool_start", name, detail: r.activity },
+						});
+						convo.push({
+							role: "toolResult",
+							toolCallId: call.id,
+							toolName: name,
+							content: [{ type: "text", text: r.text }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						continue;
+					}
+					// 演段轮零思考门禁（8/08 晚定案）：上一条消息没有思考就 append，
+					// 说明没承接路标想「这段怎么演」——拒收一次，回喂承接指引。
+					// 判定看 last.content 是否含 thinking 块（思考+工具同轮输出也算有思考——
+					// 8/08 修：thinking_delta 可能不走流式而随消息到达，上一轮 stream 统计会漏判）。
+					// 只拦「续写第二段及以后」：首段前有第 1 轮的大构思，不算零思考。
+					const lastHadThink = (last.content ?? []).some(
+						(c) => c.type === "thinking" && (c.thinking ?? "").trim().length > 0,
+					);
+					if (name === "draft_append" && o.ws.appends > 0 && !lastHadThink) {
+						r = {
+							text:
+								`未收段。你上一轮没有思考就直接落笔——路标只说「发生什么」，` +
+								`这一段的**戏与文笔**要在落笔前想清楚：镜头从哪开、动作怎么拆、` +
+								`感官细节（光线/声音/气味/触感）、人物此刻的状态与神态、` +
+								`节奏松紧与对白语气、有没有一个细节立住这一段。` +
+								`回看刚写下的，承接路标把这一段写好，想好了再交。`,
+							activity: "零思考落笔被拦下（需承接路标）",
+							ok: false,
+						};
+						ev.onActivity?.(r.activity);
+						recordSegment(o.ws, {
+							kind: "tool",
+							activity: { kind: "tool_start", name, detail: r.activity },
+						});
+						convo.push({
+							role: "toolResult",
+							toolCallId: call.id,
+							toolName: name,
+							content: [{ type: "text", text: r.text }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						continue;
+					}
+					// 演段轮未修违规门禁（8/08 晚定案 + 8/09 收紧）：
+					// 上一段验收出的违规未修掉就不许**任何推进**（append/done/seal）——
+					// 用户看到的每一段，在他看下一段之前必须是最终形态。
+					// 8/09：原来只拦 append，模型照样勾步/封笔把修复拖走；现在
+					// 只放行修复相关（draft_edit/draft_write）与只读（read/search/check）。
+					// 修复是写段后的固定下一步：写完 → 报告 → 只能修 → 替换上屏 → 才继续。
+					const ADVANCE_TOOLS = new Set(["draft_append", "beat_step_done", "draft_seal"]);
+					if (ADVANCE_TOOLS.has(name) && o.ws.pendingViolations.length > 0) {
+						r = {
+							text:
+								`${name === "draft_append" ? "未收段" : name === "draft_seal" ? "未封笔" : "未勾步"}。` +
+								`上一段还有 ${o.ws.pendingViolations.length} 处未修：\n` +
+								o.ws.pendingViolations.map((v) => `- ${v}`).join("\n") +
+								`\n先用 \`draft_edit\` 逐处修掉（old 逐字引用现稿原文、须唯一，可一次给多处），` +
+								`验收过了再继续——已经交给用户看的段落必须是定稿。`,
+							activity: `推进被拦下（${o.ws.pendingViolations.length} 处未修）`,
+							ok: false,
+						};
+						ev.onActivity?.(r.activity);
+						recordSegment(o.ws, {
+							kind: "tool",
+							activity: { kind: "tool_start", name, detail: r.activity },
+						});
+						convo.push({
+							role: "toolResult",
+							toolCallId: call.id,
+							toolName: name,
+							content: [{ type: "text", text: r.text }],
+							isError: false,
+							timestamp: Date.now(),
+						});
+						continue;
+					}
+					if (name === "draft_append") appendedThisRound = true;
 					// 三态路由 +MCP：统一层/台上读侧 → tools.ts；MCP 外设 → hub；其余 → 工作区。
 					// MCP 走网络/子进程，可能很慢——把本拍 abort 信号透传下去，用户点停止能立刻中断。
-					const r = name === "assistant_run"
+					r = name === "assistant_run"
 						? ((await runAssistantStageTool(name, call.arguments ?? {}, this.#abort?.signal)) ?? {
 								text: `未知工具「${name}」。`,
 								isError: true,
@@ -940,7 +1320,7 @@ export class StageEngine {
 										isError: true,
 									})
 								: READ_TOOLS.has(name)
-									? await runStageTool(readDeps, name, call.arguments ?? {}, o.language)
+									? await this.#runReadTool(o, readDeps, name, call.arguments ?? {})
 									: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
 					// 媒体交付要落成 toolResult 条目（wire 只认树上的 toolResult 出媒体帧）——
 					// 台上引擎默认剥离工具轨迹，故在此单独收集，谢幕后随正文一起落树。
@@ -948,6 +1328,12 @@ export class StageEngine {
 					if (MEDIA_TOOLS.has(name) && mediaDetails && (r as MediaStageResult).isError !== true) {
 						o.ws.mediaDeliveries = o.ws.mediaDeliveries ?? [];
 						o.ws.mediaDeliveries.push({ toolName: name, details: mediaDetails, text: r.text });
+					}
+					// 每轮修复可见性（8/09 输出形式定案）：draft_edit 修改后**分段重同步**——
+					// 前端把全部稿段原位替换成修后分段，该段原地变新，无重复、不塌段。
+					// （旧做法发「全稿 + reset」只替换末段，前面稿段还在屏上 → 正文重复。）
+					if (name === "draft_edit" && r.ok !== false && o.ws.draft.trim()) {
+						ev.onDraftResync?.(splitDraftSegments(o.ws.draft));
 					}
 					// 时间线：工具按调用位置入档（draft_write/edit 的正文另由 #recordDraft 记）
 					recordSegment(o.ws, { kind: "tool", activity: { kind: "tool_start", name, detail: r.activity ?? "" } });
@@ -964,18 +1350,79 @@ export class StageEngine {
 				}
 			}
 
+			// P7：用户停止（ask 卡上点了停止）——本拍收束，不再续轮
+			if (userStopped) break;
+
+			// 中间轮旁白（8/09 实弹）：稿落地前、工具轮里流出的 text 是读题/计划旁白——
+			// 通知前端清掉（收进过程条）；tailStart 一旦标记（稿已落地），之后的 text
+			// 归尾巴候选，不再清（状态栏后调记账的场景，状态栏不能被当旁白删掉）。
+			// round 0 的旁白在 performTurn 首轮流里（o.directText），不在本层 text 统计中。
+			if (tailStart < 0) {
+				const talked = text.length > lastConsumed || (round === 0 && o.directText.trim().length > 0);
+				if (calls.length > 0 && talked) ev.onStreamClear?.();
+				if (o.ws.draft.trim()) tailStart = text.length;
+			}
+
 			// 安全阀最后一轮撤掉工具：模型只能收笔（触阀后以现稿/直出定稿）
 			const lastRound = round >= MAX_ROUNDS - 1;
 			const ctx: Record<string, unknown> = { systemPrompt: o.systemPrompt, messages: convo };
 			if (!lastRound) ctx.tools = o.tools;
+			else {
+				// 8/09：撤工具的同时必须告知收场（实弹：轮次耗尽后模型不明所以干想一轮
+				// 散场，状态栏没了）——点名输出格式块，这一轮产出走 text 通道拼进定稿。
+				const sbG = o.wsDeps.rules.statusBarTagGroup;
+				const sbNote =
+					sbG.length > 0 && !sbG.some((t) => hasFormatTag(`${o.ws.draft}\n${text}`, t))
+						? `直接输出状态栏（${sbG.map((t) => `<${t}>`).join(" 或 ")}）等格式块收场——不要再写正文。`
+						: `就此收场，不要再写正文。`;
+				convo.push(nowMsg(`【收场】本拍轮次已达上限，工具已收起。${sbNote}`));
+			}
+
+			// P1 注入层：按工作区状态注入当前轮次卡。
+			// 规划/开工卡：状态切换才注入一次（一次性指令）。
+			// 演段回看卡 / 收笔评估卡：**每轮都注入**——循环指令，每轮重新看到
+			// （8/08 修：旧逻辑只切一次，模型后面几轮看不到评估指令）。
+			// 用替换语义防累积：推新卡前把上一张卡从 convo 里移除。
+			const card = roundCardFor(o.ws, o.wsDeps.userName, o.wsDeps.rules.wordRange, o.wsDeps.rules.statusBarTagGroup);
+			const hasPending = o.ws.plan.some((s) => !s.done);
+			const draftBodyChars = o.ws.draft.trim() ? extractDraftBody(o.ws.draft).replace(/\s+/g, "").length : 0;
+			const wordRange = o.wsDeps.rules.wordRange;
+			// 修复态优先：有未修违规 → "fix"（修复卡，先修再演）
+			const fixing = o.ws.appends > 0 && o.ws.pendingViolations.length > 0;
+			// 续写态：路标演完但字数未达标——cardKind 归 "extend"，走替换语义
+			const extending = !fixing && o.ws.appends > 0 && !hasPending && !!wordRange && draftBodyChars < wordRange.min;
+			const cardKind = o.ws.appends > 0
+				? fixing ? "fix" : o.ws.sealed ? "curtain" : extending ? "extend" : hasPending ? "review" : "seal"
+				: o.ws.plan.length > 0 ? "open" : "plan";
+			if (card) {
+				if (cardKind === "review" || cardKind === "seal" || cardKind === "extend" || cardKind === "fix" || cardKind === "curtain") {
+					// 替换上一张卡（找最后一个 role=user 且以各卡名开头）
+					for (let k = convo.length - 1; k >= 0; k--) {
+						const msg = convo[k] as { role?: string; content?: Array<{ type?: string; text?: string }> };
+						const txt = Array.isArray(msg.content)
+							? msg.content.map((c) => c.text ?? "").join("")
+							: "";
+						if (msg.role === "user" && (txt.includes("【演段回看】") || txt.includes("【收笔评估】") || txt.includes("【续写】") || txt.includes("【修复】") || txt.includes("【谢幕】"))) {
+							convo.splice(k, 1);
+							break;
+						}
+					}
+					convo.push(nowMsg(card));
+				} else if (cardKind !== lastCard) {
+					lastCard = cardKind;
+					convo.push(nowMsg(card));
+				}
+			}
 
 			const s = this.#deps.streamFn(o.model, ctx as never, o.options);
 			let final: AssistantMsgLike | null = null;
 			const fwd = this.#draftForwarder();
+			// thinking_delta 入时间线（思考→工具→正文全链）。零思考门禁的判定
+			// 看 last.content 是否含 thinking 块（见 append 拦截处），不在流式层统计。
 			for await (const e of s) {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
-					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text };
+					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text, tailText: tailOf() };
 				} else if (e.type === "text_delta" && e.delta) {
 					text += e.delta;
 					// 稿已存在后的正文外产出（状态栏/catsay 等格式尾巴）入时间线按序记档；
@@ -989,41 +1436,70 @@ export class StageEngine {
 					fwd(e);
 				}
 			}
-			if (!final) return { final: last, text };
+			if (!final) return { final: last, text, tailText: tailOf() };
 			last = final;
 			if (final.stopReason === "aborted") break;
 		}
-		return { final: last, text };
+		return { final: last, text, tailText: tailOf() };
 	}
 
 	/**
-	 * D1：draft_write 的 content 参数流式转发——工件正文照常逐字上屏。
+	 * 台上读侧工具，并把「查过世界」记进工作区。
+	 *
+	 * lookups 是 draft_write 门禁的判据（见 workspace.ts runWriteTool）：查过设定/旧账/
+	 * 账本＝这一拍中途确实有要停下来处理的事＝有戏，本该一段一段演。
+	 * writing_guide 读的是写作方法论而非世界事实，不计入。
+	 */
+	async #runReadTool(
+		o: { ws: TurnWorkspace; language: string },
+		readDeps: StageToolDeps,
+		name: string,
+		args: Record<string, unknown>,
+	): Promise<ToolRunResult> {
+		if (name !== "writing_guide") o.ws.lookups++;
+		return runStageTool(readDeps, name, args, o.language);
+	}
+
+	/**
+	 * D1：draft_write / draft_append 的正文参数流式转发——工件正文照常逐字上屏。
 	 * toolcall_delta 用渐进解析的 arguments（openai-completions 每帧重解 partialArgs）；
 	 * toolcall_end 兜底补齐后缀（faux 等不做渐进解析的 provider 在此整段上屏）。
 	 * 每条流各建一个（sent 按 contentIndex 记已发长度，保证不重发）。
+	 *
+	 * M-E：draft_append 是**追加**语义，reset 必须为 false——已上屏的段落是
+	 * 已经发生的事，续写不能把它擦掉重排（那正是分段续写要消除的体验）。
 	 */
 	#draftForwarder(): (e: StageStreamEvent) => void {
 		const ev = this.#deps.events ?? {};
 		const sent = new Map<number, number>();
-		const forward = (idx: number, content: unknown) => {
+		const forward = (idx: number, content: unknown, append = false) => {
 			if (typeof content !== "string") return;
 			const prev = sent.get(idx) ?? 0;
 			if (content.length <= prev) return;
 			// draft=true：稿件流是替换语义（重交不叠加）——与 runWriteTool 的
 			// replaceDraftSegment 同语义，wire 层透传给前端时间线。
 			// reset=true：本次 draft_write 调用的首个分片——前端用它清掉旧稿。
-			const isFirst = !sent.has(idx);
+			const isFirst = !append && !sent.has(idx);
 			ev.onDelta?.("text", content.slice(prev), true, isFirst);
 			sent.set(idx, content.length);
+		};
+		/** 取正文参数：draft_write 用 content，draft_append 用 segment */
+		const pick = (name: string | undefined, args: Record<string, unknown> | undefined) => {
+			if (name === "draft_write") return { text: args?.content, append: false };
+			if (name === "draft_append") return { text: args?.segment, append: true };
+			return undefined;
 		};
 		return (e) => {
 			const idx = e.contentIndex;
 			if (typeof idx !== "number") return;
 			if (e.type === "toolcall_delta") {
 				const block = e.partial?.content?.[idx];
-				if (block?.type === "toolCall" && block.name === "draft_write") forward(idx, block.arguments?.content);
+				if (block?.type !== "toolCall") return;
+				const p = pick(block.name, block.arguments);
+				if (p) forward(idx, p.text, p.append);
 			} else if (e.type === "toolcall_end") {
-				if (e.toolCall?.name === "draft_write") forward(idx, e.toolCall.arguments?.content);
+				const p = pick(e.toolCall?.name, e.toolCall?.arguments);
+				if (p) forward(idx, p.text, p.append);
 			}
 		};
 	}

@@ -88,8 +88,8 @@ import {
 	appendActivity,
 	appendDelta,
 	concatSegments,
-	dropTrailingText,
 	pruneEmpty,
+	resyncDraftSegs,
 	segmentsFromLegacy,
 	trailingText,
 	type TurnSegment,
@@ -568,9 +568,11 @@ export default function App() {
 	const pushSegDelta = (kind: "text" | "thinking", delta: string, draft?: boolean, reset?: boolean) => {
 		setSegs(appendDelta(turnSegsRef.current, kind, delta, draft, reset));
 	};
-	/** 丢弃末尾中间态正文段（stream:clear）：思考段与工具段是过程记录，保留 */
+	/** 丢弃旁白正文段（stream:clear）：稿段是作品一概保留；非稿 text 段全清——
+	 * 台上引擎只在稿落地前发 clear（那时不存在合法尾巴段，所有非稿段都是读题/计划旁白），
+	 * 状态栏等尾巴产出于稿落地后，不会被误删。 */
 	const dropSegDraft = () => {
-		setSegs(dropTrailingText(turnSegsRef.current));
+		setSegs(turnSegsRef.current.filter((s) => !(s.kind === "text" && s.draft !== true)));
 	};
 	const resetSegs = () => {
 		setSegs([]);
@@ -835,6 +837,11 @@ export default function App() {
 						setStreamThinking(streamThinkingRef.current);
 					}
 					pushSegDelta(frame.kind, frame.delta, frame.draft, frame.reset);
+					break;
+				case "draft_resync":
+					// 修复后的稿件分段重同步：全部稿段原位替换成修后分段（该段原地变新）
+					if (abortingRef.current) break;
+					setSegs(resyncDraftSegs(turnSegsRef.current, frame.segments));
 					break;
 				case "stream":
 					// 中间 tool 轮被 server 过滤：计划旁白留档进过程清单，再清流式半成品
