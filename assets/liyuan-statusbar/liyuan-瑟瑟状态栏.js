@@ -8,7 +8,9 @@
 //           布局定位形态（fixed 悬浮）→ 不追求复刻，append 内嵌。
 
 // ---------- 0. Liyuan 面板注册（V1/P2 通道） ----------
-TavernHelper.registerLedgerPanel({ title: "瑟瑟状态栏", icon: "✨", area: "status", maxHeight: 480 });
+// maxHeight: 99999 → 宿主钳制 Math.min(上报内容高, maxHeight) 退化为「内容全高」，
+// iframe 内部无溢出、无内部滚动条；滚动由外层 .status-card（max-height:50vh; overflow-y:auto）统一承担。
+TavernHelper.registerLedgerPanel({ title: "瑟瑟状态栏", icon: "✨", area: "status", maxHeight: 99999 });
 
 // ---------- 1. tavern_events 常量表（G6 缺口补齐：bundle 用全局 tavern_events.X） ----------
 window.tavern_events = {
