@@ -341,6 +341,65 @@ window.TavernHelper = new Proxy({}, {
 	});
 })();
 
+// 4e. SillyTavern 增强（地图树状态持久化桥，宿主零改动）：
+//     地图模块（模块 118）把地图树索引存 UnifiedStatusbar_StoryState_v1（聊天消息状态），
+//     经 saveChat 持久化；Liyuan 桥的 saveChat 是 no-op → 写回失败 → 弹空候选框
+//     （用户实测 bug）。这里覆盖 window.SillyTavern：getContext 从 localStorage 恢复状态
+//     到最后一条 chat 消息、saveChat 把状态持久化到 localStorage（沙箱代理可用）——
+//     读写闭环打通，地图创建成功不再弹空框。
+(function __lyInstallSTBridge() {
+	const KEY = "UnifiedStatusbar_StoryState_v1";
+	const LS_KEY = "liyuan-statusbar-storystate";
+	let __lyChatCache = null;
+	const __lyDesc = Object.getOwnPropertyDescriptor(window, "SillyTavern");
+	const __lyBaseGet = __lyDesc && typeof __lyDesc.get === "function" ? __lyDesc.get : () => ({});
+	try {
+		Object.defineProperty(window, "SillyTavern", {
+			configurable: true,
+			get() {
+				const base = __lyBaseGet() || {};
+				return {
+					...base,
+					getContext: () => {
+						const ctx = typeof base.getContext === "function" ? base.getContext() : {};
+						let chat = Array.isArray(ctx.chat) ? ctx.chat.map((m) => ({ ...m })) : [];
+						try {
+							const saved = localStorage.getItem(LS_KEY);
+							if (saved && chat.length) {
+								chat[chat.length - 1] = {
+									...chat[chat.length - 1],
+									[KEY]: JSON.parse(saved),
+								};
+							}
+						} catch (e) {}
+						__lyChatCache = chat;
+						return {
+							...ctx,
+							chat,
+							saveChat: () => {
+								try {
+									const last = __lyChatCache && __lyChatCache[__lyChatCache.length - 1];
+									if (last && last[KEY]) localStorage.setItem(LS_KEY, JSON.stringify(last[KEY]));
+								} catch (e) {}
+								return true;
+							},
+						};
+					},
+					saveChat: () => {
+						try {
+							const last = __lyChatCache && __lyChatCache[__lyChatCache.length - 1];
+							if (last && last[KEY]) localStorage.setItem(LS_KEY, JSON.stringify(last[KEY]));
+						} catch (e) {}
+						return true;
+					},
+				};
+			},
+		});
+	} catch (e) {
+		console.warn("[liyuan-瑟瑟状态栏] SillyTavern 增强失败", e);
+	}
+})();
+
 // 4b. Vue 全局注入（bundle 引用 ST 宿主全局 Vue；Liyuan iframe 无——异步加载 CDN 后注入 bundle）
 const __liyuanLoadScript = (src) =>
 	new Promise((resolve) => {
