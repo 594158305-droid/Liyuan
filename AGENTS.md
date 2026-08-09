@@ -8,13 +8,17 @@
 npm run web           # 启动服务（node server/main.ts，cwd 必须为 Liyuan/ 根；默认 0.0.0.0:7620，HOST/PORT 可覆盖）
 npm run web:new       # 开新会话（--new 标志）
 npm run web:build     # 构建前端（web/dist）；server 托管 web/dist，改前端后必须重新构建
-npm run web:dev       # Vite 热更新；/ws 代理到 127.0.0.1:7620，需另开终端先跑 npm run web
+npm run web:dev       # Vite 热更新；/ws 与 /healthz 代理到 localhost:7620，需另开终端先跑 npm run web
 npm --prefix web run typecheck   # 唯一可用的类型检查（web 有 tsconfig；仓库根无 tsconfig、无 lint）
 npm run pack:release  # 出发布包（scripts/pack-release.ps1，输出到仓库上级 _release/，需先有 web/dist）
+npm run pack:release:windows|linux|macos   # 单平台发布包
 ```
 
-- 测试：`npm test`（`node --test test/*.test.ts`）当前仓库无 `test/` 目录，匹配 0 个文件（退出码 0）。README 提到的 `node scripts/smoke-web.mjs` 也不存在。不要依赖测试保障；改完用手动起服务验证。
-- 服务无鉴权、默认绑 0.0.0.0：只准局域网/本机使用，禁止裸暴露公网。
+- 测试：`npm test`（`node --test test/*.test.ts`）**现在会跑真实测试**——`test/` 下约 70 个文件。本地实测 381 过 / 4 挂：`test/lorebook.test.ts` 的 3 个用例依赖 gitignore 的 fixture `assets/lorebooks/Mistvale.json`（本机缺失 → ENOENT）；`test/assistant-gateway.test.ts` 的「globalThis 槽」1 个用例与实现不符。**别把 npm test 当绿灯**，改完仍用手动起服务验证。
+- Web 冒烟：`node scripts/smoke-web.mjs`（无 LLM，CI 用）；`scripts/drive-*.mjs` 是各功能的手动驱动/冒烟脚本。
+- CI：`.github/workflows/ci.yml`——`npm test` 跑 ubuntu/windows/macos（node 22）；`smoke-web` 跑 ubuntu/macos；`start.sh`/`start.command` 在 macos 校验可执行与 LF。`web/` 是独立 package（有自己的 `web/package-lock.json`），CI 里 `npm --prefix web ci` 单独装前端依赖。
+- `TESTING.md` 是内测说明（反馈模板、已知边界）。
+- 服务无鉴权、默认绑 0.0.0.0：只准局域网/本机使用，禁止裸暴露公网。VPS 部署见 `deploy/`（install.sh / README.md）。
 
 ### Windows 下启动服务验证的正确姿势（血泪教训，别再踩）
 
@@ -58,7 +62,7 @@ if ($old) { Stop-Process -Id $old.OwningProcess -Force }
 > **完整架构设计文档**：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（分层分域、职责、数据流、外部依赖）
 
 - `src/` — 领域层，纯 TS，**禁止接触 `@liyuan/agent-runtime`（pi）API**。
-- `.liyuan/extensions/roleplay.ts` — 接线层，全仓库**唯一**允许挂载 pi API 的地方（D3 规则，约 2300 行）：组装 system prompt、注册全部剧情工具、会话钩子、每轮记账/一致性审计。加新工具主要改这里。
+- `.liyuan/extensions/roleplay.ts` — 接线层，全仓库**唯一**允许挂载 pi API 的地方（D3 规则，约 2000 行）：组装 system prompt、注册全部剧情工具、会话钩子、每轮记账/一致性审计。加新工具主要改这里。
 - `server/main.ts` — Web 宿主，除接线层外唯一可碰 pi API 的文件，且只许碰会话托管面；REST `/api/*` + 托管 `web/dist` + 健康检查。前端只见 wire 协议：`server/wire.ts` ↔ `web/src/wire.ts`（改协议两端同步）。
 - `web/` — React 19 + Vite 前端，面板组件在 `web/src/components/`。
 - `packages/` — `@liyuan/*` 是 pi（earendil-works/pi）的冻结 fork，`file:` 本地依赖。视为上游只读，尽量不改；确要改须同步 fork 上游语义。
@@ -72,6 +76,10 @@ if ($old) { Stop-Process -Id $old.OwningProcess -Force }
 - 自定义 agent：`liyuan.config.json` 的 `agents` 段声明（id/name/model/prompt/tools/bridge 权限），启动时建 host、会话在 `.liyuan-agents/<id>/`；UI 管理入口在右栏助手面板「管理」（详见 `docs/DESIGN-custom-agents.md`）。**agents 变更走 PUT /api/config 热重建，不必重启**（忙碌中的 agent 记 busy，需重启）。
 - 相对导入必须带显式扩展名（`../src/card.ts`、`./wire.ts`），Node 原生 TS 按此解析。
 
+## 外部技能库（前端，仓库外）
+
+- 仓库上级 `J:\liyuan\agent\skills`（同套镜像于 `J:\liyuan\.claude\skills`、`J:\liyuan\.agents\skills`）是外部前端技能库（来源 Pythoughts-labs/react-frontend-skills，见 `J:\liyuan\skills-lock.json`）：react / shadcn / tailwind / typescript / ui-design / zod / vitest / tdd / playwright / react-hook-form / tanstack-query / msw / nextjs / nuqs / feature-arch / vercel-composition-patterns / vercel-react-best-practices / web-design-guidelines。改 `web/` 前端时按需参考对应 `SKILL.md`。
+
 ## 产品红线
 
 - 剧情正文：**允许系统组件/旁侧模型修改正文**——2026-08-08 用户裁决移除「绝不改写/补写正文」红线（文章多次润色属常态），如生图管线向正文附加 `[image:slotId]` 占位符锚点、未来润色等均获授权。修改保留可追溯性：原文保留在会话树分支、可回滚（沿用 `docs/DESIGN-story-edit.md` 的 rp-edited 分支机制）；显式改稿（用户手改 / 助手经 story_edit 且征得用户同意）仍走原通道。
@@ -81,7 +89,7 @@ if ($old) { Stop-Process -Id $old.OwningProcess -Force }
 
 - **定位 bug 禁止猜测用户的操作路径**（按了哪个按钮 / 走的哪条入口 / 具体流程步骤）——同一现象可能来自完全不同的路径（如「配图按钮」「助手生图」「管线 auto」各有独立实现）。必须先向用户确认实际操作步骤，再据此排查；已确认的路径明确记录，未确认的不做任何假设。2026-08-08 用户裁决。
 - 用户原始世界书只读；agent 新写设定进 `.liyuan-lore/`，不改用户文件。
-- 发布流程：`packages/` 内 `npm-shrinkwrap.json` 由 `scripts/generate-coding-agent-shrinkwrap.mjs` 生成，改依赖后需重跑；每版本发布说明在 `docs/RELEASE-vX.Y.Z.md`。
+- 发布流程：`packages/coding-agent/npm-shrinkwrap.json` 需与依赖保持同步（改依赖后检查）；每版本发布说明在 `docs/RELEASE-vX.Y.Z.md`。
 
 ## 规划文档约定（plan_doc）
 
