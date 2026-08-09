@@ -93,3 +93,16 @@ scripts/_*
 
 # 插件/脚本能力分析工作区（本地笔记与实验产物，不入库）
 plugin-analysis/
+
+# 外部/私人素材（2026-08-09 用户裁决：主仓库 git 隔离，只隔离未来提交）
+# 世界书 / 预设 / 用户头像：外部内容，不进主仓库 git
+assets/lorebooks/
+assets/presets/
+assets/personas/
+# 角色卡：仅保留 default_* 默认卡，私人角色卡隔离
+assets/cards/*
+!assets/cards/default_Assistant.png
+!assets/cards/default_Qingwu.json
+!assets/cards/default_Seraphina.png
+# 瑟瑟状态栏：独立子 git 仓库（assets/liyuan-statusbar/，无 remote），主仓库整体忽略
+assets/liyuan-statusbar/

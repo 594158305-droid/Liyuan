@@ -1,4 +1,4 @@
-# liyuan-瑟瑟状态栏：ST 脚本适配方案（方案 A）
+﻿# liyuan-瑟瑟状态栏：ST 脚本适配方案（方案 A）
 
 > 版本：P1（2026-08-09）· 基线：docs/DESIGN-jsrunner-ledger.md（D3）+ DESIGN-jsrunner-ledger-ui.md
 > （D4，V1/V2 已实现）+ exp-4（源脚本结构侦察）+ exp-1（Liyuan 适配通道侦察）
@@ -259,7 +259,7 @@ P1/P2 可部分并行（外壳与数据提取独立）；P3 依赖 P2（内存�
 
 ### 交付物
 
-- `scripts/convert-statusbar.mjs`：自动化转换脚本（提取 EMBEDDED_HTML/内联数据/bundle、
+- `assets/liyuan-statusbar/convert-statusbar.mjs`：自动化转换脚本（提取 EMBEDDED_HTML/内联数据/bundle、
   parent 重定向、生成适配主脚本）；**宿主零改动**（用户裁决：瑟瑟状态栏适配不动 Liyuan
   代码）
 - `assets/liyuan-statusbar/liyuan-瑟瑟状态栏.js`：转换产物（单文件，JsRunnerPanel 直接导入）
