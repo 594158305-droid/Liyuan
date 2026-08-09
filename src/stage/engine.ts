@@ -32,7 +32,7 @@ import {
 	splitBlockContent,
 	type AssemblyReportItem,
 } from "../preset-split.ts";
-import { formatRosterIndex, formatState, saveState } from "../state.ts";
+import { formatRosterIndex, formatState, formatTableIndex, saveState } from "../state.ts";
 import { isBackstageText } from "../stance.ts";
 import type { LorebookEntry } from "../types.ts";
 import {
@@ -519,6 +519,7 @@ export class StageEngine {
 			...(wsDeps.rules.wordRange ? { wordRange: wsDeps.rules.wordRange } : {}),
 			loreIndex: formatLoreIndex(materials.entries),
 			rosterIndex: formatRosterIndex(state),
+			tableIndex: formatTableIndex(state),
 			tools: tools.length > 0,
 		});
 

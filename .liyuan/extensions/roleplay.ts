@@ -17,7 +17,7 @@ import { Type } from "typebox";
 
 import { loadCardFile, readCardRawJson } from "../../src/card.ts";
 import { cardStatusBarFormats } from "../../src/cardfront.ts";
-import { buildImportBlock, cleanChat, DEFAULT_STRIP_TAGS, parseStChat, serializeForImportSummary } from "../../src/chatlog.ts";
+import { buildImportBlock, chunkMessagesForSummary, cleanChat, DEFAULT_STRIP_TAGS, parseStChat } from "../../src/chatlog.ts";
 import { findCommand } from "../../src/commands.ts";
 import {
 	appendCodexEntry,
@@ -72,13 +72,16 @@ import { formatUploadIndex, listUploads } from "../../src/uploads.ts";
 import { isBackstageText } from "../../src/stance.ts";
 import {
 	applyPatch,
+	applyTableOperation,
 	canonicalizeCharacterKeys,
 	defaultState,
 	formatRosterIndex,
 	formatState,
 	loadState,
 	saveState,
+	type TableOp,
 } from "../../src/state.ts";
+import { listTemplates, loadTemplate, materializeTemplate, saveTemplate } from "../../src/templates.ts";
 import {
 	importLocalAudio,
 	loadTtsConfig,
@@ -116,10 +119,24 @@ import {
 // lorebook_write：新造设定固化为正典，写入补充设定集 .liyuan-lore/，用户原始世界书永远只读；
 // show_image / show_audio / show_video：媒体通道交付；panel_*：agent 自建面板（PLAN-PHASE4 柱 2）。
 // skill_save 已迁往右栏「助手」（2026-07-14 拆分）：沉淀归助手，使用权（read 笔记照调）仍在剧情侧）
+// table_*：自定义表格（2026-08-09）——auto 表由场记每轮自动维护 + 全量注入【世界状态】；
+// 非 auto 表是静态参考表，模型用 table_insert/update/delete 手动维护、内容用 table_query 取（只进索引）。
+// template_*：表格模板（2026-08-09）——全局文件（.liyuan-templates/），与卡绑定（config.cardTemplates）
+// 自动物化；template_apply 把模板的表建进当前聊天（幂等）。
 const RP_TOOLS = [
 	"lorebook_search",
 	"world_state_get",
 	"world_state_update",
+	"table_create",
+	"table_list",
+	"table_drop",
+	"table_insert",
+	"table_update",
+	"table_delete",
+	"table_query",
+	"template_create",
+	"template_list",
+	"template_apply",
 	"lorebook_write",
 	"codex_create",
 	"codex_mount",
@@ -474,6 +491,41 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			.join("\n")
 			.trim();
 		return text || null;
+	};
+
+	/** 旁路调用失败后的重试次数（初始 1 次 + 重试 3 次 = 共 4 次尝试，全失败才抛错） */
+	const SIDE_RETRIES = 3;
+	/** 重试间隔（ms）：瞬态错误（如流提前结束）留出恢复时间 */
+	const SIDE_RETRY_DELAY_MS = 800;
+
+	/**
+	 * sideComplete + 重试：LLM 瞬态错误（流提前结束 / stopReason=error 等）重试
+	 * SIDE_RETRIES 次，期间 console 报进度；全部失败才抛错（由调用方决定跳过）。
+	 */
+	const sideCompleteWithRetry = async (
+		ctx: SideCtx,
+		systemPrompt: string,
+		userText: string,
+		maxTokens: number,
+		signal?: AbortSignal,
+	): Promise<string | null> => {
+		let lastErr: unknown;
+		for (let attempt = 0; attempt <= SIDE_RETRIES; attempt++) {
+			if (attempt > 0) {
+				console.log(`[import] 重试第 ${attempt}/${SIDE_RETRIES} 次…`);
+				await new Promise((r) => setTimeout(r, SIDE_RETRY_DELAY_MS));
+			}
+			try {
+				return await sideComplete(ctx, systemPrompt, userText, maxTokens, signal);
+			} catch (err) {
+				lastErr = err;
+				if (attempt < SIDE_RETRIES) {
+					const msg = err instanceof Error ? err.message : String(err);
+					console.log(`[import] 调用失败（${msg}），稍后重试 ${attempt + 1}/${SIDE_RETRIES}`);
+				}
+			}
+		}
+		throw lastErr;
 	};
 
 	/** 从任意消息对象提取纯文本（user 字符串、assistant/custom 内容块） */
@@ -888,6 +940,322 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				const lines = [...result.applied.map((a) => `✓ ${a}`), ...result.warnings.map((w) => `⚠ ${w}`)];
 				return {
 					content: [{ type: "text", text: lines.length ? lines.join("\n") : "（无变更）" }],
+					details: { state },
+				};
+			},
+		});
+
+		// 自定义表格（custom tables，2026-08-09）：账本新增 tables 字段，随世界线/回档一致回退。
+		// auto 表由场记（旁侧模型）每轮自动维护 + 全量注入【世界状态】，主演不要手动写它；
+		// 非 auto 表是静态参考表——内容不进上下文（只进【自定义表索引】），
+		// 需用 table_insert/update/delete 手动维护、table_query 取内容。写操作沿用 world_state_update
+		// 的持久化：applyTableOperation → 更新内存 state → saveState 落盘 → snapshotState 进会话树。
+		pi.registerTool({
+			name: "table_create",
+			label: "创建自定义表格",
+			description:
+				"Create a custom table in the world state. auto:true = the scene recorder (scribe) maintains this table every turn and its full content is injected into context automatically — you only define the columns once and never write it manually. auto:false (default) = a static reference table you maintain yourself via table_insert/table_update/table_delete; its content is NOT injected (only a name/columns/row-count index is), so read it back with table_query. Use for structured long-lived data (item catalogs, faction relations, timelines) that would bloat the fixed world-state fields.",
+			parameters: Type.Object({
+				name: Type.String({ description: "Unique table name (reuse an existing one will fail)" }),
+				columns: Type.Array(
+					Type.Object({
+						name: Type.String({ description: "Column name" }),
+						type: Type.Optional(
+							Type.Union(
+								[
+									Type.Literal("text"),
+									Type.Literal("integer"),
+									Type.Literal("number"),
+									Type.Literal("boolean"),
+								],
+								{ description: "Advisory cell type: integer/number/boolean are coerced on insert; text (default) keeps any value" },
+							),
+						),
+					}),
+				),
+				description: Type.Optional(Type.String({ description: "What this table records" })),
+				auto: Type.Optional(
+					Type.Boolean({ description: "true = scribe auto-maintains + full context injection every turn; default false" }),
+				),
+			}),
+			async execute(_id, params) {
+				const op: TableOp = {
+					kind: "create",
+					name: params.name,
+					columns: params.columns,
+					...(params.description !== undefined ? { description: params.description } : {}),
+					...(params.auto !== undefined ? { auto: params.auto } : {}),
+				};
+				const r = applyTableOperation(state, op);
+				if (!r.ok) return { content: [{ type: "text", text: r.error }], isError: true };
+				state = r.state!;
+				if (stateFile) saveState(stateFile, state);
+				snapshotState();
+				const lines = [
+					...(r.applied ?? []).map((a) => `✓ ${a}`),
+					...(r.warnings ?? []).map((w) => `⚠ ${w}`),
+				];
+				if (params.auto) lines.push("（auto 表：场记每轮自动维护并全量注入上下文，无需主演手动写）");
+				return {
+					content: [{ type: "text", text: lines.join("\n") || "（无变更）" }],
+					details: { state },
+				};
+			},
+		});
+
+		// 读工具：直接读内存 state.tables（不落盘、不写会话树），内容只进工具结果
+		pi.registerTool({
+			name: "table_list",
+			label: "列出自定义表格",
+			description:
+				"List all custom tables: name, columns, row count, auto flag, description. auto tables are already fully injected into context each turn; non-auto tables appear here only as an index — read their content with table_query.",
+			parameters: Type.Object({}),
+			async execute() {
+				const tables = state.tables ?? {};
+				const names = Object.keys(tables);
+				if (names.length === 0) {
+					return { content: [{ type: "text", text: "尚无自定义表格。需要长期结构化的参考数据（物品/关系/时间线等）可先用 table_create 建表。" }] };
+				}
+				const lines = names.map((name) => {
+					const t = tables[name];
+					const cols = t.columns.map((c) => (c.type ? `${c.name}:${c.type}` : c.name)).join("、");
+					const auto = t.auto ? "[auto] " : "";
+					return `${auto}${name}（${cols}，${t.rows.length} 行）${t.description ? ` — ${t.description}` : ""}`;
+				});
+				return { content: [{ type: "text", text: lines.join("\n") }] };
+			},
+		});
+
+		pi.registerTool({
+			name: "table_drop",
+			label: "删除自定义表格",
+			description: "Delete a custom table and ALL its rows — irreversible. Ask the user before dropping a table they may rely on.",
+			parameters: Type.Object({
+				name: Type.String({ description: "Table name to drop" }),
+			}),
+			async execute(_id, params) {
+				const r = applyTableOperation(state, { kind: "drop", name: params.name });
+				if (!r.ok) return { content: [{ type: "text", text: r.error }], isError: true };
+				state = r.state!;
+				if (stateFile) saveState(stateFile, state);
+				snapshotState();
+				return {
+					content: [{ type: "text", text: (r.applied ?? []).map((a) => `✓ ${a}`).join("\n") }],
+					details: { state },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "table_insert",
+			label: "表格插入行",
+			description:
+				"Insert one row into a custom table. Only columns declared on the table are kept — unknown keys are dropped with a warning; declared integer/number/boolean columns coerce the value (uncoercible values are kept as-is). Use this to add data to a non-auto reference table you maintain.",
+			parameters: Type.Object({
+				table: Type.String({ description: "Table name" }),
+				row: Type.Record(Type.String(), Type.Any(), { description: "Column → value map" }),
+			}),
+			async execute(_id, params) {
+				const r = applyTableOperation(state, { kind: "insert", table: params.table, row: params.row });
+				if (!r.ok) return { content: [{ type: "text", text: r.error }], isError: true };
+				state = r.state!;
+				if (stateFile) saveState(stateFile, state);
+				snapshotState();
+				const lines = [...(r.applied ?? []).map((a) => `✓ ${a}`), ...(r.warnings ?? []).map((w) => `⚠ ${w}`)];
+				return {
+					content: [{ type: "text", text: lines.join("\n") || "（无变更）" }],
+					details: { state },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "table_update",
+			label: "表格更新行",
+			description:
+				"Update every row in a custom table that matches `match` (all key-value pairs equal) by applying `changes` (only declared columns are changed). Rows with no match produce a warning instead of an error.",
+			parameters: Type.Object({
+				table: Type.String({ description: "Table name" }),
+				match: Type.Record(Type.String(), Type.Any(), { description: "Selector — all keys must equal the stored row" }),
+				changes: Type.Record(Type.String(), Type.Any(), { description: "New values applied to matched rows" }),
+			}),
+			async execute(_id, params) {
+				const r = applyTableOperation(state, {
+					kind: "update",
+					table: params.table,
+					match: params.match,
+					changes: params.changes,
+				});
+				if (!r.ok) return { content: [{ type: "text", text: r.error }], isError: true };
+				state = r.state!;
+				if (stateFile) saveState(stateFile, state);
+				snapshotState();
+				const lines = [...(r.applied ?? []).map((a) => `✓ ${a}`), ...(r.warnings ?? []).map((w) => `⚠ ${w}`)];
+				return {
+					content: [{ type: "text", text: lines.join("\n") || "（无变更）" }],
+					details: { state },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "table_delete",
+			label: "表格删除行",
+			description:
+				"Delete every row in a custom table that matches `match` (all key-value pairs equal). Rows with no match produce a warning instead of an error.",
+			parameters: Type.Object({
+				table: Type.String({ description: "Table name" }),
+				match: Type.Record(Type.String(), Type.Any(), { description: "Selector — all keys must equal the stored row" }),
+			}),
+			async execute(_id, params) {
+				const r = applyTableOperation(state, { kind: "delete", table: params.table, match: params.match });
+				if (!r.ok) return { content: [{ type: "text", text: r.error }], isError: true };
+				state = r.state!;
+				if (stateFile) saveState(stateFile, state);
+				snapshotState();
+				const lines = [...(r.applied ?? []).map((a) => `✓ ${a}`), ...(r.warnings ?? []).map((w) => `⚠ ${w}`)];
+				return {
+					content: [{ type: "text", text: lines.join("\n") || "（无变更）" }],
+					details: { state },
+				};
+			},
+		});
+
+		// 读工具：query 分支纯读不改状态（返回行是副本），无需落盘/快照
+		pi.registerTool({
+			name: "table_query",
+			label: "查询表格内容",
+			description:
+				"Query rows of a custom table. Without `filter` returns all rows; with a filter returns only rows where every filter key equals the stored value. Use this to read non-auto reference tables — their content is NOT injected into context automatically.",
+			parameters: Type.Object({
+				table: Type.String({ description: "Table name" }),
+				filter: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Optional row selector" })),
+			}),
+			async execute(_id, params) {
+				const r = applyTableOperation(state, {
+					kind: "query",
+					table: params.table,
+					...(params.filter !== undefined ? { filter: params.filter } : {}),
+				});
+				if (!r.ok) return { content: [{ type: "text", text: r.error }], isError: true };
+				const rows = r.rows ?? [];
+				if (rows.length === 0) {
+					return { content: [{ type: "text", text: `表 ${params.table} 无匹配行。` }] };
+				}
+				const text = rows.map((row, i) => `${i + 1}. ${JSON.stringify(row)}`).join("\n");
+				return {
+					content: [{ type: "text", text: `表 ${params.table} 命中 ${rows.length} 行：\n${text}` }],
+					details: { rows },
+				};
+			},
+		});
+
+		// 模板族（DESIGN-template-system §6）：模板是全局文件（.liyuan-templates/），不随聊天走——
+		// 与卡绑定（config.cardTemplates）的模板在 session_start 自动物化；template_apply 手动物化进当前聊天。
+		// 物化的表仍是普通自定义表：auto 表由场记自动维护，非 auto 表手动维护（见 table_* 工具）。
+		pi.registerTool({
+			name: "template_create",
+			label: "创建表格模板",
+			description:
+				"Save a reusable table template to .liyuan-templates/ (a global file shared by all chats and cards). A template is a named bundle of table definitions — each has columns and optional auto flag (true = the scene recorder maintains it every turn and its content is fully injected) and instructions (maintenance rules for the scribe/model). Use this to define a reusable structure once, then bind it to a card (config.cardTemplates) or apply it into the current chat with template_apply. auto tables materialized from templates are still maintained by the scribe automatically.",
+			parameters: Type.Object({
+				name: Type.String({ description: "模板名（唯一，≤40 字；重名覆盖）" }),
+				description: Type.Optional(Type.String({ description: "模板用途说明" })),
+				tables: Type.Array(
+					Type.Object({
+						name: Type.String({ description: "表名" }),
+						columns: Type.Array(
+							Type.Object({
+								name: Type.String({ description: "列名" }),
+								type: Type.Optional(
+									Type.Union(
+										[
+											Type.Literal("text"),
+											Type.Literal("integer"),
+											Type.Literal("number"),
+											Type.Literal("boolean"),
+										],
+										{ description: "列类型（advisory；缺省 text）" },
+									),
+								),
+							}),
+							{ description: "列定义，至少 1 列" },
+						),
+						auto: Type.Optional(
+							Type.Boolean({ description: "true = 物化后由场记自动维护 + 全量注入；缺省 false" }),
+						),
+						instructions: Type.Optional(Type.String({ description: "维护规则（供场记/模型参考）" })),
+					}),
+					{ description: "表定义列表，至少 1 张表" },
+				),
+			}),
+			async execute(_id, params) {
+				const r = saveTemplate(appCwd, {
+					name: params.name,
+					...(params.description !== undefined ? { description: params.description } : {}),
+					tables: params.tables.map((t) => ({
+						name: t.name,
+						columns: t.columns,
+						...(t.auto !== undefined ? { auto: t.auto } : {}),
+						...(t.instructions !== undefined ? { instructions: t.instructions } : {}),
+					})),
+				});
+				if (!r.ok) return { content: [{ type: "text", text: r.error }], isError: true };
+				return {
+					content: [
+						{
+							type: "text",
+							text: `模板「${params.name.trim()}」已保存（${params.tables.length} 张表）到 .liyuan-templates/。要用到当前聊天请调 template_apply；要随卡自动建表请写入 config.cardTemplates。`,
+						},
+					],
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "template_list",
+			label: "列出表格模板",
+			description:
+				"List all table templates in .liyuan-templates/ (name, description, table count). Templates are global files — not tied to any chat. Apply one into the current chat with template_apply.",
+			parameters: Type.Object({}),
+			async execute() {
+				const list = listTemplates(appCwd);
+				if (list.length === 0) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "暂无模板。可用 template_create 创建（定义可复用的表结构），再用 template_apply 建进当前聊天。",
+							},
+						],
+					};
+				}
+				const lines = list.map((t) => `${t.name}（${t.tableCount} 张表${t.description ? `，${t.description}` : ""}）`);
+				return { content: [{ type: "text", text: `模板（${list.length}）：\n${lines.join("\n")}` }] };
+			},
+		});
+
+		pi.registerTool({
+			name: "template_apply",
+			label: "应用表格模板",
+			description:
+				"Materialize a template into the current chat: creates the template's tables in the world state (idempotent — tables that already exist are skipped; structure only, no data). auto tables become scribe-maintained; non-auto tables are static references you maintain manually.",
+			parameters: Type.Object({
+				name: Type.String({ description: "模板名" }),
+			}),
+			async execute(_id, params) {
+				const def = loadTemplate(appCwd, params.name);
+				if (!def) {
+					return { content: [{ type: "text", text: `模板「${params.name}」不存在。可用 template_list 查看已有模板。` }], isError: true };
+				}
+				const r = materializeTemplate(state, def);
+				if (r.applied.length) {
+					if (stateFile) saveState(stateFile, state);
+					snapshotState();
+				}
+				const lines = [...r.applied.map((a) => `✓ ${a}`), ...r.warnings.map((w) => `⚠ ${w}`)];
+				return {
+					content: [{ type: "text", text: lines.length ? lines.join("\n") : "模板表已全部存在，无变更。" }],
 					details: { state },
 				};
 			},
@@ -1334,6 +1702,33 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			// fork 出的新会话文件没有状态缓存：从复制过来的剧情分支快照恢复
 			if (JSON.stringify(state) === JSON.stringify(defaultState()) && restoreStateFromBranch(ctx.sessionManager)) {
 				saveState(stateFile, state);
+			}
+			// 模板物化（DESIGN-template-system §4）：当前卡绑定的模板逐个把表建进账本（幂等，只建结构不填数据）。
+			// config.cardTemplates = 卡 name → 模板名列表；物化出的表随本会话账本走（回档/世界线一致回退）。
+			// materializeTemplate 对已存在的表自动跳过；有新建表才落盘 + 快照，避免无谓写盘。
+			const templateNames = config.cardTemplates?.[card.name];
+			if (templateNames?.length) {
+				const applied: string[] = [];
+				const warnings: string[] = [];
+				for (const tname of templateNames) {
+					const def = loadTemplate(ctx.cwd, tname);
+					if (!def) {
+						warnings.push(`模板「${tname}」不存在，跳过`);
+						continue;
+					}
+					const r = materializeTemplate(state, def);
+					applied.push(...r.applied);
+					warnings.push(...r.warnings);
+				}
+				if (applied.length) {
+					saveState(stateFile, state);
+					snapshotState();
+				}
+				if (process.env.RP_DEBUG && (applied.length || warnings.length)) {
+					console.error(
+						`[rp-templates] ${card.name} 物化${applied.length ? `：${applied.join("；")}` : ""}${warnings.length ? `；跳过：${warnings.join("；")}` : ""}`,
+					);
+				}
 			}
 			// 面板同款装载：缓存缺失（fork/新拉起）时从剧情分支快照恢复
 			panelsFile = join(dir(ctx.cwd, "artifacts"), `${ctx.sessionManager.getSessionId()}.json`);
@@ -2240,20 +2635,67 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				const hiddenNote = parsed.hiddenCount > 0 ? `，含 ${parsed.hiddenCount} 条对方隐藏楼层（剧情照常纳入）` : "";
 				notify(ctx, `解析 ${parsed.messages.length} 条（清洗后剩 ${cleaned.length}，剔除 ${removed} 条空壳${hiddenNote}）。正在消化旧剧情（${older.length} 条）…`);
 
-				// 旧轮次 → 剧情向接力摘要（复用压缩摘要提示词）
+				// 旧轮次 → 剧情向接力分层摘要（复用压缩摘要提示词；分层：按字符预算分块，
+				// 每块一次小模型摘要、块块接力——previousSummary 并入下一块，零丢行、小窗口模型也扛得住。
+				// 单块失败不中断导入：跳过该块继续接力，只记 warning）
 				let summary = "";
 				if (older.length > 0) {
-					const prompt = buildRpSummaryPrompt({
-						conversationText: serializeForImportSummary(older, config.userName),
-						stateSnapshot: formatState(state),
-						language: config.language,
-						userName: config.userName,
-					});
-					summary = (await sideComplete(ctx, prompt.systemPrompt, prompt.userText, 4096)) ?? "";
+					const chunks = chunkMessagesForSummary(older, config.userName);
+					console.log(`[import] 分层摘要：${older.length} 条旧剧情切成 ${chunks.length} 块`);
+					let failedChunks = 0;
+					for (let i = 0; i < chunks.length; i++) {
+						console.log(`[import] 分层摘要 ${i + 1}/${chunks.length}（块 ${chunks[i].length} 字）…`);
+						notify(ctx, `正在摘要旧剧情 ${i + 1}/${chunks.length}…`);
+						const prompt = buildRpSummaryPrompt({
+							conversationText: chunks[i],
+							stateSnapshot: formatState(state),
+							previousSummary: summary || undefined, // 接力：前一块摘要并入，不丢承诺/伏笔
+							language: config.language,
+							userName: config.userName,
+						});
+						try {
+							summary = (await sideCompleteWithRetry(ctx, prompt.systemPrompt, prompt.userText, 4096)) ?? summary;
+						} catch (err) {
+							failedChunks++;
+							const msg = err instanceof Error ? err.message : String(err);
+							console.log(`[import] 第 ${i + 1} 块摘要失败：${msg}`);
+							notify(ctx, `第 ${i + 1} 块旧剧情摘要失败（${msg}），跳过该块继续…`, "warning");
+						}
+					}
+					console.log(`[import] 分层摘要完成：累计摘要 ${summary.length} 字${failedChunks ? `，${failedChunks} 块失败` : ""}`);
 				}
 
-				// 场记建账：从摘要+最近对白初始化世界状态
+				// 导入前物化卡绑定模板（幂等，只建结构+初始行）：场记建账前把表建进账本——
+				// 场记提示词能看到表 schema + auto 标志，才会从导入内容自动填充 auto 表；非 auto 表保持静态。
+				const importTemplates = config.cardTemplates?.[card.name];
+				if (importTemplates?.length) {
+					const applied: string[] = [];
+					const warnings: string[] = [];
+					for (const tname of importTemplates) {
+						const def = loadTemplate(ctx.cwd, tname);
+						if (!def) {
+							warnings.push(`模板「${tname}」不存在，跳过`);
+							continue;
+						}
+						const r = materializeTemplate(state, def);
+						applied.push(...r.applied);
+						warnings.push(...r.warnings);
+					}
+					if (applied.length) {
+						saveState(stateFile, state);
+						snapshotState();
+					}
+					if (applied.length || warnings.length) {
+						notify(
+							ctx,
+							`模板物化：${applied.length ? applied.join("；") : "无新建表"}${warnings.length ? `；跳过：${warnings.join("；")}` : ""}`,
+						);
+					}
+				}
+
+				// 场记建账：从摘要+最近对白初始化世界状态（失败不中断导入：跳过建账只告警，正文照常注入）
 				const digest = [summary, ...recent.map((m) => `${m.name}：${m.text}`)].filter(Boolean).join("\n\n");
+				console.log(`[import] 场记建账…（digest ${digest.length} 字）`);
 				const scribePrompt = buildScribeTurnPrompt({
 					state,
 					userText: "（导入的历史剧情，正文见助手侧）",
@@ -2261,8 +2703,18 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 					charName: card.name,
 					userName: config.userName,
 				});
-				const scribeText = await sideComplete(ctx, scribePrompt.systemPrompt, scribePrompt.userText, 2048);
+				let scribeText: string | null = null;
+				try {
+					scribeText = await sideCompleteWithRetry(ctx, scribePrompt.systemPrompt, scribePrompt.userText, 2048);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					console.log(`[import] 场记建账失败：${msg}`);
+					notify(ctx, `场记建账失败（${msg}），世界状态未建账——可稍后让助手补账。`, "warning");
+				}
 				const scribeResult = scribeText ? parseScribeResult(scribeText) : null;
+				console.log(
+					`[import] 建账完成：patch 字段 ${scribeResult && Object.keys(scribeResult.patch).length ? Object.keys(scribeResult.patch).join("、") : "（无变化）"}`,
+				);
 				if (scribeResult && Object.keys(scribeResult.patch).length > 0) {
 					const knownNames = [card.name, config.userName, ...Object.keys(state.characters)];
 					const applied = applyPatch(state, canonicalizeCharacterKeys(scribeResult.patch, knownNames));

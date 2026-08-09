@@ -473,6 +473,8 @@ export interface StageInjectionOptions {
 	loreIndex?: string;
 	/** 登场名录索引行（formatRosterIndex 产出） */
 	rosterIndex?: string;
+	/** 自定义表索引行（formatTableIndex 产出；非 auto 表清单，内容走 table_query 取） */
+	tableIndex?: string;
 	/** false = 台上无检索工具（过渡形态）；影响索引块的措辞 */
 	tools?: boolean;
 }
@@ -492,6 +494,7 @@ export function buildStageInjection({
 	wordRange,
 	loreIndex,
 	rosterIndex,
+	tableIndex,
 	tools,
 }: StageInjectionOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
@@ -500,6 +503,17 @@ export function buildStageInjection({
 	blocks.push(
 		`【世界状态】当前事实基准，正文不得与之矛盾——物品在谁手里、现在是第几天几点、人在哪里，以下面为准；剧情记忆与之冲突时在叙事内自然圆回：\n${formatState(state)}`,
 	);
+
+	// 自定义表索引紧随世界状态：auto 表已全量在【世界状态】里，这里只补非 auto 静态表的入口
+	if (tableIndex) {
+		blocks.push(
+			`【自定义表索引】以下为静态参考表（不在上方【世界状态】全量列出）：${tableIndex}。要写其中事实、拿不准内容时，${
+				tools === false
+					? "谨慎带过、禁止臆造细节。"
+					: "**先用 `table_query` 查出内容再写**——禁止凭想象编造表内已有的事实。"
+			}`,
+		);
+	}
 
 	if (rosterIndex) {
 		blocks.push(

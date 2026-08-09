@@ -24,6 +24,26 @@ test("场记提示词：只记账，不含连续性审查", () => {
 	assert.ok(userText.includes("阿远：*我递出怀表*"));
 });
 
+test("场记提示词：含 auto 表 + tables 补丁指令", () => {
+	const state = defaultState();
+	state.tables = {
+		"主角信息": { name: "主角信息", columns: [{ name: "名字" }, { name: "年龄", type: "integer" }], rows: [{ 名字: "阿远", 年龄: 25 }], auto: true },
+	};
+	const { systemPrompt, userText } = buildScribeTurnPrompt({
+		state,
+		userText: "*我递出怀表* 收下吧。",
+		assistantText: "*她推了回去*「不收诊金。」",
+		charName: "青梧",
+		userName: "阿远",
+	});
+	assert.ok(systemPrompt.includes('"tables"'), "系统提示应声明 tables 补丁字段");
+	assert.ok(systemPrompt.includes("auto"), "应说明仅更新 auto 标记的表");
+	assert.ok(systemPrompt.includes("静态参考表不要动"), "应说明不碰非 auto 表");
+	assert.ok(systemPrompt.includes("行对象只含该表已声明的列"), "应说明行只含已声明列");
+	assert.ok(userText.includes('"主角信息"'), "用户侧账本含 auto 表全量");
+	assert.ok(userText.includes("阿远"), "账本含表数据");
+});
+
 test("场记提示词：detectUnaskedTurn 已忽略", () => {
 	const { systemPrompt } = buildScribeTurnPrompt({
 		state: defaultState(),

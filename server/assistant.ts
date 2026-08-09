@@ -60,7 +60,8 @@ import {
 } from "../src/stagehand.ts";
 import { isAssistantDelegateActive } from "../src/assistant-gateway.ts";
 import { harvestLocalMediaPaths } from "../src/media-paths.ts";
-import { formatState } from "../src/state.ts";
+import { formatState, type TableOp } from "../src/state.ts";
+import { listTemplates, saveTemplate } from "../src/templates.ts";
 import type { RpConfig, WorldState } from "../src/types.ts";
 import {
 	applyConfigPatch,
@@ -91,6 +92,10 @@ export interface StoryBridge {
 	worldState(): WorldState;
 	/** 账本补丁（落盘 + await statesync） */
 	applyStatePatch(patch: Record<string, unknown>): Promise<{ applied: string[]; warnings: string[] }>;
+	/** 自定义表格操作（DESIGN-custom-tables §6）：写操作经领域层 applyTableOperation 落盘 + 收编进树 */
+	applyTableOp(op: TableOp): Promise<{ ok: boolean; error?: string; applied?: string[] }>;
+	/** 自定义表格模板物化（DESIGN-template-system §6）：把模板的表建进当前剧情 state（幂等只建结构，落盘 + 收编进树） */
+	applyTemplate(name: string): Promise<{ ok: boolean; error?: string; applied?: string[]; warnings?: string[] }>;
 	/** 配置/预设变更后热载剧情会话（流式中自动排队） */
 	softRefreshConfig(): Promise<void>;
 	/** P8：广播 hello 全量重放（显示规则写盘后让所有端用新规则重渲当前消息；纯广播无写入） */
@@ -341,6 +346,16 @@ export const STAGEHAND_TOOL_NAMES: string[] = [
 	"show_media",
 	"draw_generate",
 	"draw_enhance",
+	"table_create",
+	"table_list",
+	"table_drop",
+	"table_insert",
+	"table_update",
+	"table_delete",
+	"table_query",
+	"template_create",
+	"template_list",
+	"template_apply",
 	"lorebook_write",
 	"codex_list",
 	"codex_read",
@@ -888,6 +903,239 @@ function createStagehandTools(
 				} catch (e) {
 					return text(drawErrorToChinese(e), true);
 				}
+			},
+		}),
+		// ---- 自定义表格族（DESIGN-custom-tables §6）：与主聊天同名工具 ----
+		// 读走 bridge.worldState()（state.tables），写走 bridge.applyTableOp（领域层 applyTableOperation 落盘 + 收编进树）。
+		// auto 表由场记每轮自动维护；非 auto 表是静态参考表，场记不动、需手动维护。
+		defineTool({
+			name: "table_create",
+			label: "创建自定义表",
+			description:
+				"创建一张自定义表格（存于世界状态账本，随世界线/回档一致回退）。columns 至少 1 列，列名自动去重；type 可选 text/integer/number/boolean（advisory，仅做宽松转换）。auto:true 的表由场记每轮自动维护并全量注入上下文（只放主角信息这类每轮都要维护的表）；auto 缺省 false = 静态参考表，场记不会改动它，需要手动维护。建表前先与用户确认。",
+			parameters: Type.Object({
+				name: Type.String({ description: "表名（同世界线内唯一，不可重复建名）" }),
+				columns: Type.Array(
+					Type.Object({
+						name: Type.String({ description: "列名" }),
+						type: Type.Optional(
+							Type.Union(
+								[Type.Literal("text"), Type.Literal("integer"), Type.Literal("number"), Type.Literal("boolean")],
+								{ description: "列类型（advisory，宽松转换；缺省 text）" },
+							),
+						),
+					}),
+					{ description: "列定义，至少 1 列" },
+				),
+				description: Type.Optional(Type.String({ description: "表用途说明（给模型看的）" })),
+				auto: Type.Optional(
+					Type.Boolean({ description: "true = 场记每轮自动维护 + 全量注入上下文；缺省 false（静态参考表）" }),
+				),
+			}),
+			async execute(_id, params) {
+				const r = await bridge.applyTableOp({
+					kind: "create",
+					name: params.name,
+					columns: params.columns,
+					...(params.description !== undefined ? { description: params.description } : {}),
+					...(params.auto !== undefined ? { auto: params.auto } : {}),
+				});
+				if (!r.ok) return text(r.error ?? "建表失败", true);
+				return text(`表「${params.name}」已创建（${params.columns.length} 列，${params.auto ? "场记自动维护" : "手动维护"}）。`);
+			},
+		}),
+		defineTool({
+			name: "table_list",
+			label: "列自定义表",
+			description:
+				"列出当前世界状态里的全部自定义表（表名、列名、行数、auto 标记、说明）。非 auto 表内容不会自动进上下文，明细需用 table_query 取。",
+			parameters: Type.Object({}),
+			async execute() {
+				const state = bridge.worldState();
+				const tables = state.tables ?? {};
+				const names = Object.keys(tables);
+				if (names.length === 0) return text("暂无自定义表。");
+				const lines = names.map((n) => {
+					const t = tables[n]!;
+					const parts = [
+						`${n}（${t.columns.map((c) => c.name).join("、")}，${t.rows.length} 行）`,
+						t.auto ? "auto：场记自动维护" : "手动维护",
+						...(t.description ? [`说明：${t.description}`] : []),
+					];
+					return `- ${parts.join("；")}`;
+				});
+				return text(`自定义表（${names.length}）：\n${lines.join("\n")}`);
+			},
+		}),
+		defineTool({
+			name: "table_drop",
+			label: "删除自定义表",
+			description:
+				"删除一张自定义表及其全部行（随世界线回档一并丢失，不可恢复）。破坏性操作，确认后再做。",
+			parameters: Type.Object({
+				name: Type.String({ description: "表名" }),
+			}),
+			async execute(_id, params) {
+				const r = await bridge.applyTableOp({ kind: "drop", name: params.name });
+				if (!r.ok) return text(r.error ?? "删除失败", true);
+				return text(`表「${params.name}」已删除。`);
+			},
+		}),
+		defineTool({
+			name: "table_insert",
+			label: "自定义表插行",
+			description:
+				"向自定义表插入一行。row 为 JSON 对象字符串（键=列名）；只保留该表已声明的列（未知列自动丢弃），列类型按声明做宽松转换。",
+			parameters: Type.Object({
+				table: Type.String({ description: "表名" }),
+				row: Type.String({ description: "JSON 对象字符串（一行数据，键=列名）" }),
+			}),
+			async execute(_id, params) {
+				const row = parseJsonObject(params.row);
+				if (!row) return text("row 不是合法的 JSON 对象", true);
+				const r = await bridge.applyTableOp({ kind: "insert", table: params.table, row });
+				if (!r.ok) return text(r.error ?? "插入失败", true);
+				return text(`表「${params.table}」已插入 1 行。`);
+			},
+		}),
+		defineTool({
+			name: "table_update",
+			label: "自定义表改行",
+			description:
+				"更新自定义表中匹配的行。match 为 JSON 对象字符串（所有键值相等的行被命中，可传多个键）；changes 为 JSON 对象字符串（要修改的列值，只改已声明列）。",
+			parameters: Type.Object({
+				table: Type.String({ description: "表名" }),
+				match: Type.String({ description: "JSON 对象字符串（匹配条件，键值相等）" }),
+				changes: Type.String({ description: "JSON 对象字符串（要修改的列值）" }),
+			}),
+			async execute(_id, params) {
+				const match = parseJsonObject(params.match);
+				if (!match) return text("match 不是合法的 JSON 对象", true);
+				const changes = parseJsonObject(params.changes);
+				if (!changes) return text("changes 不是合法的 JSON 对象", true);
+				const r = await bridge.applyTableOp({ kind: "update", table: params.table, match, changes });
+				if (!r.ok) return text(r.error ?? "更新失败", true);
+				return text(`表「${params.table}」已更新${r.applied?.length ? `（${r.applied.join("；")}）` : ""}。`);
+			},
+		}),
+		defineTool({
+			name: "table_delete",
+			label: "自定义表删行",
+			description:
+				"删除自定义表中匹配的行（不可恢复）。match 为 JSON 对象字符串（所有键值相等的行被删除；空对象 {} 会删光全部行——谨慎）。",
+			parameters: Type.Object({
+				table: Type.String({ description: "表名" }),
+				match: Type.String({ description: "JSON 对象字符串（匹配条件，键值相等；空对象删全部）" }),
+			}),
+			async execute(_id, params) {
+				const match = parseJsonObject(params.match);
+				if (!match) return text("match 不是合法的 JSON 对象", true);
+				const r = await bridge.applyTableOp({ kind: "delete", table: params.table, match });
+				if (!r.ok) return text(r.error ?? "删除失败", true);
+				return text(`表「${params.table}」行已删除${r.applied?.length ? `（${r.applied.join("；")}）` : ""}。`);
+			},
+		}),
+		defineTool({
+			name: "table_query",
+			label: "查询自定义表",
+			description:
+				"查询自定义表内容。filter 为 JSON 对象字符串（键值相等过滤，可省略 = 返回全部行）。非 auto 表的内容不会自动进上下文，取明细用本工具。",
+			parameters: Type.Object({
+				table: Type.String({ description: "表名" }),
+				filter: Type.Optional(Type.String({ description: "JSON 对象字符串（过滤条件，键值相等；省略返回全部行）" })),
+			}),
+			async execute(_id, params) {
+				const state = bridge.worldState();
+				const t = (state.tables ?? {})[params.table];
+				if (!t) return text(`表 ${params.table} 不存在`, true);
+				const filter = params.filter ? parseJsonObject(params.filter) : undefined;
+				if (params.filter && !filter) return text("filter 不是合法的 JSON 对象", true);
+				const rows =
+					filter && Object.keys(filter).length > 0
+						? t.rows.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v))
+						: t.rows.slice();
+				return text(
+					rows.length > 0
+						? `表「${params.table}」命中 ${rows.length} 行：\n${JSON.stringify(rows, null, 2)}`
+						: `表「${params.table}」命中 0 行。`,
+				);
+			},
+		}),
+		// ---- 模板族（DESIGN-template-system §6）：模板是全局文件（.liyuan-templates/），助手直接读写；
+		// 物化走 bridge.applyTemplate（与 REST /api/templates/apply 同源：materializeTemplate 落盘 + 收编进树）----
+		defineTool({
+			name: "template_create",
+			label: "创建表模板",
+			description:
+				"保存一个可复用的表格模板到 .liyuan-templates/（全局文件，所有聊天/角色卡共享）。模板 = 一组表定义（每张表含列定义、可选 auto 标记与维护规则）。auto:true 的表应用后由场记每轮自动维护并全量注入上下文；非 auto 表是静态参考表、需手动维护。写模板前先与用户确认。",
+			parameters: Type.Object({
+				name: Type.String({ description: "模板名（唯一，≤40 字；重名覆盖）" }),
+				description: Type.Optional(Type.String({ description: "模板用途说明" })),
+				tables: Type.Array(
+					Type.Object({
+						name: Type.String({ description: "表名" }),
+						columns: Type.Array(
+							Type.Object({
+								name: Type.String({ description: "列名" }),
+								type: Type.Optional(
+									Type.Union(
+										[Type.Literal("text"), Type.Literal("integer"), Type.Literal("number"), Type.Literal("boolean")],
+										{ description: "列类型（advisory；缺省 text）" },
+									),
+								),
+							}),
+							{ description: "列定义，至少 1 列" },
+						),
+						auto: Type.Optional(Type.Boolean({ description: "true = 应用后由场记自动维护 + 全量注入；缺省 false" })),
+						instructions: Type.Optional(Type.String({ description: "维护规则（供场记/模型参考）" })),
+					}),
+					{ description: "表定义列表，至少 1 张表" },
+				),
+			}),
+			async execute(_id, params) {
+				const r = saveTemplate(cwd, {
+					name: params.name,
+					...(params.description !== undefined ? { description: params.description } : {}),
+					tables: params.tables.map((t) => ({
+						name: t.name,
+						columns: t.columns,
+						...(t.auto !== undefined ? { auto: t.auto } : {}),
+						...(t.instructions !== undefined ? { instructions: t.instructions } : {}),
+					})),
+				});
+				if (!r.ok) return text(r.error, true);
+				return text(`模板「${params.name.trim()}」已保存（${params.tables.length} 张表）。要用到剧情聊天可调 template_apply，或绑定到卡（config.cardTemplates）。`);
+			},
+		}),
+		defineTool({
+			name: "template_list",
+			label: "列表模板",
+			description:
+				"列出 .liyuan-templates/ 里的全部表模板（模板名、说明、表数）。模板是全局文件，不随聊天/卡走；用 template_apply 把某个模板的表建进当前剧情聊天。",
+			parameters: Type.Object({}),
+			async execute() {
+				const list = listTemplates(cwd);
+				if (list.length === 0) return text("暂无模板。可用 template_create 创建。");
+				const lines = list.map((t) => `- ${t.name}（${t.tableCount} 张表${t.description ? `；${t.description}` : ""}）`);
+				return text(`模板（${list.length}）：\n${lines.join("\n")}`);
+			},
+		}),
+		defineTool({
+			name: "template_apply",
+			label: "应用表模板",
+			description:
+				"把模板里的表建进当前剧情聊天的世界状态（幂等：已存在的表跳过，只建结构不填数据）。auto 表应用后由场记自动维护，非 auto 表需手动维护。",
+			parameters: Type.Object({
+				name: Type.String({ description: "模板名" }),
+			}),
+			async execute(_id, params) {
+				const r = await bridge.applyTemplate(params.name);
+				if (!r.ok) return text(r.error ?? "应用失败", true);
+				const lines = [
+					...(r.applied ?? []).map((a) => `✓ ${a}`),
+					...(r.warnings ?? []).map((w) => `⚠ ${w}`),
+				];
+				return text(lines.length ? lines.join("\n") : "模板表已全部存在，无变更。");
 			},
 		}),
 	);

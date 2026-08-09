@@ -91,6 +91,15 @@ import {
 } from "../src/codex.ts";
 import { RP_COMMANDS } from "../src/commands.ts";
 import {
+	deleteTemplate,
+	listTemplates,
+	loadTemplate,
+	parseTavernDB,
+	saveTemplate,
+} from "../src/templates.ts";
+import type { TableOp } from "../src/state.ts";
+import type { TableTemplate, TableTemplateDef } from "../src/types.ts";
+import {
 	getMemoryStatus,
 	memoryClearStore,
 	memoryDeleteChunk,
@@ -340,6 +349,15 @@ export interface RestHost {
 	searchSessions(q: string): Promise<SessionSearchHit[]>;
 	/** 世界状态用户主权编辑（applyPatch 语义，落盘+ await statesync） */
 	applyStatePatch(patch: Record<string, unknown>): Promise<{ applied: string[]; warnings: string[] }>;
+	/** 自定义表格操作（DESIGN-custom-tables §7：applyTableOperation 落盘 + 收编进树；bridge.tableOps 权限面） */
+	applyTableOp(op: import("../src/state.ts").TableOp): Promise<{ ok: boolean; error?: string; applied?: string[] }>;
+	/** 自定义表格模板物化（DESIGN-template-system §5：把模板的表建进当前聊天 state；幂等只建结构） */
+	applyTemplate(name: string): Promise<{
+		ok: boolean;
+		error?: string;
+		applied?: string[];
+		warnings?: string[];
+	}>;
 	/** 世界状态只读（当前分支账本；与 applyStatePatch 同源；未就绪返回 null） */
 	worldState(): import("../src/types.ts").WorldState | null;
 	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮）；无宿主能力时缺省（路由回退纯管线结果）。
@@ -434,6 +452,19 @@ function readBody(req: IncomingMessage): Promise<string> {
 function sendJson(res: ServerResponse, code: number, obj: unknown): void {
 	res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
 	res.end(JSON.stringify(obj));
+}
+
+/**
+ * 宽容解析 body 里的内嵌 JSON：已解析对象直接透传，JSON 字符串尝试 parse（导入粘贴场景）；
+ * 解析失败返回 null。
+ */
+function parseBodyJson(v: unknown): unknown {
+	if (typeof v !== "string") return v;
+	try {
+		return JSON.parse(v) as unknown;
+	} catch {
+		return null;
+	}
 }
 
 const resolvePath = (cwd: string, p: string) => (isAbsolute(p) ? p : join(cwd, p));
@@ -668,6 +699,7 @@ const BRIDGE_PERM_KEYS = [
 	"storyEdit",
 	"queueCommand",
 	"applyStatePatch",
+	"tableOps",
 	"emitMedia",
 	"refreshMaterials",
 	"mountCodex",
@@ -695,6 +727,7 @@ export function normalizeAgents(input: unknown): AgentConfig[] {
 			storyEdit: bridge.storyEdit === true,
 			queueCommand: bridge.queueCommand === true,
 			applyStatePatch: bridge.applyStatePatch === true,
+			tableOps: bridge.tableOps === true,
 			emitMedia: bridge.emitMedia === true,
 			refreshMaterials: bridge.refreshMaterials === true,
 			mountCodex: bridge.mountCodex === true,
@@ -2689,6 +2722,55 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (!body.patch || typeof body.patch !== "object") throw new Error("缺少 patch");
 				const r = await host.applyStatePatch(body.patch);
 				sendJson(res, 200, r);
+				return true;
+			}
+
+			// ---- 自定义表格（DESIGN-template-system §5）：表格直写（UI 编辑用，与 bridge.applyTableOp 同源） ----
+			case "POST /api/state/tables": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { op?: unknown };
+				if (!body.op || typeof body.op !== "object" || Array.isArray(body.op)) throw new Error("缺少 op");
+				const r = await host.applyTableOp(body.op as TableOp);
+				sendJson(res, 200, r);
+				return true;
+			}
+
+			// ---- 自定义表格模板（DESIGN-template-system §5）：CRUD / 导入 / 物化 ----
+			// 模板是全局文件（.liyuan-templates/），与当前聊天无关；物化才落进当前聊天 state。
+			case "GET /api/templates": {
+				sendJson(res, 200, { templates: listTemplates(host.cwd) });
+				return true;
+			}
+			case "POST /api/templates": {
+				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				let def: TableTemplateDef | null = null;
+				if (body.tavernDB !== undefined) {
+					// 导入模式：tavernDB 为 TavernDB chatSheets raw JSON（对象或 JSON 字符串，见 parseTavernDB）
+					const raw = parseBodyJson(body.tavernDB);
+					def = parseTavernDB(raw, typeof body.name === "string" ? body.name : undefined);
+					if (!def) throw new Error("TavernDB 解析失败：未找到 sheet_ 表或结构不符");
+				} else {
+					// 手写模板：{ name, description?, tables: [{ name, columns:[{name,type?}], auto?, description?, instructions? }] }
+					const tables = Array.isArray(body.tables) ? (body.tables as TableTemplate[]) : [];
+					def = {
+						name: typeof body.name === "string" ? body.name.trim() : "",
+						...(typeof body.description === "string" && body.description.trim() ? { description: body.description } : {}),
+						tables,
+					};
+				}
+				const r = saveTemplate(host.cwd, def);
+				if (!r.ok) throw new Error(r.error);
+				sendJson(res, 200, { ok: true, name: def.name });
+				return true;
+			}
+			case "POST /api/templates/apply": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { name?: string };
+				const name = (body.name ?? "").trim();
+				if (!name) throw new Error("缺少模板名");
+				const r = await host.applyTemplate(name);
+				if (!r.ok) throw new Error(r.error ?? "物化失败");
+				sendJson(res, 200, { ok: true, applied: r.applied, warnings: r.warnings });
 				return true;
 			}
 
@@ -5182,9 +5264,27 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 			}
 
-			default:
+			default: {
+				// 自定义表格模板动态段（DESIGN-template-system §5）：GET/DELETE /api/templates/:name
+				// （:name 解析自 pathname 段，须 URL 解码——前端会 encodeURIComponent 中文模板名）
+				const tmplMatch = /^(GET|DELETE) \/api\/templates\/([^/]+)$/.exec(route);
+				if (tmplMatch) {
+					const name = decodeURIComponent(tmplMatch[2]);
+					if (!name) throw new Error("缺少模板名");
+					if (tmplMatch[1] === "GET") {
+						const def = loadTemplate(host.cwd, name);
+						if (!def) throw new Error(`模板 ${name} 不存在`);
+						sendJson(res, 200, { template: def });
+					} else {
+						const r = deleteTemplate(host.cwd, name);
+						if (!r.ok) throw new Error(r.error);
+						sendJson(res, 200, { ok: true });
+					}
+					return true;
+				}
 				sendJson(res, 404, { error: `未知接口：${route}` });
 				return true;
+			}
 		}
 	} catch (err) {
 		sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });

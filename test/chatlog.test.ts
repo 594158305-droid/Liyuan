@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
 	buildImportBlock,
+	chunkMessagesForSummary,
 	cleanChat,
 	cleanChatText,
 	parseStChat,
@@ -115,4 +116,39 @@ test("摘要输入：超长历史从尾部截取并标注", () => {
 	assert.ok(text.length < 700);
 	assert.ok(text.startsWith("（更早的剧情因长度上限未纳入摘要）"));
 	assert.ok(text.includes("第49轮"), "必须保住最新内容");
+});
+
+test("chunkMessagesForSummary：按预算分块不拆消息、单条超预算单独成块、空输入", () => {
+	// 空输入 → []
+	assert.deepEqual(chunkMessagesForSummary([], "U"), []);
+
+	// 多条小消息：按预算切块（块内 \n\n 连接，与 serializeForImportSummary 同格式），每块不超预算
+	const msgs = Array.from({ length: 20 }, (_, i) => ({
+		role: "assistant" as const,
+		name: "S",
+		text: `第${i}轮`.padEnd(50, "字"), // 每行 ≈52 字符（「S：」前缀 2 + 50）
+	}));
+	const chunks = chunkMessagesForSummary(msgs, "U", 500);
+	assert.ok(chunks.length > 1, "20 条应切成多块");
+	for (const c of chunks) assert.ok(c.length <= 500, `块不超预算（实际 ${c.length}）`);
+	// 块串接 = 完整序列化，零丢行
+	assert.equal(chunks.join("\n\n"), serializeForImportSummary(msgs, "U"), "整串串接等于无截断序列化");
+	assert.equal(chunks.join("\n\n").split("\n\n").length, 20);
+	assert.ok(chunks[0].includes("S：第0轮"));
+	assert.ok(chunks[chunks.length - 1].includes("第19轮"), "最新内容在末块");
+
+	// 单条超预算：单独成块（不拆消息）
+	const huge = { role: "user" as const, name: "U", text: "长".repeat(600) };
+	const one = chunkMessagesForSummary([huge], "U", 500);
+	assert.equal(one.length, 1);
+	assert.equal(one[0], `U：${"长".repeat(600)}`, "超预算消息完整保留、不拆分");
+	assert.ok(one[0].length > 500);
+
+	// 混合：超预算消息夹在普通消息中间 → 各自独立成块（相邻小消息不跨块合并）
+	const mixed = [
+		{ role: "user" as const, name: "U", text: "短消息甲" },
+		huge,
+		{ role: "assistant" as const, name: "S", text: "短消息乙" },
+	];
+	assert.equal(chunkMessagesForSummary(mixed, "U", 500).length, 3, "超预算消息前后的小消息各自成块");
 });

@@ -60,7 +60,8 @@ import {
 	resolveConfigPath,
 	takeAgentMergeLog,
 } from "../src/paths.ts";
-import { applyPatch, loadState, saveState } from "../src/state.ts";
+import { applyPatch, applyTableOperation, loadState, saveState } from "../src/state.ts";
+import { loadTemplate, materializeTemplate } from "../src/templates.ts";
 import { DEFAULT_CONFIG, type AgentConfig, type RpConfig, type WorldState } from "../src/types.ts";
 import {
 	loadTtsConfig,
@@ -1528,6 +1529,26 @@ const restHost: RestHost = {
 		syncStoryStateFromDisk();
 		return { applied: r.applied, warnings: r.warnings };
 	},
+	// ---- 自定义表格操作（DESIGN-custom-tables §7）：与 applyStatePatch 同源落盘 + 收编进树 ----
+	async applyTableOp(op) {
+		const file = join(stateDir, `${session.sessionId}.json`);
+		const r = applyTableOperation(loadState(file), op);
+		if (!r.ok) return { ok: false, error: r.error };
+		saveState(file, r.state!); // fs.watch 自动广播 state 帧
+		syncStoryStateFromDisk();
+		return { ok: true, applied: r.applied };
+	},
+	// ---- 自定义表格模板物化（DESIGN-template-system §5）：把模板的表建进当前聊天 state（幂等） ----
+	async applyTemplate(name) {
+		const def = loadTemplate(cwd, name);
+		if (!def) return { ok: false, error: `模板 ${name} 不存在` };
+		const file = join(stateDir, `${session.sessionId}.json`);
+		const state = loadState(file);
+		const r = materializeTemplate(state, def);
+		saveState(file, state); // fs.watch 自动广播 state 帧
+		syncStoryStateFromDisk();
+		return { ok: true, applied: r.applied, warnings: r.warnings };
+	},
 	/** 世界状态只读：与 storyBridge.worldState() 同源（currentState：树快照优先，磁盘缓存兜底） */
 	worldState() {
 		try {
@@ -1920,6 +1941,8 @@ const storyBridgeBase: StoryBridge = {
 	queueStoryCommand: (text) => restHost.queueCommand(text),
 	worldState: () => currentState(),
 	applyStatePatch: (patch) => restHost.applyStatePatch(patch),
+	applyTableOp: (op) => restHost.applyTableOp(op),
+	applyTemplate: (name) => restHost.applyTemplate(name),
 	softRefreshConfig: () => restHost.softRefreshConfig(),
 	/** P8：广播 hello 全量重放（regex_manage 写盘后让所有端用新显示规则重渲当前消息） */
 	resyncStory: () => resyncAll(),

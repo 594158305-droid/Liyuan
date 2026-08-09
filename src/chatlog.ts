@@ -168,7 +168,7 @@ export function buildImportBlock({ summary, recentTurns, charName, userName }: I
 	return parts.join("\n\n");
 }
 
-/** 摘要输入的上限保护：超长历史截取尾部（v0；分层摘要留待后续） */
+/** 摘要输入的上限保护：超长历史截取尾部（v0；分层摘要见 chunkMessagesForSummary） */
 export function serializeForImportSummary(messages: StChatMessage[], userName: string, maxChars = 100_000): string {
 	const lines = messages.map((m) => `${m.role === "user" ? userName : m.name}：${m.text}`);
 	let text = lines.join("\n\n");
@@ -179,4 +179,40 @@ export function serializeForImportSummary(messages: StChatMessage[], userName: s
 		text = `（更早的剧情因长度上限未纳入摘要）\n\n${text}`;
 	}
 	return text;
+}
+
+/**
+ * 按字符预算把消息切成接力摘要块（分层摘要：每块一次小模型摘要，块块接力合并）。
+ * 序列化格式与 serializeForImportSummary 一致（`${role==="user"?userName:m.name}：${m.text}`，块间/块内均 \n\n），
+ * 因此整串串接 = 无截断的完整序列化（零丢行）。
+ * - 保持消息边界，不拆半条消息；
+ * - 单条消息本身超过预算时单独成块（不拆，宁超不丢）；
+ * - 空输入返回 []。
+ */
+export function chunkMessagesForSummary(messages: StChatMessage[], userName: string, maxChars = 25_000): string[] {
+	const lines = messages.map((m) => `${m.role === "user" ? userName : m.name}：${m.text}`);
+	const chunks: string[] = [];
+	let current: string[] = [];
+	let currentLen = 0;
+	const flush = () => {
+		if (current.length > 0) {
+			chunks.push(current.join("\n\n"));
+			current = [];
+			currentLen = 0;
+		}
+	};
+	for (const line of lines) {
+		if (line.length > maxChars) {
+			// 单条超预算：先收掉当前块，再单独成块（不拆消息）
+			flush();
+			chunks.push(line);
+			continue;
+		}
+		// 加入本行后是否超预算：行间分隔符 \n\n 计 2 字符
+		if (currentLen + (current.length > 0 ? 2 : 0) + line.length > maxChars) flush();
+		current.push(line);
+		currentLen += line.length + (current.length > 1 ? 2 : 0);
+	}
+	flush();
+	return chunks;
 }

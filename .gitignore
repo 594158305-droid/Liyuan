@@ -16,6 +16,7 @@ packages/**/node_modules/
 .liyuan-media/
 .liyuan-skills/
 .liyuan-state/
+.liyuan-templates/
 .liyuan-uploads/
 .liyuan-audio/
 .liyuan-personas.json

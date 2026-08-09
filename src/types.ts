@@ -49,6 +49,56 @@ export interface StateRoster {
 	events: Record<string, string>;
 }
 
+/** 列类型元数据（advisory：仅提示，不做强制类型约束） */
+export type TableColumnType = "text" | "integer" | "number" | "boolean";
+
+export interface CustomTableColumn {
+	name: string;
+	type?: TableColumnType;
+	/** 列说明（TavernDB 导入时取自 DDL 注释、与中文表头对齐；advisory，供模型/场记参考） */
+	description?: string;
+}
+
+export interface CustomTable {
+	name: string;
+	description?: string;
+	columns: CustomTableColumn[];
+	rows: Record<string, unknown>[];
+	/** true = 场记每轮自动维护 + 每轮全量注入上下文；非 auto 表只注入索引，内容走 table_query */
+	auto?: boolean;
+}
+
+/** 模板里的表定义（比 CustomTable 多触发器/初始行，DESIGN-template-system §1） */
+export interface TableTemplate {
+	name: string;
+	description?: string;
+	columns: CustomTableColumn[];
+	/** true = 场记自动维护 + 每轮全量注入（建表时写入 CustomTable.auto） */
+	auto?: boolean;
+	/** 表格说明（TavernDB note；物化时并入表 description） */
+	note?: string;
+	/** 初始化触发器（TavernDB initNode） */
+	initNode?: string;
+	/** 新增触发器（TavernDB insertNode） */
+	insertNode?: string;
+	/** 更新触发器（TavernDB updateNode；有则 auto=true 启发式） */
+	updateNode?: string;
+	/** 删除触发器（TavernDB deleteNode） */
+	deleteNode?: string;
+	/** 初始数据行（TavernDB content 数据区；物化建表后填入，表已存在则跳过不重复插） */
+	rows?: Record<string, unknown>[];
+	/** 维护规则旧字段（历史模板文件的 updateNode+initNode+deleteNode 合并版；新解析不再产出，读旧文件时映射到 updateNode） */
+	instructions?: string;
+}
+
+/** 一个模板 = 一组表定义（DESIGN-template-system §1；name 为文件标识） */
+export interface TableTemplateDef {
+	/** 模板名（≤40 字，作文件标识，防路径穿越） */
+	name: string;
+	description?: string;
+	tables: TableTemplate[];
+}
+
 /** 结构化世界状态（v0 schema，可扩展） */
 export interface WorldState {
 	/** 剧情内时间，自由文本（如「第二天清晨」） */
@@ -65,6 +115,8 @@ export interface WorldState {
 	plot_threads: string[];
 	/** 登场名录（applyPatch 咽喉点自动登记；旧存档无此字段按空处理） */
 	roster?: StateRoster;
+	/** 自定义表格（键为表名；随世界线/回档一致回退；旧存档无此字段按空处理） */
+	tables?: Record<string, CustomTable>;
 }
 
 export interface CharacterState {
@@ -93,6 +145,8 @@ export interface AgentBridgePermissions {
 	queueCommand: boolean;
 	/** 写世界状态：applyStatePatch（用户主权字段直接落盘）。高危。 */
 	applyStatePatch: boolean;
+	/** 自定义表格读写：tableOps（DESIGN-custom-tables §7，table_create/drop/insert/update/delete 走账本）。中危。 */
+	tableOps: boolean;
 	/** 发媒体：emitStoryMedia。中危（可在剧情中投放图片/音频）。 */
 	emitMedia: boolean;
 	/** 刷新素材：refreshStoryMaterials。中危（重装素材/会话，可能打断当前生成）。 */
@@ -211,6 +265,11 @@ export interface RpConfig {
 	 * 缺省视为 disabled（插件默认关闭，防无感消耗额度）。扫描/加载见 src/draw-plugins/registry.ts。
 	 */
 	plugins?: Record<string, { enabled?: boolean; settings?: Record<string, unknown> }>;
+	/**
+	 * 按角色卡绑定的自定义表格模板（DESIGN-template-system §4）：卡 name → 模板名列表；
+	 * 用该卡开聊时把绑定的模板表建进聊天 state（幂等，只建结构不填数据）。
+	 */
+	cardTemplates?: Record<string, string[]>;
 }
 
 export const DEFAULT_CONFIG: RpConfig = {

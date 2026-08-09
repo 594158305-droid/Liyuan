@@ -49,6 +49,7 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 - "inventory"：字符串数组，整体替换——只在物品归属变化时给出变化后的完整清单，条目注明归属（如「黄铜怀表（${userName}持有）」）。
 - "flags"：键值对，按键合并（值为字符串）。
 - "plot_threads"：字符串数组，整体替换——新增或了结剧情线时给出完整清单。
+- "tables"：{ "<表名>": { "insert": [行对象...], "update": [{"match":{...},"changes":{...}}...], "delete": [匹配对象...] } }。仅更新 auto 标记的表（主角信息表这类每轮维护的）；静态参考表不要动。行对象只含该表已声明的列。
 要点：否定性事件也要记账（赠礼被拒→物品仍在原主处；承诺被收回→记入 flags）；新的承诺、约定、伏笔进 plot_threads；没有变化的字段不要出现在 patch 中；完全无变化则 "patch" 为 {}。
 
 只输出 JSON 对象，例如 {"patch":{...}} 或 {"patch":{}}。不要输出 warnings、不要输出其他文字。`;
