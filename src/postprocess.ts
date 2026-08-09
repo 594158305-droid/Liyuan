@@ -318,7 +318,7 @@ export type DisplaySkin = {
 export function isHtmlDisplayPayload(text: string): boolean {
 	if (!text) return false;
 	if (isFullPageHtmlPayload(text)) return true;
-	// 皮肤包的大块 styled div（淫宫状态栏等）
+	// 皮肤包的大块 styled div（部分社区皮肤包的状态栏等）
 	if (/<div\b[^>]*\bstyle\s*=/i.test(text) && /<\/div>/i.test(text) && text.length > 60) return true;
 	return false;
 }
