@@ -6,7 +6,7 @@
  * 手机（<1000px）：面板变全屏抽屉。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment } from "react";
 import {
 	apiGet,
 	apiGetCacheClear,
@@ -240,6 +240,19 @@ function loadPanelPrefs(): { left: PanelId | null; right: PanelId | null } {
 	}
 }
 
+/** 读取回合窗口设置（localStorage；未设置/非法值回落默认，clamp 到合法区间） */
+function readWindowSetting(key: string, fallback: number, min: number, max: number): number {
+	try {
+		const s = localStorage.getItem(key);
+		if (s === null || s.trim() === "") return fallback; // 未设置——Number(null)=0 会把 M 误判成 0 关闭窗口化
+		const raw = Number(s);
+		if (Number.isFinite(raw)) return Math.min(max, Math.max(min, Math.round(raw)));
+	} catch {
+		/* localStorage 不可用时用默认 */
+	}
+	return fallback;
+}
+
 export default function App() {
 	const [conn, setConn] = useState<ConnState>("connecting");
 	const [charName, setCharName] = useState("梨园");
@@ -268,6 +281,11 @@ export default function App() {
 	const [pending, setPending] = useState<PendingUpload[]>([]);
 	const [uploading, setUploading] = useState(false);
 	const [atBottom, setAtBottom] = useState(true);
+	/** 回合窗口化渲染（两层缓冲）：主窗口回合数 N + 前后缓冲回合数 M（localStorage 持久化） */
+	const [windowN, setWindowN] = useState(() => readWindowSetting("liyuan.chat.windowRounds", 5, 1, 50));
+	const [windowM, setWindowM] = useState(() => readWindowSetting("liyuan.chat.bufferRounds", 5, 0, 50));
+	/** 窗口首回合（渲染区间起点）；贴底语义下由 effectiveWindowTop 派生对齐最新回合 */
+	const [windowTop, setWindowTop] = useState(0);
 	/** 消息内联编辑：idx + 草稿 + 类型（用户改写后 reroll / agent 改写后 editreply） */
 	const [msgEdit, setMsgEdit] = useState<{ idx: number; kind: "user" | "narrative" | "greeting"; draft: string } | null>(
 		null,
@@ -442,6 +460,17 @@ export default function App() {
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const uploadInputRef = useRef<HTMLInputElement>(null);
 	const atBottomRef = useRef(true);
+	/** 回合窗口化：渲染区间内各回合容器 DOM（按全局回合索引；滚动检测/锚定用） */
+	const roundElRefs = useRef(new Map<number, HTMLDivElement>());
+	/** 平移锚块（区间首/末回合容器）与修正参数 */
+	const anchorElRef = useRef<HTMLDivElement | null>(null);
+	const anchorOffsetRef = useRef(0);
+	const pendingAnchorRef = useRef(false);
+	/** 滚动事件里读最新有效窗口首回合 */
+	const effectiveWindowTopRef = useRef(0);
+	/** 锚定修正抑制：修正 scrollTop 会触发 scroll 事件 → 标记跳过由修正引起的本轮 onScroll，防「修正→平移→修正」振荡 */
+	const scrollAdjustingRef = useRef(false);
+	const scrollAdjustTargetRef = useRef(0);
 
 	useEffect(() => {
 		localStorage.setItem("liyuan.panels", JSON.stringify({ left: leftPanel, right: rightPanel }));
@@ -749,6 +778,10 @@ export default function App() {
 							return { ...m, segments: m.timeline as unknown as TurnSegment[] };
 						}),
 					);
+					// 回合窗口：hello 全量帧重置贴底（最新回合在区间内）；消息 append/流式 delta 不重置
+					setWindowTop(0);
+					atBottomRef.current = true;
+					setAtBottom(true);
 					setMsgEdit(null); // 会话对齐后关闭内联编辑
 					setWorldState(frame.state);
 					setStats(frame.stats);
@@ -1161,6 +1194,62 @@ export default function App() {
 		return out;
 	}, [numbered]);
 
+	/**
+	 * 回合切分（窗口化渲染）：user/greeting 开新回合，其后的 narrative 回复/backstage/附件归入该回合；
+	 * 开场 narrative（前无 user/greeting）自成回合；backstage 组整组归属，不跨回合。
+	 */
+	const rounds = useMemo(() => {
+		const out: { blocks: RenderBlock[] }[] = [];
+		for (const b of blocks) {
+			const opens = b.kind === "one" && (b.msg.channel === "user" || b.msg.channel === "greeting");
+			if (opens || out.length === 0) out.push({ blocks: [b] });
+			else out[out.length - 1].blocks.push(b);
+		}
+		return out;
+	}, [blocks]);
+
+	/** 窗口化启用与尺寸：主窗口 N + 前后缓冲 M（共 N+2M 回合在 DOM）；M=0 视为全关 */
+	const windowingEnabled = windowM > 0;
+	const roundWindowSize = windowN + 2 * windowM;
+	const totalRounds = rounds.length;
+	const maxWindowTop = Math.max(0, totalRounds - roundWindowSize);
+	/** 有效窗口首回合：贴底时强制对齐最新回合（最新回合必在区间内）；否则跟随 windowTop 并 clamp */
+	const effectiveWindowTop = useMemo(() => {
+		if (!windowingEnabled) return 0;
+		if (atBottom) return maxWindowTop;
+		return Math.min(windowTop, maxWindowTop);
+	}, [windowingEnabled, atBottom, maxWindowTop, windowTop]);
+
+	/** 渲染切片：仅渲染窗口区间内的回合（消息总数 ≤ N+2M 或 M=0 时全量退化，行为与现状一致） */
+	const visibleRounds = useMemo(() => {
+		if (!windowingEnabled || totalRounds <= roundWindowSize) return rounds;
+		return rounds.slice(effectiveWindowTop, effectiveWindowTop + roundWindowSize);
+	}, [rounds, windowingEnabled, totalRounds, roundWindowSize, effectiveWindowTop]);
+
+	/** 窗口外含脚本的 html 消息：保留 DOM 不卸载（渲染进 display:none 隐藏容器，contentWindow 不销毁、
+	 *  脚本不重跑）；纯文本/图片/音频/无脚本 html 消息窗口外直接不渲染 */
+	const hiddenHtmlBlocks = useMemo(() => {
+		if (!windowingEnabled || totalRounds <= roundWindowSize) return [];
+		const rendered = new Set<number>();
+		for (const r of visibleRounds) for (const b of r.blocks) rendered.add(b.idx);
+		return blocks.filter(
+			(b) =>
+				!rendered.has(b.idx) &&
+				b.kind === "one" &&
+				b.msg.channel === "html" &&
+				!!b.msg.html &&
+				b.msg.scripts === true,
+		);
+	}, [blocks, visibleRounds, windowingEnabled, totalRounds, roundWindowSize]);
+
+	/** 全局最后一个 backstage 组（仅「位于渲染区间内」的它才默认展开，避免翻历史误展开切片尾部组） */
+	const lastBackstageGroupIdx = useMemo(() => {
+		for (let i = blocks.length - 1; i >= 0; i--) {
+			if (blocks[i].kind === "backstage") return blocks[i].idx;
+		}
+		return -1;
+	}, [blocks]);
+
 	const lastNarrativeIdx = useMemo(() => {
 		for (let i = messages.length - 1; i >= 0; i--) if (messages[i].channel === "narrative") return i;
 		return -1;
@@ -1231,9 +1320,65 @@ export default function App() {
 		if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
 	}, [messages, streamText, streamThinking, thinkingLive, toolNote, liveActs, liveSegs]);
 
+	/** 视口最顶可见回合：渲染区间内第一个「底边越过视口顶」的回合（区间小，顺序遍历便宜） */
+	const topVisibleRound = (): number => {
+		const el = listRef.current;
+		if (!el) return effectiveWindowTopRef.current;
+		const viewTop = el.scrollTop;
+		const listRect = el.getBoundingClientRect();
+		let t = effectiveWindowTopRef.current;
+		for (const [idx, node] of roundElRefs.current) {
+			if (node.getBoundingClientRect().bottom - listRect.top + el.scrollTop > viewTop) {
+				t = idx;
+				break;
+			}
+		}
+		return t;
+	};
+
 	const onScroll = () => {
 		const el = listRef.current;
 		if (!el) return;
+		// 锚定修正抑制：scrollTop 程序化修正会触发 scroll 事件 → 跳过由修正引起的本轮计算（防「修正→平移→修正」振荡）
+		if (scrollAdjustingRef.current) {
+			scrollAdjustingRef.current = false;
+			return;
+		}
+		// 回合窗口平移（保留 atBottomRef 贴底跟随逻辑不变）：滚动时按视口位置滑动渲染区间
+		if (windowingEnabled && totalRounds > roundWindowSize) {
+			const L = totalRounds;
+			const W = roundWindowSize;
+			const maxTop = L - W;
+			const curTop = effectiveWindowTopRef.current;
+			const T = topVisibleRound();
+			// 每次最多平移 1 回合（目标 = clamp(T - M, 0, maxTop) 再收窄到相邻 1 格）：
+			// 一次跳多回合会让锚定修正后的视口位置与窗口错位，target 被 clamp 回贴底 → 上下往返振荡。
+			let target = Math.min(maxTop, Math.max(0, T - windowM));
+			if (target > curTop) target = Math.min(maxTop, curTop + 1);
+			else if (target < curTop) target = Math.max(0, curTop - 1);
+			// 上滚顶到区间首回合且全局还有更早回合 → 继续逐回合上移
+			if (el.scrollTop <= 1 && curTop > 0) target = Math.max(0, curTop - 1);
+			// 下滚顶到区间末回合（且窗口还能下移、非真实底部）→ 继续逐回合下移
+			const atRenderedBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
+			if (atRenderedBottom && el.scrollHeight > el.clientHeight && curTop + W < L && !atBottomRef.current) {
+				target = Math.min(maxTop, curTop + 1);
+			}
+			if (target !== curTop) {
+				// 锚定：上移锚旧首回合容器、下移锚旧末回合容器（平移后两者仍在 DOM，可量 offsetTop 差）
+				const firstEl = roundElRefs.current.get(curTop);
+				const lastEl = roundElRefs.current.get(curTop + W - 1);
+				anchorElRef.current = target < curTop ? (firstEl ?? lastEl ?? null) : (lastEl ?? firstEl ?? null);
+				anchorOffsetRef.current = anchorElRef.current?.offsetTop ?? 0;
+				pendingAnchorRef.current = true;
+				setWindowTop(target);
+			}
+			// 贴底语义：视口在渲染底部 且 窗口已到全局底部（区间还能下移时不算贴底，避免翻历史误判）
+			const near = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+			const next = near && curTop + W >= L;
+			atBottomRef.current = next;
+			setAtBottom(next);
+			return;
+		}
 		const near = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
 		atBottomRef.current = near;
 		setAtBottom(near);
@@ -1246,6 +1391,48 @@ export default function App() {
 		setAtBottom(true);
 		el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 	};
+
+	// 有效窗口首回合同步进 ref（滚动事件里读最新值）
+	useEffect(() => {
+		effectiveWindowTopRef.current = effectiveWindowTop;
+	}, [effectiveWindowTop]);
+
+	// 平移锚定：窗口滑动后按锚块 offsetTop 差值修正 scrollTop，视口内容不跳动；
+	// 贴底时窗口因新增回合移动 → 保持停在最新底部。既有 atBottomRef 跟随逻辑不动。
+	useLayoutEffect(() => {
+		const el = listRef.current;
+		if (!el) return;
+		if (pendingAnchorRef.current) {
+			pendingAnchorRef.current = false;
+			const anchor = anchorElRef.current;
+			if (anchor && anchor.isConnected) {
+				const delta = anchor.offsetTop - anchorOffsetRef.current;
+				if (delta !== 0) {
+					// 置抑制标记：本次 scrollTop 修正引起的 scroll 事件跳过 onScroll 窗口计算
+					scrollAdjustingRef.current = true;
+					scrollAdjustTargetRef.current = el.scrollTop + delta;
+					el.scrollTop += delta;
+				}
+			}
+			return;
+		}
+		if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+	}, [effectiveWindowTop]);
+
+	// 有效窗口与 windowTop 状态追平：贴底派生后同步，避免退出贴底时窗口跳变
+	useEffect(() => {
+		setWindowTop((t) => (t === effectiveWindowTop ? t : effectiveWindowTop));
+	}, [effectiveWindowTop]);
+
+	// 设置面板变更即时生效：监听自定义事件，重读 localStorage 更新 N/M
+	useEffect(() => {
+		const reload = () => {
+			setWindowN(readWindowSetting("liyuan.chat.windowRounds", 5, 1, 50));
+			setWindowM(readWindowSetting("liyuan.chat.bufferRounds", 5, 0, 50));
+		};
+		window.addEventListener("liyuan:chat-window-settings", reload);
+		return () => window.removeEventListener("liyuan:chat-window-settings", reload);
+	}, []);
 
 	/**
 	 * 场外标记粗判（仅 UX 用：发出后顺手展开助手面板）。
@@ -2077,136 +2264,166 @@ export default function App() {
 											<div className="empty-hint">{conn === "open" ? "新的会话，开始对话吧。" : "连接后台中…"}</div>
 										</div>
 									)}
-									{blocks.map((b, bi) =>
-										b.kind === "backstage" ? (
-											<BackstageGroup
-												key={`bs-${b.idx}`}
-												msgs={b.msgs}
-												fallbackName={charName}
-												open={bi === blocks.length - 1}
-												avatarUrl={charAvatarUrl}
-											/>
-										) : (
-											<Bubble
-												key={b.idx}
-												msg={b.msg}
-												floor={b.floor}
-												fallbackName={b.msg.channel === "user" ? userName || "你" : charName}
-												avatarUrl={b.msg.channel === "user" ? userAvatarUrl : charAvatarUrl}
-												skin={cardSkin}
-												onReroll={
-													!busy &&
-													!msgEdit &&
-													b.msg.channel === "narrative" &&
-													b.idx === lastNarrativeIdx
-														? () => ws.send({ type: "swipe", dir: "new" })
-														: undefined
-												}
-												swipe={
-													!busy &&
-													!msgEdit &&
-													b.msg.channel === "narrative" &&
-													b.idx === lastNarrativeIdx
-														? {
-																index: b.msg.swipe?.index ?? 0,
-																total: b.msg.swipe?.total ?? 1,
-																onPrev: () => ws.send({ type: "swipe", dir: "prev" }),
-																onNext: () => ws.send({ type: "swipe", dir: "next" }),
-															}
-														: undefined
-												}
-												onEdit={
-													!busy && !msgEdit
-														? b.msg.channel === "user" && b.idx === lastUserIdx
-															? () => startMsgEdit(b.idx, "user")
-															: b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
-																? () => startMsgEdit(b.idx, "narrative")
-																: b.msg.channel === "greeting" && greetingOnly
-																	? () => startMsgEdit(b.idx, "greeting")
-																	: undefined
-														: undefined
-												}
-												onRewind={
-													!busy &&
-													!msgEdit &&
-													b.msg.channel === "user" &&
-													!b.msg.backstage &&
-													storyUserIdxs.includes(b.idx)
-														? () => rewindToUser(b.idx)
-														: undefined
-												}
-												onDelete={
-													!busy && !msgEdit
-														? b.msg.channel === "user" && b.idx === lastUserIdx
-															? deleteLastUserTurn
-															: b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
-																? dropLastReply
+									{visibleRounds.map((r, ri) => (
+										<div
+											key={`round-${effectiveWindowTop + ri}`}
+											className="flow-round"
+											data-round={effectiveWindowTop + ri}
+											ref={(node) => {
+												const idx = effectiveWindowTop + ri;
+												if (node) roundElRefs.current.set(idx, node);
+												else roundElRefs.current.delete(idx);
+											}}
+										>
+											{r.blocks.map((b) =>
+												b.kind === "backstage" ? (
+													<BackstageGroup
+														key={`bs-${b.idx}`}
+														msgs={b.msgs}
+														fallbackName={charName}
+														open={b.idx === lastBackstageGroupIdx}
+														avatarUrl={charAvatarUrl}
+													/>
+												) : (
+													<Bubble
+														key={b.idx}
+														msg={b.msg}
+														floor={b.floor}
+														fallbackName={b.msg.channel === "user" ? userName || "你" : charName}
+														avatarUrl={b.msg.channel === "user" ? userAvatarUrl : charAvatarUrl}
+														skin={cardSkin}
+														onReroll={
+															!busy &&
+															!msgEdit &&
+															b.msg.channel === "narrative" &&
+															b.idx === lastNarrativeIdx
+																? () => ws.send({ type: "swipe", dir: "new" })
 																: undefined
-														: undefined
-												}
-												onCopy={
-													b.msg.channel === "narrative" || b.msg.channel === "greeting" || b.msg.channel === "user"
-														? doCopy
-														: undefined
-												}
-												onStore={
-													!busy &&
-													!msgEdit &&
-													(b.msg.channel === "narrative" || b.msg.channel === "greeting") &&
-													(b.idx === lastNarrativeIdx || (greetingOnly && b.msg.channel === "greeting"))
-														? openStoreModal
-														: undefined
-												}
-												onTts={
-													!busy &&
-													!msgEdit &&
-													(b.msg.channel === "narrative" || b.msg.channel === "greeting" || b.msg.channel === "user")
-														? doTts
-														: undefined
-												}
-												ttsBusy={ttsBusy}
-												onIllustrate={
-													!busy && !msgEdit && b.msg.channel === "narrative" ? doIllustrate : undefined
-												}
-												illustrateBusy={illustrateBusy}
-												greetingSwitch={
-													!busy &&
-													!msgEdit &&
-													greetingOnly &&
-													b.msg.channel === "greeting"
-														? {
-																// 优先消息自带序号（与正文同源），避免 API 轮询滞后
-																index:
-																	b.msg.greetingPick?.index ??
-																	greetingMeta?.index ??
-																	0,
-																total: Math.max(
-																	1,
-																	b.msg.greetingPick?.total ??
-																		greetingMeta?.total ??
-																		1,
-																),
-																onPrev: () => switchGreeting("prev"),
-																onNext: () => switchGreeting("next"),
-															}
-														: undefined
-												}
-												edit={
-													msgEdit && msgEdit.idx === b.idx
-														? {
-																draft: msgEdit.draft,
-																onChange: (v) => setMsgEdit((e) => (e ? { ...e, draft: v } : e)),
-																onCancel: cancelMsgEdit,
-																onSubmit: submitMsgEdit,
-																submitLabel:
-																	msgEdit.kind === "user"
-																		? "按修改后的输入重新生成"
-																		: "采用改写（或未改时重新生成）",
-															}
-														: undefined
-												}
-											/>
-										),
+														}
+														swipe={
+															!busy &&
+															!msgEdit &&
+															b.msg.channel === "narrative" &&
+															b.idx === lastNarrativeIdx
+																? {
+																		index: b.msg.swipe?.index ?? 0,
+																		total: b.msg.swipe?.total ?? 1,
+																		onPrev: () => ws.send({ type: "swipe", dir: "prev" }),
+																		onNext: () => ws.send({ type: "swipe", dir: "next" }),
+																	}
+																: undefined
+														}
+														onEdit={
+															!busy && !msgEdit
+																? b.msg.channel === "user" && b.idx === lastUserIdx
+																	? () => startMsgEdit(b.idx, "user")
+																	: b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
+																		? () => startMsgEdit(b.idx, "narrative")
+																		: b.msg.channel === "greeting" && greetingOnly
+																			? () => startMsgEdit(b.idx, "greeting")
+																			: undefined
+																: undefined
+														}
+														onRewind={
+															!busy &&
+															!msgEdit &&
+															b.msg.channel === "user" &&
+															!b.msg.backstage &&
+															storyUserIdxs.includes(b.idx)
+																? () => rewindToUser(b.idx)
+																: undefined
+														}
+														onDelete={
+															!busy && !msgEdit
+																? b.msg.channel === "user" && b.idx === lastUserIdx
+																	? deleteLastUserTurn
+																	: b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
+																		? dropLastReply
+																		: undefined
+																: undefined
+														}
+														onCopy={
+															b.msg.channel === "narrative" || b.msg.channel === "greeting" || b.msg.channel === "user"
+																? doCopy
+																: undefined
+														}
+														onStore={
+															!busy &&
+															!msgEdit &&
+															(b.msg.channel === "narrative" || b.msg.channel === "greeting") &&
+															(b.idx === lastNarrativeIdx || (greetingOnly && b.msg.channel === "greeting"))
+																? openStoreModal
+																: undefined
+														}
+														onTts={
+															!busy &&
+															!msgEdit &&
+															(b.msg.channel === "narrative" || b.msg.channel === "greeting" || b.msg.channel === "user")
+																? doTts
+																: undefined
+														}
+														ttsBusy={ttsBusy}
+														onIllustrate={
+															!busy && !msgEdit && b.msg.channel === "narrative" ? doIllustrate : undefined
+														}
+														illustrateBusy={illustrateBusy}
+														greetingSwitch={
+															!busy &&
+															!msgEdit &&
+															greetingOnly &&
+															b.msg.channel === "greeting"
+																? {
+																		// 优先消息自带序号（与正文同源），避免 API 轮询滞后
+																		index:
+																			b.msg.greetingPick?.index ??
+																			greetingMeta?.index ??
+																			0,
+																		total: Math.max(
+																			1,
+																			b.msg.greetingPick?.total ??
+																				greetingMeta?.total ??
+																				1,
+																		),
+																		onPrev: () => switchGreeting("prev"),
+																		onNext: () => switchGreeting("next"),
+																	}
+																: undefined
+														}
+														edit={
+															msgEdit && msgEdit.idx === b.idx
+																? {
+																		draft: msgEdit.draft,
+																		onChange: (v) => setMsgEdit((e) => (e ? { ...e, draft: v } : e)),
+																		onCancel: cancelMsgEdit,
+																		onSubmit: submitMsgEdit,
+																		submitLabel:
+																			msgEdit.kind === "user"
+																				? "按修改后的输入重新生成"
+																				: "采用改写（或未改时重新生成）",
+																	}
+																: undefined
+														}
+													/>
+												),
+											)}
+										</div>
+									))}
+									{/* 窗口外含脚本的 html 消息：隐藏容器保活（display:none，contentWindow 不销毁、脚本不重跑） */}
+									{hiddenHtmlBlocks.length > 0 && (
+										<div className="flow-hidden-html" style={{ display: "none" }} aria-hidden="true">
+											{hiddenHtmlBlocks.map((b) =>
+												b.kind === "one" ? (
+													<Bubble
+														key={`hidden-${b.idx}`}
+														msg={b.msg}
+														floor={b.floor}
+														fallbackName={charName}
+														avatarUrl={charAvatarUrl}
+														skin={cardSkin}
+													/>
+												) : null,
+											)}
+										</div>
 									)}
 								</>
 							)}

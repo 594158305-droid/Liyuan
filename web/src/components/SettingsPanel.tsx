@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, apiGet, apiPut, type RpConfigView } from "../api.ts";
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
-import { PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
 
 type MemoryStoreStats = {
 	id: string;
@@ -643,6 +643,66 @@ function AccessSection({ toast }: { toast: (level: "info" | "warning" | "error",
 	);
 }
 
+/** 主聊天「回合窗口化渲染」设置事件：App 监听后重读 localStorage 即时生效 */
+const CHAT_WINDOW_SETTINGS_EVENT = "liyuan:chat-window-settings";
+
+/** 读取回合窗口设置（localStorage；未设置/非法值回落默认，clamp 到合法区间） */
+function readWindowSetting(key: string, fallback: number, min: number, max: number): number {
+	try {
+		const s = localStorage.getItem(key);
+		if (s === null || s.trim() === "") return fallback; // 未设置——Number(null)=0 会把 M 误判成 0 关闭窗口化
+		const raw = Number(s);
+		if (Number.isFinite(raw)) return Math.min(max, Math.max(min, Math.round(raw)));
+	} catch {
+		/* localStorage 不可用 */
+	}
+	return fallback;
+}
+
+/** 主聊天窗口（两层缓冲）：纯本机显示设置，变更即时生效，不写服务端配置 */
+function ChatWindowSection() {
+	const [n, setN] = useState(() => readWindowSetting("liyuan.chat.windowRounds", 5, 1, 50));
+	const [m, setM] = useState(() => readWindowSetting("liyuan.chat.bufferRounds", 5, 0, 50));
+	const apply = (key: string, v: number, min: number, max: number) => {
+		const val = Math.min(max, Math.max(min, Math.round(v) || min));
+		try {
+			localStorage.setItem(key, String(val));
+		} catch {
+			/* 忽略写入失败 */
+		}
+		window.dispatchEvent(new Event(CHAT_WINDOW_SETTINGS_EVENT));
+		return val;
+	};
+	return (
+		<section className="sp-section">
+			<h4>主聊天窗口</h4>
+			<div className="field-hint">
+				超长会话只渲染最新一段回合，上下滚动时窗口跟随平移，避免整页消息堆在 DOM 里。改动即时生效。
+			</div>
+			<Field label="主窗口回合数（N）" hint="始终渲染在 DOM 的主窗口回合数（1–50，默认 5）">
+				<input
+					className="panel-search num"
+					type="number"
+					min={1}
+					max={50}
+					value={n}
+					onChange={(e) => setN(apply("liyuan.chat.windowRounds", Number(e.target.value), 1, 50))}
+				/>
+			</Field>
+			<Field label="前后缓冲回合数（M）" hint="窗口两侧预渲染的缓冲回合数（0–50，默认 5；0 = 关闭窗口化，全量渲染）">
+				<input
+					className="panel-search num"
+					type="number"
+					min={0}
+					max={50}
+					value={m}
+					onChange={(e) => setM(apply("liyuan.chat.bufferRounds", Number(e.target.value), 0, 50))}
+				/>
+			</Field>
+		</section>
+	);
+}
+
 export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
 	const { busy, run } = useAction(toast);
@@ -700,6 +760,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 				</div>
 				<div className="field-hint">白昼 / 黑夜立刻切换，偏好记在本机浏览器，与会话配置无关。</div>
 			</section>
+			<ChatWindowSection />
 			<AccessSection toast={toast} />
 			<MemorySection toast={toast} />
 			{data && (

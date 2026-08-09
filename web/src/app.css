@@ -849,6 +849,11 @@ html[data-theme="dark"] [data-tip]:focus-visible::after {
 	margin: 0 auto;
 }
 
+/* 回合窗口化渲染：每回合一个纯包裹容器（不参与视觉、不打断消息间距） */
+.flow-round {
+	display: block;
+}
+
 .msg {
 	margin: 0 0 22px;
 	line-height: 1.9;
