@@ -324,6 +324,25 @@ test("draft_seal：回执谢幕导向——卡定义状态栏时点名「最后�
 	assert.doesNotMatch(r2.text, /最后一步/, "无状态栏卡不催谢幕");
 });
 
+test("修复死循环安全阀：同批违规连修 3 轮未消 → 放行推进（8/09 实弹误报保护）", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	d.rules.bannedWords = ["闪过"];
+	// 段里带禁词；三次 edit 都改别处（模拟「修不掉」——实弹是验收误报，模型无从下手）
+	runWriteTool(ws, d, "draft_append", { segment: "她推门进来，眼中闪过一道冷光。屋里点着灯。" });
+	assert.ok(ws.pendingViolations.length > 0, "禁词违规挂起");
+	runWriteTool(ws, d, "draft_edit", { edits: [{ old: "屋里点着灯", new: "屋内点着灯" }] });
+	assert.ok(ws.pendingViolations.length > 0, "第 1 修未消仍拦");
+	runWriteTool(ws, d, "draft_edit", { edits: [{ old: "点着灯", new: "燃着灯" }] });
+	assert.ok(ws.pendingViolations.length > 0, "第 2 修未消仍拦");
+	const r3 = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "燃着灯", new: "亮着灯" }] });
+	assert.match(r3.text, /已放行/, "第 3 修未消 → 放行说明");
+	assert.equal(ws.pendingViolations.length, 0, "放行后不再拦推进");
+	// 放行持久：seal 重跑验收，同批违规不再回填 pending
+	runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(ws.pendingViolations.length, 0, "封笔复验不撤销放行");
+});
+
 test("draft_seal：空工作区封笔被拒", () => {
 	const ws = createWorkspace();
 	const r = runWriteTool(ws, deps(), "draft_seal", {});

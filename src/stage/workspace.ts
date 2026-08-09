@@ -81,6 +81,12 @@ export interface TurnWorkspace {
 	 * draft_edit 改稿成功后会重跑验收，此清单随之更新；空 = 可以继续演。
 	 */
 	pendingViolations: string[];
+	/** 修复死循环安全阀（8/09）：同一批违规连续 edit 未消的次数 */
+	stuckFixes: number;
+	/** 上一次 edit 后的违规批次指纹（比对是否原地踏步） */
+	lastFixKey: string;
+	/** 已放行的违规批次（判为修不掉/验收误报）：runCheck 对同批次不再拦推进 */
+	bailedFixKey: string;
 	checks: number;
 	/**
 	 * 本拍时间线（思考/工具/正文按**发生顺序**）。
@@ -120,6 +126,9 @@ export function createWorkspace(): TurnWorkspace {
 		patches: [],
 		lastGreen: false,
 		pendingViolations: [],
+		stuckFixes: 0,
+		lastFixKey: "",
+		bailedFixKey: "",
 		checks: 0,
 		timeline: [],
 	};
@@ -304,8 +313,13 @@ function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green
 		: report.violations;
 	const green = violations.length === 0 && sov.length === 0;
 	ws.lastGreen = green && !pending;
-	// 修复注入时机：未修违规随每轮 append 回执记下——引擎据此拦「带着脏段续演」
-	ws.pendingViolations = [...violations, ...sov];
+	// 修复注入时机：未修违规随每轮 append 回执记下——引擎据此拦「带着脏段续演」。
+	// 安全阀（8/09）：已放行的违规批次（bailedFixKey，见 draft_edit 分支）不再拦——
+	// seal/append 重跑验收时同批违规原样在场，若再进 pending 就前功尽弃。
+	// 比对用稳定前缀口径（冒号前），与 draft_edit 分支的指纹同源。
+	const pendingList = [...violations, ...sov];
+	const pendingKey = pendingList.map((v) => v.split("：")[0]).join("|");
+	ws.pendingViolations = pendingKey === ws.bailedFixKey ? [] : pendingList;
 	// 未封笔：连同 notes 里的「正文 N 字，预设建议上/下限」一并滤掉——
 	// 那是最直接的误差信号（目标 − 实测），留着等于把游标卡尺塞回模型手里。
 	const notes = pending ? report.notes.filter((n) => !/^正文 \d+ 字/.test(n)) : report.notes;
@@ -508,13 +522,32 @@ export function runWriteTool(
 		else replaceDraftSegment(ws, ws.draft);
 		// 改稿即验（与 draft_write 收稿即验同理）：省一轮往返
 		const c = runCheck(ws, deps);
+		// 修复死循环安全阀（8/09 实弹：验收误报「摄像机=比喻」，模型连修 9 轮烧完轮次
+		// 预算也修不掉）：同一批违规经 3 次定点修仍原样未消 → 判为修不掉（多半是验收
+		// 误报），放行推进——违规不再拦 append/done/seal，修复卡随 pending 清空自动退场。
+		let bail = "";
+		// 指纹取违规的稳定前缀（冒号前——「禁词「X」」「比喻词 N 次…」）：ctxQuote 引文
+		// 会随邻近文本微变，用全文做 key 永远对不上（计数变化 = 有进展，照常重置）
+		const fixKey = ws.pendingViolations.map((v) => v.split("：")[0]).join("|");
+		if (fixKey) {
+			if (fixKey === ws.lastFixKey) ws.stuckFixes++;
+			else {
+				ws.stuckFixes = 0;
+				ws.lastFixKey = fixKey;
+			}
+			if (ws.stuckFixes >= 2) {
+				ws.bailedFixKey = fixKey;
+				ws.pendingViolations = [];
+				bail = `\n（这批违规已连修 3 轮未消——可能是验收误报，已放行：不再拦推进，按现稿继续演出/收笔即可。）`;
+			}
+		}
 		// 未封笔时不带字数读数（同 draft_append 口径）；封笔后是验收场合，字数可见无害
 		const pending = ws.appends > 0 && !ws.sealed;
 		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;
 		const head = pending ? `已改 ${edits.length} 处` : `已改 ${edits.length} 处（正文 ${body} 字）`;
 		return {
-			text: `${head}：\n${r.details.join("\n")}\n\n验收报告：\n${c.text}`,
-			activity: `定点改稿 ${edits.length} 处${c.green ? " · 验收通过" : ""}`,
+			text: `${head}：\n${r.details.join("\n")}\n\n验收报告：\n${c.text}${bail}`,
+			activity: `定点改稿 ${edits.length} 处${c.green ? " · 验收通过" : bail ? " · 连修未消已放行" : ""}`,
 			ok: true,
 		};
 	}

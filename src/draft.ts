@@ -702,14 +702,28 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 		// 只扫叙述层：对白里的「像吗？」是人物在说话，不是作者在打比方。
 		// 8/08 实弹——自然对白被计成 5 次比喻，模型两段思考全花在跟计数搏斗上，
 		// 最后把对白改僵。可精确计数的文风判决会被当成待优化的分数（与字数螺旋同构）。
+		// 8/09 实弹二修：单字「像」误伤复合词——「摄像机」被数成比喻，模型连修 9 轮
+		// 死活找不到（验收器数的字它不该改也改不掉）；且旧报告只给计数不给位置，
+		// 模型只能盲猜。现在：复合词排除 + 每处命中给引文。
 		const narrationOnly = stripQuotedSpans(body);
-		const words = narrationOnly.match(/像|仿佛|如同|宛如|好似|犹如/g) ?? [];
+		// 复合词排除宁漏勿误：误报会把模型拖进修复循环（改不掉验收数的字），漏计
+		// 只是文风松一格。名单里不收「神/人/群/影」——「眼神像刀」「人像影子」
+		// 「人群像潮水」「背影像山」是高频叙事句式，比「神像/人像/群像/影像」值钱。
+		const METAPHOR_RE =
+			/(?<![摄录图画头塑雕肖遗想偶佛镜成显])像(?![素机片册章])|仿佛|如同|宛如|好似|犹如/g;
+		const hits = [...narrationOnly.matchAll(METAPHOR_RE)];
 		const paras = body.split(/\n\s*\n|\n/).filter((s) => s.trim().length > 0).length || 1;
 		const limit = Math.max(1, Math.ceil(paras / 5));
-		if (words.length > limit) {
-			violations.push(`比喻词 ${words.length} 次 / ${paras} 段（预设约 5 段 1 次，上限约 ${limit}）——保留最必要的一处，其余改白描。`);
-		} else if (words.length > 0) {
-			notes.push(`比喻词 ${words.length} 次 / ${paras} 段，在限内。`);
+		if (hits.length > limit) {
+			const quotes = hits
+				.slice(0, 5)
+				.map((m) => ctxQuote(narrationOnly, m.index ?? 0, m[0].length))
+				.join("；");
+			violations.push(
+				`比喻词 ${hits.length} 次 / ${paras} 段（预设约 5 段 1 次，上限约 ${limit}）：${quotes}——保留最必要的一处，其余改白描。`,
+			);
+		} else if (hits.length > 0) {
+			notes.push(`比喻词 ${hits.length} 次 / ${paras} 段，在限内。`);
 		}
 	}
 

@@ -218,6 +218,22 @@ test("checkDraft：markdown 标题符号判违规——正文不是文档（8/09
 	assert.ok(!r2.violations.some((v) => v.includes("markdown")), "标签块内与无标题正文不误伤");
 });
 
+test("checkDraft：比喻词复合词不误伤 + 违规带引文（8/09 实弹「摄像机」连修 9 轮）", () => {
+	const rules = emptyDraftRules();
+	rules.metaphorRule = true;
+	// 「摄像机」×2 + 「录像」「图像」——全是复合词，一处比喻都没有
+	const clean =
+		"长桌上架着一台摄像机。她跪到桌前。\n\n摄像机上的红灯亮起来。屏幕上的图像晃了晃，录像开始了。";
+	const r1 = checkDraft(clean, rules);
+	assert.ok(!r1.violations.some((v) => v.includes("比喻")), "复合词「摄像机/图像/录像」不计比喻");
+	// 真比喻照计，且违规文案带命中引文（模型不用盲猜位置）
+	const bad = "她站在那里，像一尊沉默的碑。\n他仿佛没听见。\n风好似停了。";
+	const r2 = checkDraft(bad, rules);
+	const v = r2.violations.find((x) => x.includes("比喻"));
+	assert.ok(v, "真比喻超限判违规");
+	assert.ok(v!.includes("像一尊沉默"), "违规带命中处引文");
+});
+
 test("checkDraft：状态栏不再参与验收（8/09：归输出层，mergeFinalText 拼接）", () => {
 	// 状态栏/格式模块彻底从稿纸验收摘除——无论缺不缺、什么形态，都不报
 	const rules = extractDraftRules([], ["`<StatusPlaceHolderImpl/>`"]);
