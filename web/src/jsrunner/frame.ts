@@ -13,7 +13,7 @@
  *   用更直接的内联转义。
  */
 import { vendorScripts } from "./vendor.ts";
-import type { ScriptMeta } from "./types.ts";
+import type { ContextSnapshot, ScriptMeta } from "./types.ts";
 
 /**
  * 脚本帧 CSP：与 frameDoc.ts 程序卡分支一致
@@ -52,21 +52,29 @@ export const MINIMAL_BRIDGE_JS = `(function () {
 /**
  * 组装脚本 iframe 的 srcdoc。
  *
- * @param meta      脚本条目（content 作为脚本本体注入）
- * @param bridgeJs  桥源码字符串（M3b 提供；空串/纯空白时退化为 MINIMAL_BRIDGE_JS 占位）
+ * @param meta            脚本条目（content 作为脚本本体注入）
+ * @param bridgeJs        桥源码字符串（M3b 提供；空串/纯空白时退化为 MINIMAL_BRIDGE_JS 占位）
+ * @param initialContext  可选：初始 context 快照（脚本 body 同步执行时 getContext() 即有值——
+ *                        ready 补发是异步 postMessage，顶层同步读取等不到；ST 生态脚本
+ *                        顶层 getContext() 是常见模式，故建帧时同步注入，D4 冒烟修复）
  *
  * 注入顺序（按 <head>/<body> 排列）：
  *   <head>
  *     1. CSP meta（+ charset）
  *     2. vendor：jquery → 全局 `$`/`jQuery`；js-yaml UMD → 全局 `jsyaml`，随后别名 `YAML`
- *     3. bridgeJs（原样注入，包 <script>）
+ *     3. 初始 context（可选，`window.__INITIAL_CTX__`，桥读取；JSON 内容经 escapeInlineScript
+ *        转义 `</script`，JS 字符串内 `\/` 合法，解析回原文）
+ *     4. bridgeJs（原样注入，包 <script>）
  *   <body>
- *     4. 脚本本体（meta.content，`type="module"` —— 上游脚本生态（RisuAI 风格）是 ES module，
+ *     5. 脚本本体（meta.content，`type="module"` —— 上游脚本生态（RisuAI 风格）是 ES module，
  *        顶层 `import` / `import()` 必须 module 上下文才能跑；module 在文档解析完后执行，
  *        桥（head 经典脚本）先于它就位，就绪上报的 setTimeout(0) 也在 module 执行后触发）
- * 高度上报不做：隐藏 iframe 不需要（与 frameDoc 的 HEIGHT_REPORTER_SNIPPET 不同场景）。
  */
-export function buildScriptSrcDoc(meta: ScriptMeta, bridgeJs: string): string {
+export function buildScriptSrcDoc(
+	meta: ScriptMeta,
+	bridgeJs: string,
+	initialContext?: ContextSnapshot | null,
+): string {
 	const bridge = bridgeJs && bridgeJs.trim() ? bridgeJs : MINIMAL_BRIDGE_JS;
 	const head =
 		`<meta charset="utf-8">` +
@@ -77,9 +85,13 @@ export function buildScriptSrcDoc(meta: ScriptMeta, bridgeJs: string): string {
 		`<script>${escapeInlineScript(vendorScripts.yamlSrc)}</script>` +
 		// 2c. 别名：ST 脚本用 YAML.parse/load，挂 window.YAML
 		`<script>window.YAML = window.jsyaml;</script>` +
-		// 3. 桥（原样注入）
+		// 3. 初始 context（可选）：bridge 的 ctxSnapshot 初始值，脚本顶层同步 getContext() 可用
+		(initialContext
+			? `<script>window.__INITIAL_CTX__ = ${escapeInlineScript(JSON.stringify(initialContext))};</script>`
+			: "") +
+		// 4. 桥（原样注入）
 		`<script>${escapeInlineScript(bridge)}</script>`;
-	// 4. 脚本本体（type="module"：支持顶层 import / import()，上游脚本生态的 ES module 写法）
+	// 5. 脚本本体（type="module"：支持顶层 import / import()，上游脚本生态的 ES module 写法）
 	const body = `<script type="module">${escapeInlineScript(meta.content ?? "")}</script>`;
 	return `<!doctype html><html><head>${head}</head><body>${body}</body></html>`;
 }

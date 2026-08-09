@@ -8,6 +8,7 @@ import { useRef, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut, downloadText, type SkillInfo } from "../api.ts";
 import { IconPencil, IconTrash } from "./icons.tsx";
 import { ConfirmButton, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { JsRunnerPanel } from "../jsrunner/ui/JsRunnerPanel.tsx";
 
 // ---------- MCP 类型（与 /api/mcp 对齐） ----------
 
@@ -699,7 +700,7 @@ function McpSection({ toast }: { toast: (level: "info" | "warning" | "error", te
 }
 
 export function PowersPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
-	const [tab, setTab] = useState<"skills" | "mcp">("skills");
+	const [tab, setTab] = useState<"skills" | "mcp" | "scripts">("skills");
 	const { data, error, loading, reload } = usePanelData(() => apiGet<{ skills: SkillInfo[] }>("/api/skills"), { watchAgent: true, cacheKey: "/api/skills" });
 	const { busy, run } = useAction(toast);
 	const list = data?.skills ?? [];
@@ -719,6 +720,9 @@ export function PowersPanel({ toast }: { toast: (level: "info" | "warning" | "er
 				<button className={`seg ${tab === "mcp" ? "active" : ""}`} onClick={() => setTab("mcp")}>
 					MCP
 				</button>
+				<button className={`seg ${tab === "scripts" ? "active" : ""}`} onClick={() => setTab("scripts")}>
+					脚本
+				</button>
 			</div>
 
 			{tab === "skills" && (
@@ -737,6 +741,7 @@ export function PowersPanel({ toast }: { toast: (level: "info" | "warning" | "er
 			)}
 
 			{tab === "mcp" && <McpSection toast={toast} />}
+			{tab === "scripts" && <JsRunnerPanel toast={toast} />}
 		</div>
 	);
 }

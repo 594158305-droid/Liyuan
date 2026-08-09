@@ -38,9 +38,11 @@ import { WelcomePanel } from "./components/HomePage.tsx";
 import { UpdateModal, UpdateToast } from "./components/UpdateFlow.tsx";
 import { PanelRefreshContext } from "./components/kit.tsx";
 import { jsrunnerBus } from "./jsrunner/bus.ts";
-// JS Runner 宿主侧（M3b）：模块加载即注册 bus sink 与 RuntimeHost。
+// JS Runner 宿主侧（M3b）：模块加载即注册 bus sink 与 RuntimeHost；bootstrapScripts 供启动加载。
 import "./jsrunner/context.ts";
-import "./jsrunner/helper.ts";
+import { bootstrapScripts } from "./jsrunner/helper.ts";
+import { scriptRuntimes } from "./jsrunner/runtime.ts";
+import { ModalPanel } from "./jsrunner/ui/ModalPanel.tsx";
 import { registerTavernChatBridge } from "./tavernShim.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
 import {
@@ -303,6 +305,10 @@ export default function App() {
 	useEffect(() => {
 		asstAgentIdRef.current = asstAgentId;
 	}, [asstAgentId]);
+	// JS Runner：启动即加载已启用脚本（脚本生命周期独立于管理面板挂载；幂等增量启停）
+	useEffect(() => {
+		void bootstrapScripts();
+	}, []);
 	// 面板系统
 	const initialPanels = useMemo(loadPanelPrefs, []);
 	const [leftPanel, setLeftPanel] = useState<PanelId | AgentPanelId | null>(initialPanels.left);
@@ -339,6 +345,15 @@ export default function App() {
 	useEffect(() => {
 		if (centerMenu) setDropKeep(centerMenu);
 	}, [centerMenu]);
+	/** 主题切换广播（D4 A7）：主题实际切换点在 SettingsPanel.tsx（setTheme→applyTheme 写
+	 *  html[data-theme]），这里用 MutationObserver 观察 data-theme 属性——切换即向全部
+	 *  脚本 iframe 推 theme token（未挂载的也推，bridge 接收即应用）。 */
+	useEffect(() => {
+		if (typeof MutationObserver === "undefined") return;
+		const observer = new MutationObserver(() => scriptRuntimes.broadcastTheme());
+		observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+		return () => observer.disconnect();
+	}, []);
 	/** /store 存档命名弹窗 */
 	const [storeOpen, setStoreOpen] = useState(false);
 	const [storeDefaultName, setStoreDefaultName] = useState("");
@@ -2488,6 +2503,8 @@ export default function App() {
 					}}
 				/>
 			)}
+			{/* 脚本独立管理界面模态（D4 A4，P4）：App 顶层单例，与既有模态同层；无打开请求时渲染 null */}
+			<ModalPanel />
 		</div>
 		</PanelRefreshContext.Provider>
 	);

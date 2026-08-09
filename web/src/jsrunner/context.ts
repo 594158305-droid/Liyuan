@@ -24,7 +24,7 @@
 import { jsrunnerBus } from "./bus.ts";
 import { attachContextProvider } from "./bridge.ts";
 import { apiGet, getExtData, putExtData } from "../api.ts";
-import type { ServerFrame } from "../wire.ts";
+import type { ServerFrame, WorldState } from "../wire.ts";
 import type { ContextSnapshot } from "./types.ts";
 
 /** 变量持久化用的 extdata key（全局与聊天级共用同名，scope 区分） */
@@ -69,6 +69,9 @@ let personaDescriptionText = "";
 let chatMetadata: Record<string, unknown> = {};
 /** G1：全局扩展设置缓存；null = 尚未从 extdata 加载（区别于空对象） */
 let extensionSettings: Record<string, unknown> | null = null;
+
+/** 世界状态账本快照缓存（hello/state 帧投影；null = 尚未收到） */
+let worldStateCache: WorldState | null = null;
 
 /**
  * 单条 wire 消息 → 快照投影（纯函数，可 node 直跑冒烟）。
@@ -125,6 +128,8 @@ export function buildSnapshot(): ContextSnapshot {
 		// 可变引用：iframe 内 postMessage 深拷贝后脚本改副本，saveSettingsDebounced 回传替换
 		extensionSettings: getExtensionSettings(),
 		characters: [buildCharacterEntry()],
+		// 账本快照（有值才带；未收到 hello/state 帧前缺省，脚本读 undefined 不炸）
+		...(worldStateCache ? { worldState: worldStateCache } : {}),
 	};
 }
 
@@ -309,8 +314,15 @@ jsrunnerBus.registerSink({
 				charName = frame.charName ?? "";
 				userName = frame.userName ?? "";
 				sessionId = frame.sessionId;
+				// 账本快照（hello 带 state，可能为 null——null 时保持既有缓存不清空）
+				if (frame.state) worldStateCache = frame.state;
 				// 会话/连接对齐后：重载脚本变量与角色卡信息（异步，不阻塞帧处理）
 				void refreshVars();
+				break;
+			}
+			case "state": {
+				// 世界状态账本更新（含分支回退后的 state 帧）：缓存进快照
+				worldStateCache = frame.state;
 				break;
 			}
 			case "message": {
@@ -325,7 +337,7 @@ jsrunnerBus.registerSink({
 				break;
 			}
 			default:
-				// state / ext_event / 其它帧不进快照（快照只吃 hello/message）
+				// ext_event / 其它帧不进快照（快照只吃 hello/message/state）
 				break;
 		}
 	},

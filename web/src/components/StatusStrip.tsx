@@ -9,6 +9,7 @@ import { apiPut, type StatePatchResult } from "../api.ts";
 import type { WireStats, WorldState } from "../wire.ts";
 import { IconChevronDown, IconPencil, IconTrash } from "./icons.tsx";
 import { ConfirmButton, useAction } from "./kit.tsx";
+import { LedgerScriptViews } from "../jsrunner/ui/LedgerScriptViews.tsx";
 
 /** 行内编辑：点击铅笔→输入框（回车保存 / Esc 取消） */
 export function Editable({
@@ -238,6 +239,8 @@ export function StatusStrip({
 							onSave={(v) => patch({ plot_threads: v.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) })}
 						/>
 					</div>
+					{/* 脚本视图区（D4 §2.10）：status 区域；无注册脚本时组件内部渲染 null，零侵入 */}
+					<LedgerScriptViews area="status" />
 					<div className="field-hint">点铅笔可直接改；你的账本你说了算，改动随剧情分支走（回退会跟着回退）。登场名录已独立成面板（输入框工具区「名录」）。</div>
 				</div>
 			)}

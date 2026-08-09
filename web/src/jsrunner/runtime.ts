@@ -26,6 +26,8 @@ import { buildScriptSrcDoc, MINIMAL_BRIDGE_JS } from "./frame.ts";
 import { planScriptSync } from "./plan.ts";
 import { jsrunnerBus, type WireBusSink } from "./bus.ts";
 import { BRIDGE_JS, getContextSnapshot } from "./bridge.ts";
+import { mapFrameToScriptEvents } from "./events.ts";
+import { getThemeTokensFrom, ledger } from "./ledger.ts";
 import type { HostMessage, RuntimeHost, ScriptMeta, ScriptRequest } from "./types.ts";
 
 /** 单脚本运行时条目 */
@@ -45,6 +47,11 @@ export class ScriptRuntimes {
 	private bridgeJs = MINIMAL_BRIDGE_JS;
 	private runtimes = new Map<string, ScriptEntry>();
 	private listenerAttached = false;
+	/** 当前应运行的脚本 id 集（setScripts 维护）：异步 create 完成后据此放弃已停用/已删除的脚本 */
+	private desiredIds = new Set<string>();
+	/** 进行中的异步 create 序号令牌：destroy / 新 create 会使旧 fetch 结果失效，不建陈旧 iframe */
+	private createTokens = new Map<string, number>();
+	private createSeq = 0;
 
 	constructor() {
 		// 浏览器外（node 冒烟等）不挂监听
@@ -69,12 +76,14 @@ export class ScriptRuntimes {
 		this.reloadAll();
 	}
 
-	/** 全量设置脚本列表（含启停增量管理：只重建启停/content 变化的，未变的不动） */
+	/** 全量设置脚本列表（含启停增量管理：只重建启停/脚本引用（file/content）变化的，未变的不动） */
 	setScripts(list: ScriptMeta[]): void {
-		const cur = [...this.runtimes].map(([id, e]) => ({ id, content: e.meta.content }));
+		// 期望运行集：停用/删除的脚本即使有 fetch 在途也不得建帧
+		this.desiredIds = new Set(list.filter((m) => m.enabled).map((m) => m.id));
+		const cur = [...this.runtimes].map(([id, e]) => ({ id, key: e.meta.file ?? e.meta.content ?? "" }));
 		const plan = planScriptSync(cur, list);
 		for (const id of plan.toRemove) this.destroy(id);
-		for (const meta of plan.toCreate) this.create(meta);
+		for (const meta of plan.toCreate) void this.create(meta);
 		// toKeep 保持不动（脚本状态不丢）
 	}
 
@@ -83,14 +92,14 @@ export class ScriptRuntimes {
 		const entry = this.runtimes.get(id);
 		if (!entry) return;
 		this.destroy(id);
-		this.create(entry.meta);
+		void this.create(entry.meta);
 	}
 
 	/** 重建全部运行中脚本的 iframe */
 	reloadAll(): void {
 		for (const [id, entry] of [...this.runtimes]) {
 			this.destroy(id);
-			this.create(entry.meta);
+			void this.create(entry.meta);
 		}
 	}
 
@@ -112,6 +121,11 @@ export class ScriptRuntimes {
 
 	runningIds(): string[] {
 		return [...this.runtimes.keys()];
+	}
+
+	/** 读运行中脚本的元信息（helper getScriptName/getScriptInfo 用；未运行返回 undefined） */
+	getMeta(id: string): ScriptMeta | undefined {
+		return this.runtimes.get(id)?.meta;
 	}
 
 	/**
@@ -164,6 +178,52 @@ export class ScriptRuntimes {
 		}
 	}
 
+	// ---------- 面板可见化挂载（D4 §2.4：同一 contentWindow，不重载） ----------
+
+	/**
+	 * 把脚本 iframe 可见化挂进宿主容器（同一 contentWindow，脚本状态完整保留）。
+	 * 挂载时补推主题 token（bridge 接收即应用，脚本 var(--ly-*) 即时生效）。
+	 */
+	mount(scriptId: string, container: HTMLElement): void {
+		const entry = this.runtimes.get(scriptId);
+		if (!entry) return;
+		container.appendChild(entry.iframe);
+		entry.iframe.style.display = "";
+		entry.iframe.removeAttribute("aria-hidden");
+		entry.iframe.tabIndex = 0;
+		this.postThemeTo(entry.iframe);
+	}
+
+	/** 移回 #jsrunner-host 隐藏容器，恢复隐藏态（面板收起/模态关闭/区域切换用） */
+	unmount(scriptId: string): void {
+		const entry = this.runtimes.get(scriptId);
+		if (!entry) return;
+		entry.iframe.style.display = "none";
+		entry.iframe.setAttribute("aria-hidden", "true");
+		entry.iframe.tabIndex = -1;
+		if (typeof document !== "undefined") {
+			document.getElementById(HOST_ID)?.appendChild(entry.iframe);
+		}
+	}
+
+	/** 向全部运行中脚本广播主题（A7：App 主题切换处调用；未挂载的也推，bridge 接收即应用） */
+	broadcastTheme(): void {
+		if (typeof document === "undefined") return;
+		const tokens = getThemeTokensFrom(document);
+		for (const [, entry] of this.runtimes) {
+			entry.iframe.contentWindow?.postMessage({ kind: "theme", tokens }, "*");
+		}
+	}
+
+	/** 向单帧推主题（内部；theme 帧封装，A5：注入式读 CSS 变量） */
+	private postThemeTo(iframe: HTMLIFrameElement): void {
+		if (typeof document === "undefined") return;
+		iframe.contentWindow?.postMessage(
+			{ kind: "theme", tokens: getThemeTokensFrom(document) },
+			"*",
+		);
+	}
+
 	// ---------- 内部 ----------
 
 	private ensureContainer(): HTMLDivElement {
@@ -177,20 +237,55 @@ export class ScriptRuntimes {
 		return div;
 	}
 
-	private create(meta: ScriptMeta): void {
+	/**
+	 * 建脚本 iframe（P0 拆文件存储：D4 §2.4）。
+	 * - meta.content 存在 → 同步内联（迁移兼容）；
+	 * - 否则 meta.file 存在 → fetch('/uploads/jsrunner/<file>') 拉文本后组装；
+	 *   失败（404/网络）→ console.warn + **不建 iframe**（面板占位由 LedgerScriptViews
+	 *   依据 ledger 条目 ready=false 渲染「脚本文件缺失」）；
+	 * - 两者皆无 → 不建（静默）。
+	 * 异步护栏：destroy / 后续 create 会使本次 fetch 结果失效（createTokens 令牌比对），
+	 * 避免迟到的 fetch 为已删除/已更新的脚本建陈旧 iframe。
+	 */
+	private async create(meta: ScriptMeta): Promise<void> {
 		if (typeof document === "undefined") return; // 非浏览器环境（node 冒烟）跳过
+		const token = ++this.createSeq;
+		this.createTokens.set(meta.id, token);
+
+		let content: string | undefined = meta.content;
+		if (content === undefined && meta.file) {
+			// file 兼容两种登记形态：完整可访问路径（/uploads/...，UI 侧 uploadRef 换算）或
+			// jsrunner 子目录文件名（/uploads/jsrunner/<file>，D4 §2.2 约定）
+			const url = meta.file.startsWith("/") ? meta.file : `/uploads/jsrunner/${meta.file}`;
+			try {
+				const res = await fetch(url);
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				content = await res.text();
+			} catch (e) {
+				console.warn("[jsrunner] 脚本文件拉取失败（不建 iframe，面板待占位）", meta.id, url, e);
+				return;
+			}
+		}
+		if (typeof content !== "string") return;
+		// 已被 destroy / 更新的 create 覆盖，或脚本已停用/删除：放弃本次建帧
+		if (!this.desiredIds.has(meta.id) || this.createTokens.get(meta.id) !== token) return;
+
 		const iframe = document.createElement("iframe");
 		iframe.style.display = "none";
 		iframe.title = `jsrunner:${meta.id}`;
 		iframe.setAttribute("aria-hidden", "true");
 		iframe.tabIndex = -1;
-		iframe.srcdoc = buildScriptSrcDoc(meta, this.bridgeJs);
+		// 初始 context 同步注入（D4 冒烟修复）：脚本顶层 getContext() 即有值
+		iframe.srcdoc = buildScriptSrcDoc({ ...meta, content }, this.bridgeJs, getContextSnapshot());
 		this.ensureContainer().appendChild(iframe);
 		this.runtimes.set(meta.id, { iframe, ready: false, meta });
 	}
 
 	private destroy(id: string): void {
 		const entry = this.runtimes.get(id);
+		// 使进行中的异步 create 失效（fetch 回来后不再建帧）；已停用/删除脚本一并清出期望集
+		this.createTokens.delete(id);
+		this.desiredIds.delete(id);
 		if (!entry) return;
 		try {
 			entry.iframe.remove();
@@ -198,6 +293,8 @@ export class ScriptRuntimes {
 			// 已脱离 DOM，忽略
 		}
 		this.runtimes.delete(id);
+		// 面板注册表联动清理（D4 §2.4：脚本停用/删除 → 面板消失）
+		ledger.remove(id);
 	}
 
 	/** window message 入口：只接受已知脚本 iframe 的 event.source，按 ScriptRequest 路由 */
@@ -220,6 +317,8 @@ export class ScriptRuntimes {
 		switch (data.kind) {
 			case "ready": {
 				entry.ready = true;
+				// 面板就绪标记（LedgerScriptViews 依据 ready 决定挂载/占位）
+				ledger.setReady(scriptId, true);
 				// 新就绪脚本立即补发一次最新快照：否则要等下一帧 hello/message 才拿得到 context
 				const snapshot = getContextSnapshot();
 				if (snapshot) {
@@ -230,6 +329,11 @@ export class ScriptRuntimes {
 						console.warn("[jsrunner] ready 补发 context 失败", scriptId, e);
 					}
 				}
+				return;
+			}
+			case "resize": {
+				// bridge ResizeObserver 上报 → 面板容器高度（面板未注册时 ledger 静默忽略）
+				ledger.setHeight(scriptId, data.height);
 				return;
 			}
 			case "log": {
@@ -288,23 +392,25 @@ export const scriptRuntimes = new ScriptRuntimes();
 
 /**
  * 帧 sink（jsrunnerBus）：把宿主帧桥进脚本 iframe。
- * - hello / message：推上下文快照（F1 context.ts 已维护快照，这里只负责透传）
- * - ext_event：先推 context（同轮内 postMessage 有序，脚本回调里 getContext() 是新鲜快照）再广播事件
+ * - hello/message/state：先推上下文快照（F1 context.ts 已维护快照，这里只负责透传；
+ *   同轮内 postMessage 有序，脚本回调里 getContext() 是新鲜快照），再投影事件
+ *   （D4 §5.2：state→WORLD_STATE_CHANGED、message(非user)→MESSAGE_RECEIVED、
+ *   agent(end)→GENERATION_ENDED；投影逻辑在 events.ts 纯模块，node 可直测）
+ * - ext_event：先推 context 再广播事件（M3b 既有行为）
  */
 const scriptFrameSink: WireBusSink = {
 	onWireFrame(frame) {
-		switch (frame.type) {
-			case "hello":
-			case "message":
-				scriptRuntimes.pushContextToAll();
-				break;
-			case "ext_event":
-				scriptRuntimes.pushContextToAll();
-				scriptRuntimes.emitToAll(frame.name, frame.args);
-				break;
-			default:
-				// state / ext_gen / 其它帧：不进脚本
-				break;
+		// 数据帧（hello/message/state）与事件帧（ext_event）都需要先推 context
+		if (
+			frame.type === "hello" ||
+			frame.type === "message" ||
+			frame.type === "state" ||
+			frame.type === "ext_event"
+		) {
+			scriptRuntimes.pushContextToAll();
+		}
+		for (const ev of mapFrameToScriptEvents(frame)) {
+			scriptRuntimes.emitToAll(ev.name, ev.args);
 		}
 	},
 };

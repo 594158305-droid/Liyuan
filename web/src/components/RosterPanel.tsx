@@ -8,6 +8,7 @@ import type { WorldState } from "../wire.ts";
 import { IconTrash } from "./icons.tsx";
 import { ConfirmButton, useAction } from "./kit.tsx";
 import { Editable } from "./StatusStrip.tsx";
+import { LedgerScriptViews } from "../jsrunner/ui/LedgerScriptViews.tsx";
 
 /** 三表的展示配置：label + 判断条目当前是否活跃 */
 const ROSTER_TABLES = [
@@ -84,6 +85,8 @@ export function RosterPanel({
 					</div>
 				))}
 			</div>
+			{/* 脚本视图区（D4 §2.10）：roster 区域，名录表格下方；无注册脚本时渲染 null */}
+			<LedgerScriptViews area="roster" />
 		</div>
 	);
 }

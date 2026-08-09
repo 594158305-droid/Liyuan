@@ -76,7 +76,13 @@ export const BRIDGE_JS = `(function () {
 
 	// ---------- 本地状态 ----------
 	const listeners = new Map(); // 事件名 -> Set<回调>
-	let ctxSnapshot = null; // 最近一次 {kind:"context"} 帧的快照
+	// 初始快照（D4 冒烟修复）：frame.ts 建帧时把当前 context 同步注入 __INITIAL_CTX__，
+	// 脚本 body 顶层同步 getContext() 即有值（ready 补发是异步 postMessage，等不到）。
+	// 宿主后续 {kind:"context"} 帧覆盖为最新。
+	let ctxSnapshot =
+		typeof window.__INITIAL_CTX__ !== "undefined" && window.__INITIAL_CTX__
+			? window.__INITIAL_CTX__
+			: null;
 
 	function safeCall(cb, args) {
 		try {
@@ -156,6 +162,12 @@ export const BRIDGE_JS = `(function () {
 		for (const cb of cbs) safeCall(cb, args || []);
 	}
 
+	// ---------- 顶层全局事件 API（jsrunner-port.md §4.2 声明；ST 生态脚本顶层调用） ----------
+	window.eventOn = eventOn;
+	window.eventOnce = eventOnce;
+	window.eventOff = eventOff;
+	window.eventEmit = eventEmit;
+
 	// ---------- SillyTavern 适配面（G1）：活事件总线 + 惰性扁平快照 getter ----------
 	// 事件常量表：与 server/script-events.ts 的映射名对齐（CHAT_CHANGED / GENERATION_* /
 	// MESSAGE_SENT / MESSAGE_RECEIVED），并抄录 ST 脚本常用的其余标准事件名。
@@ -179,6 +191,7 @@ export const BRIDGE_JS = `(function () {
 		IMPERSONATE_READY: "IMPERSONATE_READY",
 		IMPERSONATE_STARTED: "IMPERSONATE_STARTED",
 		IMPERSONATE_STOPPED: "IMPERSONATE_STOPPED",
+		LEDGER_BUTTON_CLICKED: "LEDGER_BUTTON_CLICKED",
 		MESSAGE_SENT: "MESSAGE_SENT",
 		MESSAGE_RECEIVED: "MESSAGE_RECEIVED",
 		MESSAGE_EDITED: "MESSAGE_EDITED",
@@ -191,6 +204,7 @@ export const BRIDGE_JS = `(function () {
 		USER_MESSAGE_RECEIVED: "USER_MESSAGE_RECEIVED",
 		WORLD_INFO_ACTIVATED: "WORLD_INFO_ACTIVATED",
 		WORLD_INFO_ACTIVATED_KEYS: "WORLD_INFO_ACTIVATED_KEYS",
+		WORLD_STATE_CHANGED: "WORLD_STATE_CHANGED",
 	};
 
 	// 活事件总线：复用本地 listeners 注册表（与 TavernHelper.eventOn 同一套注册表——同一 iframe
@@ -291,11 +305,23 @@ export const BRIDGE_JS = `(function () {
 	window.TavernHelper = TavernHelper;
 	window.TavernHelper.getContext = getContext;
 
-	// ---------- toastr 桩 ----------
-	const toastrMsg = (msg) => {
-		post({ kind: "log", level: "warn", args: ["toastr", msg] });
+	// ---------- toastr 桩（R2-④：ST 写法落宿主 toast；success 归入 info） ----------
+	const toastrNotify = (level, msg) => invoke("notify", [level, String(msg)]);
+	window.toastr = {
+		error: (m) => toastrNotify("error", m),
+		warning: (m) => toastrNotify("warning", m),
+		info: (m) => toastrNotify("info", m),
+		success: (m) => toastrNotify("info", m),
 	};
-	window.toastr = { error: toastrMsg, warning: toastrMsg, info: toastrMsg, success: toastrMsg };
+
+	// ---------- 高度上报（ResizeObserver：文档尺寸变化 → resize 帧，宿主驱动面板容器高度）----------
+	if (typeof ResizeObserver !== "undefined") {
+		const ro = new ResizeObserver(function () {
+			const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+			if (h > 0) post({ kind: "resize", height: h });
+		});
+		ro.observe(document.documentElement);
+	}
 
 	// ---------- 父帧消息监听（只处理 event.source === parent）----------
 	window.addEventListener("message", (ev) => {
@@ -321,6 +347,15 @@ export const BRIDGE_JS = `(function () {
 			case "reload":
 				// 宿主重建 iframe 即完成重载，本帧忽略
 				break;
+			case "theme": {
+				// 宿主主题 token → 自身 CSS 变量（脚本 var(--ly-surface) 等引用）
+				const t = data.tokens || {};
+				const st = document.documentElement.style;
+				Object.keys(t).forEach(function (k) {
+					st.setProperty("--ly-" + k, t[k]);
+				});
+				break;
+			}
 			default:
 				break;
 		}

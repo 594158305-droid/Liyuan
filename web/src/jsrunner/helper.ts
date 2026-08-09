@@ -9,27 +9,44 @@
  * - 注册 ext_gen 帧监听（sink）：generate/generateRaw 的流式回执按 reqId 配对
  * - 组装并注册 RuntimeHost 到 scriptRuntimes（onInvoke / onLog / onEvent）
  *
- * 脚本元信息（getScriptName/getScriptInfo）：本模块维护 setScriptMeta 注册表，
- * runtime 创建 iframe 时调用（F2 接线）；helper 不反向依赖 runtime 内部结构。
+ * 脚本元信息（getScriptName/getScriptInfo）：直接查 runtime 自身
+ * （scriptRuntimes.getMeta(id)），避免 helper ↔ runtime 循环依赖。
  */
 import { scriptRuntimes } from "./runtime.ts";
 import { jsrunnerBus } from "./bus.ts";
 import { sendFrame } from "../ws.ts";
-import { apiGet, apiPost } from "../api.ts";
+import { apiGet, apiPost, apiPut, getExtData, putExtData, type StatePatchResult } from "../api.ts";
 import { triggerSlash } from "../tavernShim.ts";
 import { addVar, buildSnapshot, getVar, saveExtensionSettings as persistExtensionSettings, setVar, updateChatMetadata as applyChatMetadata } from "./context.ts";
 import { pushLog, stringifyLogArgs } from "./log.ts";
 import { injectUserInput, parseOrderedPrompts } from "./prompts.ts";
-import type { ContextSnapshot, RuntimeHost, ScriptMeta } from "./types.ts";
+import { ledger, notifyToast } from "./ledger.ts";
+import type { ContextSnapshot, LedgerPanelSpec, RuntimeHost, ScriptMeta } from "./types.ts";
 import type { ClientFrame, ExtGenerateParams } from "../wire.ts";
 
-// ---------- 脚本元信息注册表（getScriptName / getScriptInfo） ----------
+// ---------- 脚本元信息读取（getScriptName / getScriptInfo）：查 runtime 自身 ----------
 
-const scriptMetaRegistry = new Map<string, ScriptMeta>();
+// ---------- App 启动加载（D4 冒烟修复：脚本生命周期不绑定管理面板挂载） ----------
 
-/** 登记脚本元信息（runtime 创建 iframe 时调用，F2 接线） */
-export function setScriptMeta(scriptId: string, meta: ScriptMeta): void {
-	scriptMetaRegistry.set(scriptId, meta);
+/** 脚本持久化键（与 JsRunnerPanel 同源：global scope / scripts key） */
+const SCRIPTS_SCOPE = "global";
+const SCRIPTS_KEY = "scripts";
+
+/**
+ * App 启动时加载已启用脚本：读 extdata scripts → setScripts 增量启停 iframe。
+ * - 幂等：runtime 的 planScriptSync 增量比对（file/content 键），未变化脚本不动；
+ * - JsRunnerPanel 挂载时也会 reload（同源逻辑），两者交错调用安全；
+ * - 非法条目由 planScriptSync 内部过滤（缺 id 忽略）。
+ */
+export async function bootstrapScripts(): Promise<void> {
+	try {
+		const value = await getExtData(SCRIPTS_SCOPE, SCRIPTS_KEY);
+		if (Array.isArray(value)) {
+			scriptRuntimes.setScripts(value as ScriptMeta[]);
+		}
+	} catch (e) {
+		console.warn("[jsrunner] bootstrap 加载脚本失败", e);
+	}
 }
 
 // ---------- 程序化生成（ext_generate / ext_gen） ----------
@@ -328,15 +345,72 @@ function implGetCurrentChatId(): string {
 }
 
 function implGetScriptName(scriptId: string): string {
-	return scriptMetaRegistry.get(scriptId)?.name ?? "";
+	return scriptRuntimes.getMeta(scriptId)?.name ?? "";
 }
 
 function implGetScriptInfo(scriptId: string): string {
-	return scriptMetaRegistry.get(scriptId)?.info ?? "";
+	return scriptRuntimes.getMeta(scriptId)?.info ?? "";
 }
 
 function implGetContext(): ContextSnapshot {
 	return buildSnapshot();
+}
+
+// ---------- 账本面板 / 写面 / 通知 / 自由键 / 管理界面（D4 §2.5） ----------
+
+/** P2：注册账本面板（校验 title 非空、area 合法；重复注册 = 覆盖 spec） */
+function implRegisterLedgerPanel(scriptId: string, args: unknown[]): { ok: true } {
+	const raw = args[0];
+	const s = (raw !== null && typeof raw === "object" ? raw : {}) as Partial<LedgerPanelSpec>;
+	if (typeof s.title !== "string" || !s.title.trim()) {
+		throw new Error("registerLedgerPanel 需要 title");
+	}
+	if (s.area && s.area !== "status" && s.area !== "roster") {
+		throw new Error(`非法 area: ${String(s.area)}`);
+	}
+	ledger.upsert(scriptId, { area: "status", position: "append", ...s, title: s.title.trim() });
+	return { ok: true };
+}
+
+/** P2：注销面板（脚本卸载/停用时调用；destroy 也会自动清理） */
+function implUnregisterLedgerPanel(scriptId: string): { ok: true } {
+	ledger.remove(scriptId);
+	return { ok: true };
+}
+
+/** P3：写账本——与 StatusStrip 同封装（REST 校验面自带；流式生成中拒绝由 REST 面返回） */
+function implApplyStatePatch(args: unknown[]): Promise<StatePatchResult> {
+	const patch = (args[0] as Record<string, unknown> | undefined) ?? {};
+	return apiPut<StatePatchResult>("/api/state", { patch });
+}
+
+/** P3：脚本通知 → 宿主 toast（level 白名单校验；success 归入 info；非法级别按 info 兜底） */
+function implNotify(args: unknown[]): void {
+	const raw = String(args[0] ?? "");
+	const level: "info" | "warning" | "error" =
+		raw === "error" ? "error" : raw === "warning" ? "warning" : "info";
+	notifyToast(level, String(args[1] ?? ""));
+}
+
+/** P4：自由 extdata 键读（scope 缺省 global；命名空间约定 <scriptId>:<key> 由脚本自行遵守） */
+function implGetExtData(args: unknown[]): Promise<unknown> {
+	const key = String(args[0] ?? "");
+	const scope = String(args[1] ?? "global");
+	return getExtData(scope, key);
+}
+
+/** P4：自由 extdata 键写（scope 缺省 global；setExtData 语义上返回 undefined） */
+function implSetExtData(args: unknown[]): Promise<void> {
+	const key = String(args[0] ?? "");
+	const value = args[1];
+	const scope = String(args[2] ?? "global");
+	return putExtData(scope, key, value);
+}
+
+/** P4：请求宿主弹出该脚本的独立管理界面（模态；ledger.requestManager → ModalPanel） */
+function implOpenManager(scriptId: string): { ok: true } {
+	ledger.requestManager(scriptId);
+	return { ok: true };
 }
 
 // ---------- TavernHelper 方法分发表（对照 JS-Slash-Runner function/index.ts 的 P0/P1 子集） ----------
@@ -402,6 +476,32 @@ export const tavernHelperImpl: Record<string, TavernHelperMethod> = {
 	// 上下文快照（同步读）
 	getContext() {
 		return implGetContext();
+	},
+	// 账本面板注册（P2）
+	registerLedgerPanel(scriptId, args) {
+		return implRegisterLedgerPanel(scriptId, args);
+	},
+	unregisterLedgerPanel(scriptId) {
+		return implUnregisterLedgerPanel(scriptId);
+	},
+	// 写账本（P3）：PUT /api/state { patch }
+	applyStatePatch(scriptId, args) {
+		return implApplyStatePatch(args);
+	},
+	// 通知（P3，R2-④）：宿主 toast
+	notify(scriptId, args) {
+		return implNotify(args);
+	},
+	// P4：自由 extdata 键（scope 缺省 global）
+	getExtData(scriptId, args) {
+		return implGetExtData(args);
+	},
+	setExtData(scriptId, args) {
+		return implSetExtData(args);
+	},
+	// P4：独立管理界面（模态）
+	openManager(scriptId) {
+		return implOpenManager(scriptId);
 	},
 	// G1：聊天元数据落盘（脚本在快照副本上改，传 partial 显式合并 + 落盘）
 	updateChatMetadata(scriptId, args) {
