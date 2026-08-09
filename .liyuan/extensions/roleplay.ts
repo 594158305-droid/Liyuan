@@ -2725,6 +2725,45 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 					snapshotState();
 				}
 
+				// 表多时逐表回填（配置 tableBackfillThreshold，缺省 6）：建账只顺手填少量表；
+				// auto 表超过阈值时改为每表独立 LLM 提取链回填（复用 /table-backfill 通道：
+				// 从分支楼层分块提取、增量式），失败跳过该表不中断导入。
+				const autoTables = Object.values(state.tables ?? {}).filter((t) => t.auto);
+				const backfillThreshold = config.tableBackfillThreshold ?? 6;
+				if (autoTables.length > backfillThreshold) {
+					notify(ctx, `auto 表 ${autoTables.length} 张超过阈值 ${backfillThreshold}，开始逐表回填…`);
+					let filled = 0;
+					for (let i = 0; i < autoTables.length; i++) {
+						const tname = autoTables[i]!.name;
+						notify(ctx, `回填表 ${i + 1}/${autoTables.length}（${tname}）…`);
+						const br = await runTableBackfill({
+							branchEntries: ctx.sessionManager.getBranch() as BranchEntryLike[],
+							state,
+							tableName: tname,
+							userName: config.userName,
+							charName: card.name,
+							sideText: async (sys, user) => {
+								try {
+									return (await sideComplete(ctx, sys, user, 4096)) ?? { error: "空响应" };
+								} catch (err) {
+									return { error: err instanceof Error ? err.message : String(err) };
+								}
+							},
+							onProgress: (msg) => notify(ctx, msg),
+						});
+						if (!br.ok) {
+							notify(ctx, `表「${tname}」回填失败：${br.error}`, "warning");
+							continue;
+						}
+						filled += br.rows;
+						if (br.rows > 0) {
+							if (stateFile) saveState(stateFile, state);
+							snapshotState();
+						}
+					}
+					notify(ctx, `逐表回填完成：${autoTables.length} 张表，应用 ${filled} 行。`);
+				}
+
 				// 前情块注入会话（custom 消息，TUI 可见，LLM 以 user 角色读到）
 				pi.sendMessage({
 					customType: "rp-import",

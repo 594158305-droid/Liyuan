@@ -140,6 +140,8 @@ test("runTableBackfill：某块 {error} → 跳过继续，其余块仍应用", 
 		deps({
 			branchEntries: branch,
 			state,
+			// 关闭重试（重试行为有专门用例）：失败即跳过
+			maxRetries: 0,
 			sideText: async () => {
 				call++;
 				if (call === 2) return { error: "模型超时" };
@@ -163,6 +165,7 @@ test("runTableBackfill：某块输出垃圾 → 跳过，不中断", async () =>
 		deps({
 			branchEntries: branch,
 			state,
+			maxRetries: 0,
 			sideText: async () => {
 				call++;
 				if (call === 3) return "这不是 JSON 输出";
@@ -174,6 +177,71 @@ test("runTableBackfill：某块输出垃圾 → 跳过，不中断", async () =>
 	if (!r.ok) return;
 	assert.ok(r.chunks > 1);
 	assert.equal(state.tables!["主角信息"].rows.length, r.chunks - 1, "垃圾块跳过，其余块仍应用");
+});
+
+test("runTableBackfill：{error} 按退避重试，重试成功照样应用", async () => {
+	const state = defaultState();
+	applyTableOperation(state, { kind: "create", name: "主角信息", columns: [{ name: "姓名" }] });
+	const branch = longHistory(10);
+	let call = 0;
+	const waits: number[] = [];
+	const origSetTimeout = globalThis.setTimeout;
+	// 用 1ms 基数 + 截获等待时长断言退避按 2 的幂倍增（1→2→4…）
+	globalThis.setTimeout = ((fn: () => void, ms?: number, ...args: unknown[]) => {
+		waits.push(ms ?? 0);
+		return origSetTimeout(fn, 1, ...args);
+	}) as unknown as typeof setTimeout;
+	try {
+		const r = await runTableBackfill(
+			deps({
+				branchEntries: branch,
+				state,
+				maxRetries: 3,
+				retryBaseDelayMs: 1,
+				sideText: async () => {
+					call++;
+					if (call <= 2) return { error: `瞬态错误 ${call}` };
+					return '{"insert":[{"姓名":"阿远"}]}';
+				},
+			}),
+		);
+		assert.equal(r.ok, true);
+		if (!r.ok) return;
+		assert.equal(r.rows, r.chunks, "每块重试成功后均应用 1 行");
+		assert.equal(state.tables!["主角信息"].rows.length, r.chunks);
+		// 仅首块前 2 次调用失败 → 2 次退避等待（1ms × 2^0、1ms × 2^1）；其余块一次成功无等待
+		assert.deepEqual(waits, [1, 2], "退避按基数（生产 2s）倍增");
+	} finally {
+		globalThis.setTimeout = origSetTimeout;
+	}
+});
+
+test("runTableBackfill：输出垃圾重试后成功；重试耗尽仍失败才跳过", async () => {
+	const state = defaultState();
+	applyTableOperation(state, { kind: "create", name: "主角信息", columns: [{ name: "姓名" }] });
+	const branch = longHistory(10);
+	// 块 1：垃圾 → 垃圾 → 成功；块 2 起：垃圾 → 垃圾 → 垃圾 → 耗尽跳过
+	let call = 0;
+	const r = await runTableBackfill(
+		deps({
+			branchEntries: branch,
+			state,
+			maxRetries: 2,
+			retryBaseDelayMs: 1,
+			sideText: async () => {
+				call++;
+				if (call === 1 || call === 2) return "这不是 JSON";
+				if (call === 3) return '{"insert":[{"姓名":"阿远"}]}';
+				return "还是垃圾";
+			},
+		}),
+	);
+	assert.equal(r.ok, true);
+	if (!r.ok) return;
+	assert.ok(r.chunks >= 2, "历史切成多块");
+	// 块 1：3 次尝试（2 重试）后成功应用 1 行；其余块各尝试 3 次耗尽跳过
+	assert.equal(state.tables!["主角信息"].rows.length, 1, "重试成功的块应用，耗尽的块跳过");
+	assert.equal(call, 3 * r.chunks, "每块恰好尝试 3 次（1 初始 + 2 重试）");
 });
 
 test("runTableBackfill：后块 update 覆盖前块 insert 的同一 match", async () => {

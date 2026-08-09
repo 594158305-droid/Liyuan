@@ -12,6 +12,7 @@
 	"backendControl": true,
 	"creationMode": "ask",
 	"importStripTags": [],
+	"tableBackfillThreshold": 6,
 	"greetingIndex": 0,
 	"plugins": {},
 	"agents": [

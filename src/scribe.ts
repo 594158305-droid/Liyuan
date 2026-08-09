@@ -50,6 +50,12 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 - "flags"：键值对，按键合并（值为字符串）。
 - "plot_threads"：字符串数组，整体替换——新增或了结剧情线时给出完整清单。
 - "tables"：{ "<表名>": { "insert": [行对象...], "update": [{"match":{...},"changes":{...}}...], "delete": [匹配对象...] } }。仅更新 auto 标记的表（主角信息表这类每轮维护的）；静态参考表不要动。行对象只含该表已声明的列。
+  tables 维护规则：
+  - 动手前按顺序完成（在心中，不要输出）：① 在【当前账本】中找到该表的 description 并通读——它是该表最重要的规则，优先级最高，冲突时一律以它为准；② 对照该表已有行，找出本轮对话中与之相关的实体变化；③ 逐条决定 insert/update/delete。
+  - 各表规则不同，按各自 description 执行即可，无需人为排序，也不要凭通用直觉臆造该表该存什么；description 要求引用其它表数据而账本未提供时，宁可不改也不臆造。
+  - 空 auto 表要优先从本轮对话提取相关数据填入。
+  - update 优先于 insert：match 用表 description 声明的唯一键（如姓名），命中则更新、未命中才 insert，避免同一实体堆出多行；禁止不带 match 的无条件更新。
+  - delete 仅当表 description 明确要求；本轮写不完的表宁可整体省略，输出的 JSON 必须完整合法——截断的 JSON 会让整轮 patch 作废。
 要点：否定性事件也要记账（赠礼被拒→物品仍在原主处；承诺被收回→记入 flags）；新的承诺、约定、伏笔进 plot_threads；没有变化的字段不要出现在 patch 中；完全无变化则 "patch" 为 {}。
 
 只输出 JSON 对象，例如 {"patch":{...}} 或 {"patch":{}}。不要输出 warnings、不要输出其他文字。`;

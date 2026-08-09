@@ -32,25 +32,50 @@ export function buildTableBackfillPrompt(
 	chunkText: string,
 ): { systemPrompt: string; userText: string } {
 	const columns = table.columns.map((c) => (c.type ? `${c.name}（${c.type}）` : c.name)).join("、");
-	const systemPrompt = `你是表格数据提取器。从给定的历史剧情片段中，把与表「${table.name}」相关的数据提取出来，以 JSON 输出。
+	const systemPrompt = `你是【表格数据提取器】。你的唯一工作：依据<正文数据>与<当前表格数据>，把与目标表「${table.name}」相关的数据以 JSON 操作形式写入该表。
 
-表「${table.name}」列定义：${columns}${table.description ? `\n表说明：${table.description}` : ""}
+## 数据来源
+- <当前表格数据>：目标表当前状态（列定义、表说明、已有行）——一切操作必须基于它，是操作基础。
+- <正文数据>：一段历史剧情原文——数据来源，从中提取与目标表相关的实体与变化。
 
-输出格式（只输出 JSON，不要任何前言、解释或代码围栏）：
+## 目标表
+列定义：${columns}
+（表说明见<当前表格数据>中的 description 字段——它是该表最重要的规则，见下方「表说明优先级」）
+
+## 动手前必须按顺序完成（在心中推理，不要输出）
+1. 通读表说明（description），逐条识别其中的约束：固定行数、唯一键、内容范围、格式要求（如描述字数下限）、删除条件、对其它表的引用等；
+2. 通读<正文数据>，找出与该表相关的实体及其状态变化；
+3. 对照<当前表格数据>的已有行，逐条决定操作：insert（新实体）/ update（变化）/ delete（按规则移除）。
+
+## 表说明优先级
+表说明（description）的约束优先级最高——高于以下任何通用规则；冲突时一律以表说明为准。
+
+## 操作规则
+- insert：正文中出现、且表中尚不存在的实体。表说明声明了唯一键（如「以列1姓名为唯一键」）时，同名实体绝不重复建档。
+- update：必须带 match 精确定位已有行，禁止无条件更新。match 键选择依次尝试：① 表说明示例中使用的键 → ② 唯一键/业务主键（如姓名）→ ③ 其他能唯一定位的业务列。changes 只含实际变化的列。
+- delete：仅当表说明明确要求删除（注意：正文片段中某时刻未出场 ≠ 该实体不在场，删除判断以表说明的语义为准）；表说明未授权删除时，一律不删。
+- 表说明要求引用其它表的数据（如地点与某表保持一致）而<当前表格数据>未提供该表时：宁可不改，绝不臆造。
+
+## 输出格式（严格执行：只输出一个 JSON 对象，无前言、无解释、无代码围栏）
 {
   "insert": [ {行对象}, ... ],
   "update": [ { "match": {匹配键值}, "changes": {新值} }, ... ],
   "delete": [ {匹配键值}, ... ]
 }
 
-规则：
-- 行对象只含该表已声明的列，不要发明新列；integer/number 列输出数字、boolean 列输出 true/false。
-- 增量式提取：只输出本片段「新出现或变化」的数据——表中已存在且未变化的行不要重复输出。
-- match 用能唯一定位行的键值（如行号/名称）；changes 只含变化了的列。
-- 没有相关内容时输出 {"insert":[],"update":[],"delete":[]}。
-- 只输出 JSON。`;
+## 格式要点
+- 行对象只含该表已声明的列，不发明新列；integer/number 列输出数字、boolean 列输出 true/false。
+- 表说明要求的格式约束（如描述字数下限）逐条遵守。
+- 正文中没有相关内容时输出 {"insert":[],"update":[],"delete":[]}——宁缺毋滥，绝不编造。`;
 
-	const userText = `【当前表状态】\n${stateSnapshot}\n\n【历史片段】\n${chunkText}`;
+	const userText = `【当前表状态】
+${stateSnapshot}
+
+【表说明（description，优先级最高）】
+${table.description ?? "（无）"}
+
+【历史片段】
+${chunkText}`;
 	return { systemPrompt, userText };
 }
 
@@ -156,13 +181,22 @@ export interface TableBackfillDeps {
 	charName: string;
 	/** 旁路文本调用：返回文本；失败返回 {error} */
 	sideText: (systemPrompt: string, userText: string) => Promise<string | { error: string }>;
+	/** LLM 调用失败 / 输出无法解析时的重试次数（缺省 5，即最多 6 次尝试） */
+	maxRetries?: number;
+	/** 重试退避基数（毫秒，缺省 2000）：第 n 次重试前等待 baseDelay × 2^(n-1)（2s→4s→8s→16s→32s） */
+	retryBaseDelayMs?: number;
 	onProgress?: (msg: string) => void;
 }
+
+/** 延迟（重试退避用） */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * 核心循环（DESIGN-table-backfill §1）：表存在校验 → 分支叙事历史 → 分块 →
  * 逐块 buildTableBackfillPrompt + sideText + parseTableBackfillOps + applyTableOperation。
- * 块失败 / 输出垃圾跳过继续；时间顺序后写覆盖（增量式）。
+ * 块级重试：LLM 调用失败（{error} / 抛异常）或输出无法解析时，按 2s 倍增退避重试
+ * （缺省 5 次），全部失败才跳过该块继续；重试过程后台打印 [table-backfill] 便于追踪。
+ * 时间顺序后写覆盖（增量式）。
  */
 export async function runTableBackfill(deps: TableBackfillDeps): Promise<
 	| { ok: true; rows: number; chunks: number }
@@ -183,6 +217,8 @@ export async function runTableBackfill(deps: TableBackfillDeps): Promise<
 		text: m.text,
 	}));
 	const chunks = chunkMessagesForSummary(msgs, deps.userName);
+	const maxRetries = deps.maxRetries ?? 5;
+	const baseDelay = deps.retryBaseDelayMs ?? 2000;
 	let rows = 0;
 	for (let i = 0; i < chunks.length; i++) {
 		deps.onProgress?.(`回填 ${i + 1}/${chunks.length}…`);
@@ -190,17 +226,41 @@ export async function runTableBackfill(deps: TableBackfillDeps): Promise<
 		const current = deps.state.tables?.[deps.tableName];
 		if (!current) break; // 表被并发删掉（异常树）；收尾
 		const prompt = buildTableBackfillPrompt(current, JSON.stringify(current), chunks[i]);
-		const resp = await deps.sideText(prompt.systemPrompt, prompt.userText);
-		if (typeof resp !== "string") {
-			deps.onProgress?.(`块 ${i + 1} 失败：${resp.error}`);
-			continue;
+		// 块级重试：失败（调用错误 / 输出垃圾）→ 2s 倍增退避重试，重试成功照样应用
+		let attempts = 0;
+		let done = false;
+		while (!done) {
+			attempts++;
+			let resp: string | { error: string };
+			try {
+				resp = await deps.sideText(prompt.systemPrompt, prompt.userText);
+			} catch (err) {
+				// sideText 实现一般自带 catch 返回 {error}；这里兜底防抛异常中断整轮回填
+				resp = { error: err instanceof Error ? err.message : String(err) };
+			}
+			const ops = typeof resp === "string" ? parseTableBackfillOps(resp) : null;
+			if (ops) {
+				rows += applyOps(deps.state, deps.tableName, ops);
+				done = true;
+				break;
+			}
+			const failReason = typeof resp !== "string" ? `调用失败（${resp.error}）` : "输出无法解析";
+			if (attempts > maxRetries) {
+				deps.onProgress?.(`块 ${i + 1} ${failReason}，重试 ${maxRetries} 次仍失败，跳过`);
+				console.log(
+					`[table-backfill] 表「${deps.tableName}」块 ${i + 1}/${chunks.length} ${failReason}，重试 ${maxRetries} 次仍失败，跳过`,
+				);
+				done = true;
+				break;
+			}
+			const wait = baseDelay * 2 ** (attempts - 1); // 2s → 4s → 8s → 16s → 32s
+			console.log(
+				`[table-backfill] 表「${deps.tableName}」块 ${i + 1}/${chunks.length} 第 ${attempts} 次尝试${failReason}，` +
+					`${wait / 1000}s 后重试（剩余 ${maxRetries - attempts} 次）`,
+			);
+			deps.onProgress?.(`块 ${i + 1} ${failReason}，${wait / 1000}s 后重试（剩余 ${maxRetries - attempts} 次）…`);
+			await sleep(wait);
 		}
-		const ops = parseTableBackfillOps(resp);
-		if (!ops) {
-			deps.onProgress?.(`块 ${i + 1} 输出无法解析，跳过`);
-			continue;
-		}
-		rows += applyOps(deps.state, deps.tableName, ops);
 	}
 	return { ok: true, rows, chunks: chunks.length };
 }

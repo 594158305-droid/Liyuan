@@ -270,6 +270,12 @@ export interface RpConfig {
 	 * 用该卡开聊时把绑定的模板表建进聊天 state（幂等，只建结构不填数据）。
 	 */
 	cardTemplates?: Record<string, string[]>;
+	/**
+	 * 导入场景的表回填阈值（DESIGN-import-raw §1 表格回填）：auto 表数 > 该值时，
+	 * 导入流程改为逐表独立 LLM 调用回填（每表一次提取链，分块增量填，避免单次场记
+	 * 建账塞不下多张表）；≤ 阈值时由场记建账顺手填充。缺省 6。
+	 */
+	tableBackfillThreshold?: number;
 }
 
 export const DEFAULT_CONFIG: RpConfig = {
@@ -284,6 +290,8 @@ export const DEFAULT_CONFIG: RpConfig = {
 	greeting: true,
 	backendControl: true,
 	compactEveryNTurns: 30,
+	// 导入时 auto 表超过该数则逐表独立回填（每表一次 LLM 提取链）
+	tableBackfillThreshold: 6,
 	// 默认无自定义 agent（declarative，见 AgentConfig）
 	agents: [],
 };

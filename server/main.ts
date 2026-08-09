@@ -1654,6 +1654,63 @@ const restHost: RestHost = {
 			resyncAll();
 			return { ok: false, error: r.error, aborted: r.aborted };
 		}
+		// 6.5) 表多时逐表回填（配置 tableBackfillThreshold，缺省 6）：auto 表数超过阈值时，
+		// 单次场记建账塞不下所有表——回放完成后改为每表独立 LLM 提取链回填（复用 table-backfill
+		// 通道：分块直读楼层、增量式）。表少（≤ 阈值）时靠场记建账顺手填充即可。
+		// 失败跳过该表继续；signal 表粒度可中断（已回填的表已落盘不丢）。
+		const autoTables = Object.values(state.tables ?? {}).filter((t) => t.auto);
+		const backfillThreshold = loadConfig(cwd).tableBackfillThreshold ?? 6;
+		if (autoTables.length > backfillThreshold) {
+			let filled = 0;
+			for (let i = 0; i < autoTables.length; i++) {
+				if (input.signal?.aborted) break;
+				const t = autoTables[i]!;
+				broadcast({
+					type: "activity",
+					activity: {
+						kind: "note",
+						name: "import-raw",
+						detail: JSON.stringify({
+							stage: `回填表 ${i + 1}/${autoTables.length}（${t.name}）`,
+							current: r.floors,
+							total: r.floors,
+							scribeCalls: r.scribeCalls,
+						}),
+					},
+				});
+				const br = await runTableBackfill({
+					branchEntries: session.sessionManager.getBranch() as BranchEntryLike[],
+					state,
+					tableName: t.name,
+					userName: names.userName,
+					charName: names.charName,
+					sideText: backfillSideText,
+					onProgress: (msg) => console.log(`[import-raw] ${msg}`),
+				});
+				if (!br.ok) {
+					console.log(`[import-raw] 表「${t.name}」回填失败：${br.error}`);
+					continue;
+				}
+				filled += br.rows;
+				// 每表完成即落盘 + 广播（中断时已回填的表不丢）
+				saveState(file, state);
+				syncStoryStateFromDisk();
+			}
+			console.log(`[import-raw] 逐表回填完成：${autoTables.length} 张表，应用 ${filled} 行`);
+			broadcast({
+				type: "activity",
+				activity: {
+					kind: "note",
+					name: "import-raw",
+					detail: JSON.stringify({
+						stage: `逐表回填完成（应用 ${filled} 行）`,
+						current: r.floors,
+						total: r.floors,
+						scribeCalls: r.scribeCalls,
+					}),
+				},
+			});
+		}
 		// 7) 收尾：flush + 对齐 agent 内存消息 + 全量重放（前端会话列表/消息刷新）
 		sm.flush();
 		session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
