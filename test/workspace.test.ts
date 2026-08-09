@@ -117,10 +117,12 @@ test("beat_step_done：按序号勾掉并回报剩余；越界/重复勾/无计�
 	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 9 }).ok, false, "越界拒收");
 	assert.equal(runWriteTool(ws, d, "beat_step_done", {}).ok, false, "缺参数拒收");
 
-	// 全部勾完：导向通读与封笔，而不是继续催段
+	// 全部勾完：只报状态转折（收笔评估由轮次卡接手），不继续催段、不重复评估导向
 	const last = runWriteTool(ws, d, "beat_step_done", { step: 2 });
 	assert.equal(last.ok, true);
-	assert.match(last.text, /draft_seal/);
+	assert.match(last.text, /路标已全部演完/);
+	assert.doesNotMatch(last.text, /接着演|draft_append/, "勾完不催段");
+	assert.doesNotMatch(last.text, /ask|收笔前/, "回执不带评估导向（8/09：评估归轮次卡，回执重复会逼模型每勾一步纠结一遍）");
 });
 
 test("续写回执不含字数读数：目标可持有，测量值不回传（8/08 定案）", () => {

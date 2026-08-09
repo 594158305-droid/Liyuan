@@ -400,16 +400,15 @@ export function runWriteTool(
 		}
 		target.done = true;
 		const left = pendingSteps(ws.plan);
+		// 回执只报结果（8/09 实弹：旧回执带四分支评估导向，与轮次卡逐句重复——模型
+		// 每勾一条就被逼着把「要不要 ask/续写/收笔」重新评估一遍，收笔前纠结了三轮。
+		// 评估指令归轮次卡（每轮都注入），回执不抢卡的活）。
 		return {
 			text:
-				`已勾掉第 ${idx} 条「${target.text}」，还剩 ${left} 条。当前计划：\n${formatPlan(ws.plan)}\n\n` +
-				`回看刚写下的这段，再决定下一步：` +
-				`· 剩余计划还成立 → 接着演下一条（draft_append）；` +
-				`· 不成立 → beat_plan 重拟剩下几步；` +
-				`· 剧情到岔路 → ask 用户拍板；` +
-				`· 戏已经到停点（${deps.userName} 能接话）→ 收笔；收笔前先确认：自然下文是否涉及 ` +
-				`${deps.userName} 的行动或选择——涉及就先 ask，再 draft_seal。清单没勾完也没关系——` +
-				`计划是草稿，戏演到哪算哪。`,
+				`已勾掉第 ${idx} 条「${target.text}」，还剩 ${left} 条。当前计划：\n${formatPlan(ws.plan)}` +
+				(left > 0
+					? `\n刚写的一段已经盖过后面的路标的，连着勾掉即可，不必分轮。`
+					: `\n路标已全部演完。`),
 			activity: `勾掉「${target.text}」· 剩 ${left} 条`,
 			ok: true,
 		};
@@ -468,13 +467,13 @@ export function runWriteTool(
 		if (!ws.draft.trim()) return { text: "工作区还没有稿件——先用 draft_write / draft_append 写正文。", ok: false };
 		ws.sealed = true;
 		const c = runCheck(ws, deps);
-		// 谢幕导向（8/09 输出形式）：状态栏 = 本拍结束的标志，必须是最后的产出。
-		// 封笔回执明示这一步，模型记完账也忘不掉（引擎另有程序化谢幕兜底）。
+		// 谢幕导向（8/09 输出形式）：状态栏 = 本拍结束的标志。只点名这一步——
+		// seal 发生即收笔评估已做完，回执不再复述「含 ask/续写」条件（8/09 实弹：
+		// 条件从句会让模型在谢幕轮把续写评估再翻一遍）。
 		const sb = deps.rules.statusBarTagGroup;
 		const tail =
 			c.green && sb.length > 0
-				? `\n剩最后一步：剧情彻底结束后（含 ask/续写），在正文之外直接输出状态栏` +
-					`（${sb.map((t) => `<${t}>`).join(" 或 ")}）等格式块——状态栏意味着本拍结束，必须最后出现。`
+				? `\n剩最后一步：在正文之外直接输出状态栏（${sb.map((t) => `<${t}>`).join(" 或 ")}）等格式块——输出完本拍结束。`
 				: "";
 		return {
 			text: `已封笔。按完整稿验收：\n${c.text}${tail}`,

@@ -114,8 +114,8 @@ export function writeTools(language: string): StageTool[] {
 		{
 			name: "beat_step_done",
 			description:
-				"勾掉计划里已经演完的一条（写完一段就勾一条）。" +
-				"返回更新后的清单与剩余条数——照着剩下的往下演。",
+				"勾掉计划里已经演完的一条（写完一段就勾一条；一段盖过几条就连着勾几条，不必分轮）。" +
+				"返回更新后的清单与剩余条数。",
 			parameters: {
 				type: "object",
 				properties: {
