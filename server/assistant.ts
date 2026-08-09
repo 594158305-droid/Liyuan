@@ -96,6 +96,8 @@ export interface StoryBridge {
 	applyTableOp(op: TableOp): Promise<{ ok: boolean; error?: string; applied?: string[] }>;
 	/** 自定义表格模板物化（DESIGN-template-system §6）：把模板的表建进当前剧情 state（幂等只建结构，落盘 + 收编进树） */
 	applyTemplate(name: string): Promise<{ ok: boolean; error?: string; applied?: string[]; warnings?: string[] }>;
+	/** 表格历史回填（DESIGN-table-backfill §3）：从当前分支历史楼层提取数据填充指定表（旁路 LLM，耗时较长） */
+	applyTableBackfill(name: string): Promise<{ ok: boolean; rows?: number; chunks?: number; error?: string }>;
 	/** 配置/预设变更后热载剧情会话（流式中自动排队） */
 	softRefreshConfig(): Promise<void>;
 	/** P8：广播 hello 全量重放（显示规则写盘后让所有端用新规则重渲当前消息；纯广播无写入） */
@@ -356,6 +358,7 @@ export const STAGEHAND_TOOL_NAMES: string[] = [
 	"template_create",
 	"template_list",
 	"template_apply",
+	"table_backfill",
 	"lorebook_write",
 	"codex_list",
 	"codex_read",
@@ -1136,6 +1139,21 @@ function createStagehandTools(
 					...(r.warnings ?? []).map((w) => `⚠ ${w}`),
 				];
 				return text(lines.length ? lines.join("\n") : "模板表已全部存在，无变更。");
+			},
+		}),
+		// ---- 表格历史回填（DESIGN-table-backfill §3）：从当前分支历史楼层提取数据填充表 ----
+		defineTool({
+			name: "table_backfill",
+			label: "从历史回填表格",
+			description:
+				"从当前分支的历史楼层逐块提取数据填充指定表（不走摘要，直接读原文；只写当前聊天 state，其他分支不受影响）。用于用户新建/物化一张表后想从旧剧情回填数据时。耗时较长（逐块调旁路模型），期间不要中断；返回填入了多少行、处理了多少块；失败返回原因。",
+			parameters: Type.Object({
+				name: Type.String({ description: "表名（须已存在于当前聊天，可先用 table_list 查）" }),
+			}),
+			async execute(_id, params) {
+				const r = await bridge.applyTableBackfill(params.name);
+				if (!r.ok) return text(r.error ?? "回填失败", true);
+				return text(`回填完成：${r.rows ?? 0} 行数据已写入表「${params.name}」（处理 ${r.chunks ?? 0} 块历史楼层）。`);
 			},
 		}),
 	);

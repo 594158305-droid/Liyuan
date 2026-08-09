@@ -34,6 +34,7 @@ import {
 	IconClose,
 	IconDownload,
 	IconFolderOpen,
+	IconHistory,
 	IconLink,
 	IconPlus,
 	IconRefresh,
@@ -237,6 +238,7 @@ export function TablesPage({
 	// ---- 异步动作（两个独立 busy：表格数据操作 / 模板管理） ----
 	const opAct = useAction(toast); // 单元格、行、auto 开关（POST /api/state/tables）
 	const tmplAct = useAction(toast); // 模板 CRUD / 物化 / 绑定 / 保存（POST/DELETE /api/templates、PUT /api/config）
+	const bfAct = useAction(toast); // 历史回填（POST /api/tables/backfill，耗时较长：独立 busy 不阻塞其它操作）
 
 	const gridTable = liveTables[selTable ?? ""];
 
@@ -333,6 +335,21 @@ export function TablesPage({
 			// 删的是当前选中表 → 清掉选中，避免指向已不存在的表
 			setSelTable((cur) => (cur === name ? null : cur));
 			toast("info", `表「${name}」已从当前聊天删除（模板定义保留）`);
+		});
+	};
+
+	/** 历史回填：旁路模型从当前分支的历史楼层提取数据填充此表（增量式，耗时较长） */
+	const backfillTable = () => {
+		if (!gridTable) return;
+		const name = gridTable.name;
+		void bfAct.run(async () => {
+			const r = await apiPost<{ ok: boolean; rows?: number; chunks?: number; error?: string }>(
+				"/api/tables/backfill",
+				{ name },
+			);
+			if (!r.ok) throw new Error(r.error ?? "回填失败");
+			toast("info", `已从历史提取 ${r.rows ?? 0} 行（${r.chunks ?? 0} 块）`);
+			// WS state 帧会自动刷新数据页，无需手动重拉
 		});
 	};
 
@@ -743,6 +760,22 @@ export function TablesPage({
 														<IconPlus size={13} />
 														新增一行
 													</button>
+													<ConfirmButton
+														className="tbl-btn tbl-btn-sm"
+														confirmText="确认回填"
+														title="从当前分支的历史楼层提取数据回填此表（增量式，旁路模型分块处理，可能耗时数分钟）"
+														disabled={opAct.busy || bfAct.busy}
+														onConfirm={backfillTable}
+													>
+														{bfAct.busy ? (
+															"回填中…"
+														) : (
+															<>
+																<IconHistory size={13} />
+																从历史回填
+															</>
+														)}
+													</ConfirmButton>
 													<ConfirmButton
 														className="tbl-btn tbl-btn-sm tbl-btn-danger"
 														confirmText="确认删除"

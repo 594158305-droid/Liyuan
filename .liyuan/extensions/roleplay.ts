@@ -82,6 +82,8 @@ import {
 	type TableOp,
 } from "../../src/state.ts";
 import { listTemplates, loadTemplate, materializeTemplate, saveTemplate } from "../../src/templates.ts";
+import { runTableBackfill } from "../../src/table-backfill.ts";
+import type { BranchEntryLike } from "../../src/stage/assemble.ts";
 import {
 	importLocalAudio,
 	loadTtsConfig,
@@ -2736,6 +2738,52 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			} catch (err) {
 				notify(ctx, `导入失败：${err instanceof Error ? err.message : String(err)}`, "error");
 			}
+		},
+	});
+
+	// 表格历史回填：从当前分支叙事楼层逐块提取数据填充表（新建/物化表后补历史数据用）
+	// 用法：/table-backfill <表名>。旁侧模型逐块提取（增量式：后块可见前块已填行），
+	// 非 auto 静态表同样生效（直接 applyTableOperation，不经 applyPatch 的 auto 限制）。
+	pi.registerCommand("table-backfill", {
+		description: "从当前分支的历史楼层提取数据回填指定表格。用法 /table-backfill <表名>（表须已存在于当前聊天，可先用 template_apply 物化）。",
+		handler: async (args, ctx) => {
+			if (!rpMode || !card) {
+				notify(ctx, "RP 模式未就绪，无法回填", "error");
+				return;
+			}
+			const tableName = (args ?? "").trim();
+			if (!tableName) {
+				notify(ctx, "用法：/table-backfill <表名>（表须已存在于当前聊天，可先用 template_apply 物化）", "error");
+				return;
+			}
+			const r = await runTableBackfill({
+				branchEntries: ctx.sessionManager.getBranch() as BranchEntryLike[],
+				state,
+				tableName,
+				userName: config.userName,
+				charName: card.name,
+				sideText: async (sys, user) => {
+					try {
+						const text = await sideComplete(ctx, sys, user, 4096);
+						return text ?? { error: "空响应" };
+					} catch (err) {
+						return { error: err instanceof Error ? err.message : String(err) };
+					}
+				},
+				onProgress: (msg) => {
+					console.log(`[backfill] ${msg}`);
+					notify(ctx, msg);
+				},
+			});
+			if (!r.ok) {
+				notify(ctx, `回填失败：${r.error}`, "error");
+				return;
+			}
+			if (r.rows > 0) {
+				if (stateFile) saveState(stateFile, state);
+				snapshotState();
+			}
+			notify(ctx, `回填完成：处理 ${r.chunks} 块，应用 ${r.rows} 行（表「${tableName}」）。`);
 		},
 	});
 }

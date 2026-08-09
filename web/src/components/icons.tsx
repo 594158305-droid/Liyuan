@@ -446,3 +446,12 @@ export const IconFolderOpen = (p: IconProps) => (
 		<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
 	</Icon>
 );
+
+/** 历史回填：时钟 + 逆时针箭头 */
+export const IconHistory = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+		<path d="M3 3v5h5" />
+		<path d="M12 7v5l4 2" />
+	</Icon>
+);

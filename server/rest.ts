@@ -358,6 +358,8 @@ export interface RestHost {
 		applied?: string[];
 		warnings?: string[];
 	}>;
+	/** 表格历史回填（DESIGN-table-backfill §3：从当前分支历史楼层提取数据填充表；走旁路 LLM，耗时较长） */
+	applyTableBackfill(name: string): Promise<{ ok: boolean; rows?: number; chunks?: number; error?: string }>;
 	/** 世界状态只读（当前分支账本；与 applyStatePatch 同源；未就绪返回 null） */
 	worldState(): import("../src/types.ts").WorldState | null;
 	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮）；无宿主能力时缺省（路由回退纯管线结果）。
@@ -2732,6 +2734,21 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (!body.op || typeof body.op !== "object" || Array.isArray(body.op)) throw new Error("缺少 op");
 				const r = await host.applyTableOp(body.op as TableOp);
 				sendJson(res, 200, r);
+				return true;
+			}
+
+			// ---- 表格历史回填（DESIGN-table-backfill §3）：从当前分支历史楼层提取数据填充表（旁路 LLM，耗时较长）----
+			case "POST /api/tables/backfill": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { name?: string };
+				const name = (body.name ?? "").trim();
+				if (!name) throw new Error("缺少表名");
+				const r = await host.applyTableBackfill(name);
+				if (!r.ok) {
+					sendJson(res, 200, { ok: false, error: r.error ?? "回填失败" });
+					return true;
+				}
+				sendJson(res, 200, { ok: true, rows: r.rows, chunks: r.chunks });
 				return true;
 			}
 

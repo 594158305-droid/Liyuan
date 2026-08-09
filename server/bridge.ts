@@ -83,6 +83,8 @@ export function createStoryBridge(base: StoryBridge, perms: BridgePermissions): 
 		applyTableOp: perms.tableOps ? base.applyTableOp.bind(base) : () => deny("applyTableOp"),
 		// ---- 自定义表格模板物化（DESIGN-template-system §6）：物化即建表，随 tableOps 权限面 ----
 		applyTemplate: perms.tableOps ? base.applyTemplate.bind(base) : () => deny("applyTemplate"),
+		// ---- 表格历史回填（DESIGN-table-backfill §3）：从当前分支楼层提取数据填充表；随 tableOps 权限面 ----
+		applyTableBackfill: perms.tableOps ? base.applyTableBackfill.bind(base) : () => deny("applyTableBackfill"),
 		// ---- 委托模式媒体推送：独立权限（emitStoryMedia 在接口里是可选项，授权不足也按抛错处理）----
 		emitStoryMedia: perms.emitMedia ? base.emitStoryMedia.bind(base) : () => deny("emitStoryMedia"),
 		// ---- 配置/设定热载与素材收编：refreshMaterials 一键管两个同源方法 ----

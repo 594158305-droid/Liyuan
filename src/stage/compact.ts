@@ -22,6 +22,7 @@ import {
 	rebuildHistory,
 	activeSummary,
 	SUMMARY_ENTRY_TYPE,
+	type BeatMsg,
 	type BranchEntryLike,
 	type RpSummaryData,
 } from "./assemble.ts";
@@ -69,6 +70,20 @@ export interface PlanCompactionOptions {
 }
 
 /**
+ * 分支叙事历史（纯文本，按时间顺序）：先剔摘要条目（compaction / rp-summary），
+ * 再走 rebuildHistory——补丁已套、过程条目不存在，读到的与模型当时读到的是同一份正文。
+ * 与 serializeForSummary 共用（后者的序列化格式是它的一个投影）；表格历史回填等
+ * 旁路数据源直接取本函数，不经过摘要。
+ */
+export function branchHistory(entries: BranchEntryLike[]): BeatMsg[] {
+	const bodyOnly = entries.filter(
+		(e) => e.type !== "compaction" && !(e.type === "custom" && e.customType === SUMMARY_ENTRY_TYPE),
+	);
+	const { history } = rebuildHistory(bodyOnly);
+	return history;
+}
+
+/**
  * 序列化待摘要区间为对话文本。走 rebuildHistory 同一条路：
  * 补丁已套、过程条目不存在——摘要读到的与模型当时读到的是同一份正文。
  *
@@ -78,11 +93,7 @@ export interface PlanCompactionOptions {
  * 由 previousSummary 单独入提示词。
  */
 export function serializeForSummary(entries: BranchEntryLike[], userName: string, charName: string): string {
-	const bodyOnly = entries.filter(
-		(e) => e.type !== "compaction" && !(e.type === "custom" && e.customType === SUMMARY_ENTRY_TYPE),
-	);
-	const { history } = rebuildHistory(bodyOnly);
-	return history.map((m) => `${m.role === "user" ? userName : charName}：${m.text}`).join("\n\n");
+	return branchHistory(entries).map((m) => `${m.role === "user" ? userName : charName}：${m.text}`).join("\n\n");
 }
 
 /**

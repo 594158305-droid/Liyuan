@@ -62,6 +62,7 @@ import {
 } from "../src/paths.ts";
 import { applyPatch, applyTableOperation, loadState, saveState } from "../src/state.ts";
 import { loadTemplate, materializeTemplate } from "../src/templates.ts";
+import { runTableBackfill } from "../src/table-backfill.ts";
 import { DEFAULT_CONFIG, type AgentConfig, type RpConfig, type WorldState } from "../src/types.ts";
 import {
 	loadTtsConfig,
@@ -1549,6 +1550,24 @@ const restHost: RestHost = {
 		syncStoryStateFromDisk();
 		return { ok: true, applied: r.applied, warnings: r.warnings };
 	},
+	// ---- 表格历史回填（DESIGN-table-backfill §3）：从当前分支历史楼层提取数据填充表（旁路 LLM，耗时较长）----
+	async applyTableBackfill(name) {
+		const file = join(stateDir, `${session.sessionId}.json`);
+		const state = loadState(file);
+		const r = await runTableBackfill({
+			branchEntries: session.sessionManager.getBranch() as BranchEntryLike[],
+			state,
+			tableName: name,
+			userName: names.userName,
+			charName: names.charName,
+			sideText: backfillSideText,
+			onProgress: (msg) => console.log(`[backfill] ${msg}`),
+		});
+		if (!r.ok) return { ok: false, error: r.error };
+		saveState(file, state); // fs.watch 自动广播 state 帧
+		syncStoryStateFromDisk(); // 同步 roleplay 内存 state + 树快照
+		return { ok: true, rows: r.rows, chunks: r.chunks };
+	},
 	/** 世界状态只读：与 storyBridge.worldState() 同源（currentState：树快照优先，磁盘缓存兜底） */
 	worldState() {
 		try {
@@ -1943,6 +1962,7 @@ const storyBridgeBase: StoryBridge = {
 	applyStatePatch: (patch) => restHost.applyStatePatch(patch),
 	applyTableOp: (op) => restHost.applyTableOp(op),
 	applyTemplate: (name) => restHost.applyTemplate(name),
+	applyTableBackfill: (name) => restHost.applyTableBackfill(name),
 	softRefreshConfig: () => restHost.softRefreshConfig(),
 	/** P8：广播 hello 全量重放（regex_manage 写盘后让所有端用新显示规则重渲当前消息） */
 	resyncStory: () => resyncAll(),
@@ -2488,6 +2508,40 @@ registerPlannerCaller(async (prompt, llm) => {
 	if (!text.trim()) throw new Error("规划 LLM 最终消息无文本");
 	return text;
 });
+
+// 表格历史回填（DESIGN-table-backfill §3）：旁路文本调用，与场记/压缩/规划同款 streamSimple 通道。
+// 模型取当前剧情模型（session.model）；失败返回 {error}——runTableBackfill 内部跳过该块继续，不中断整轮回填。
+async function backfillSideText(systemPrompt: string, userText: string): Promise<string | { error: string }> {
+	try {
+		const model = session.model as never;
+		if (!model) return { error: "尚无可用模型（未配置剧情模型）" };
+		// 必须 await：getApiKeyAndHeaders 返回 Promise，缺 await 会解构到 Promise 实例（同 registerPlannerCaller 坑）
+		const auth = await session.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) return { error: auth.error ?? `无法解析 ${String((model as { provider?: string }).provider)} 的 API key` };
+		const s = streamSimple(
+			model,
+			{
+				systemPrompt,
+				messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
+			},
+			{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, reasoning: "off" },
+		);
+		let final: AssistantMsgLike | null = null;
+		for await (const e of s) {
+			if (e.type === "done") final = e.message ?? null;
+			else if (e.type === "error") return { error: e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}` };
+		}
+		if (!final) return { error: "旁路 LLM 流未产出最终消息" };
+		const text = (final.content ?? [])
+			.filter((p) => p?.type === "text")
+			.map((p) => String((p as { text?: string }).text ?? ""))
+			.join("");
+		if (!text.trim()) return { error: "旁路 LLM 最终消息无文本" };
+		return text;
+	} catch (e) {
+		return { error: e instanceof Error ? e.message : String(e) };
+	}
+}
 
 // 生图管线 lore 检索（draw-pipeline）：注册 host 实现——loadMergedLore + searchEntries。
 // 与 assistant 侧 lorebook_search 同一数据源（rest.ts loadMergedLore → searchEntries）。
