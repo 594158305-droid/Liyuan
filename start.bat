@@ -95,10 +95,30 @@ echo [liyuan] Continues last session. New session:  start.bat --new
 echo [liyuan] Close this window to stop the server.
 echo.
 
+:: Chrome app mode: open in --app window when Chrome is installed
+set "CHROME="
+for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" /ve 2^>nul ^| findstr /i "REG_SZ"') do if exist "%%b" set "CHROME=%%b"
+if not defined CHROME for /f "tokens=2*" %%a in ('reg query "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" /ve 2^>nul ^| findstr /i "REG_SZ"') do if exist "%%b" set "CHROME=%%b"
+if not defined CHROME if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+if not defined CHROME if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set "CHROME=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+if not defined CHROME if exist "%LocalAppData%\Google\Chrome\Application\chrome.exe" set "CHROME=%LocalAppData%\Google\Chrome\Application\chrome.exe"
+if defined CHROME (
+  echo [liyuan] Chrome found, opening in app mode
+) else (
+  echo [liyuan] Chrome not found, opening in default browser
+)
+
 :: Delayed open via silent VBS (no second console)
 set "VBS=%TEMP%\liyuan-open-browser.vbs"
 > "%VBS%" echo WScript.Sleep 2000
->>"%VBS%" echo CreateObject("WScript.Shell").Run "http://localhost:%PORT%/", 1, False
+if defined CHROME (
+  >>"%VBS%" echo q = Chr(34^)
+  >>"%VBS%" echo chrome = q ^& "%CHROME%" ^& q
+  >>"%VBS%" echo url = q ^& "http://localhost:%PORT%/" ^& q
+  >>"%VBS%" echo CreateObject("WScript.Shell"^).Run chrome ^& " --app=" ^& url, 1, False
+) else (
+  >>"%VBS%" echo CreateObject("WScript.Shell"^).Run "http://localhost:%PORT%/", 1, False
+)
 wscript //nologo "%VBS%"
 
 :: Supervised run: exit 87 = in-app "restart to apply update" -> apply + relaunch
