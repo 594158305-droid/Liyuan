@@ -529,6 +529,29 @@ export const tavernHelperImpl: Record<string, TavernHelperMethod> = {
 		console.log("[jsrunner] injectPrompts 未实现（Liyuan 无扩展提示词注入面），已忽略");
 		return undefined;
 	},
+	// ST 世界书 API 桩（liyuan-瑟瑟状态栏 play-wb 模块调用；Liyuan 无 ST 世界书对等面——
+	// 按「无对等 → 桩」原则返回空值，脚本侧降级不炸；数据面由内嵌库/账本替代）
+	getCharWorldbookNames() {
+		return [];
+	},
+	getWorldbookNames() {
+		return [];
+	},
+	getGlobalWorldbookNames() {
+		return [];
+	},
+	getWorldbook() {
+		return null;
+	},
+	getOrCreateChatWorldbook() {
+		return null;
+	},
+	deleteWorldbook() {
+		return undefined;
+	},
+	rebindGlobalWorldbooks() {
+		return undefined;
+	},
 	// G2：模型列表——空数组（可后续接 provider registry）
 	async getModelList() {
 		return [] as unknown[];
