@@ -1320,22 +1320,6 @@ export default function App() {
 		if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
 	}, [messages, streamText, streamThinking, thinkingLive, toolNote, liveActs, liveSegs]);
 
-	/** 视口最顶可见回合：渲染区间内第一个「底边越过视口顶」的回合（区间小，顺序遍历便宜） */
-	const topVisibleRound = (): number => {
-		const el = listRef.current;
-		if (!el) return effectiveWindowTopRef.current;
-		const viewTop = el.scrollTop;
-		const listRect = el.getBoundingClientRect();
-		let t = effectiveWindowTopRef.current;
-		for (const [idx, node] of roundElRefs.current) {
-			if (node.getBoundingClientRect().bottom - listRect.top + el.scrollTop > viewTop) {
-				t = idx;
-				break;
-			}
-		}
-		return t;
-	};
-
 	const onScroll = () => {
 		const el = listRef.current;
 		if (!el) return;
@@ -1344,44 +1328,56 @@ export default function App() {
 			scrollAdjustingRef.current = false;
 			return;
 		}
-		// 回合窗口平移（保留 atBottomRef 贴底跟随逻辑不变）：滚动时按视口位置滑动渲染区间
+		// 滚动只维护贴底状态（窗口化：视口在渲染底部 且 窗口已到全局底部才贴底，翻历史时不误判）；
+		// 窗口切换不在滚动时发生——由 onChatWheel 的「边界 + 持续滚轮 3s」触发。
+		const near = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
 		if (windowingEnabled && totalRounds > roundWindowSize) {
-			const L = totalRounds;
-			const W = roundWindowSize;
-			const maxTop = L - W;
-			const curTop = effectiveWindowTopRef.current;
-			const T = topVisibleRound();
-			// 每次最多平移 1 回合（目标 = clamp(T - M, 0, maxTop) 再收窄到相邻 1 格）：
-			// 一次跳多回合会让锚定修正后的视口位置与窗口错位，target 被 clamp 回贴底 → 上下往返振荡。
-			let target = Math.min(maxTop, Math.max(0, T - windowM));
-			if (target > curTop) target = Math.min(maxTop, curTop + 1);
-			else if (target < curTop) target = Math.max(0, curTop - 1);
-			// 上滚顶到区间首回合且全局还有更早回合 → 继续逐回合上移
-			if (el.scrollTop <= 1 && curTop > 0) target = Math.max(0, curTop - 1);
-			// 下滚顶到区间末回合（且窗口还能下移、非真实底部）→ 继续逐回合下移
-			const atRenderedBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
-			if (atRenderedBottom && el.scrollHeight > el.clientHeight && curTop + W < L && !atBottomRef.current) {
-				target = Math.min(maxTop, curTop + 1);
-			}
-			if (target !== curTop) {
-				// 锚定：上移锚旧首回合容器、下移锚旧末回合容器（平移后两者仍在 DOM，可量 offsetTop 差）
-				const firstEl = roundElRefs.current.get(curTop);
-				const lastEl = roundElRefs.current.get(curTop + W - 1);
-				anchorElRef.current = target < curTop ? (firstEl ?? lastEl ?? null) : (lastEl ?? firstEl ?? null);
-				anchorOffsetRef.current = anchorElRef.current?.offsetTop ?? 0;
-				pendingAnchorRef.current = true;
-				setWindowTop(target);
-			}
-			// 贴底语义：视口在渲染底部 且 窗口已到全局底部（区间还能下移时不算贴底，避免翻历史误判）
-			const near = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
-			const next = near && curTop + W >= L;
+			const next = near && effectiveWindowTopRef.current + roundWindowSize >= totalRounds;
 			atBottomRef.current = next;
 			setAtBottom(next);
 			return;
 		}
-		const near = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
 		atBottomRef.current = near;
 		setAtBottom(near);
+	};
+
+	// 边界滚轮累计计时：滚到已加载内容边界后继续转滚轮（事件间隔 <1.5s 视为连续），累计 3s 触发窗口切换一段
+	const edgeWheelRef = useRef({ lastAt: 0, accum: 0 });
+	const onChatWheel = (e: React.WheelEvent) => {
+		if (!windowingEnabled || totalRounds <= roundWindowSize) return;
+		const el = listRef.current;
+		if (!el) return;
+		const L = totalRounds;
+		const W = roundWindowSize;
+		const maxTop = L - W;
+		const curTop = effectiveWindowTopRef.current;
+		const up = e.deltaY < 0;
+		const atTopEdge = el.scrollTop <= 2 && curTop > 0; // 已滚到渲染区顶，且全局还有更早回合
+		const atBotEdge = el.scrollHeight - el.scrollTop - el.clientHeight <= 2 && curTop < maxTop; // 渲染区底，且全局还有更晚回合
+		const want = (up && atTopEdge) || (!up && atBotEdge);
+		const t = edgeWheelRef.current;
+		if (!want) {
+			// 离开边界或方向不对 → 清零（正常浏览不累计）
+			t.lastAt = 0;
+			t.accum = 0;
+			return;
+		}
+		const now = performance.now();
+		if (t.lastAt && now - t.lastAt < 1500) t.accum += now - t.lastAt;
+		else t.accum = 0;
+		t.lastAt = now;
+		if (t.accum < 3000) return;
+		// 累计 3s → 切换一段（主窗口 N 回合）：锚定旧边界容器，渲染后按 offsetTop 差修正 scrollTop，视口内容不跳
+		t.lastAt = 0;
+		t.accum = 0;
+		const target = up ? Math.max(0, curTop - windowN) : Math.min(maxTop, curTop + windowN);
+		if (target === curTop) return;
+		const firstEl = roundElRefs.current.get(curTop);
+		const lastEl = roundElRefs.current.get(curTop + W - 1);
+		anchorElRef.current = target < curTop ? (firstEl ?? lastEl ?? null) : (lastEl ?? firstEl ?? null);
+		anchorOffsetRef.current = anchorElRef.current?.offsetTop ?? 0;
+		pendingAnchorRef.current = true;
+		setWindowTop(target);
 	};
 
 	const jumpToBottom = () => {
@@ -2231,7 +2227,7 @@ export default function App() {
 				{sidePanel(leftPanel, "left")}
 
 				<main className="center">
-					<div className="list" ref={listRef} onScroll={onScroll} onPointerDown={() => composerTools && setComposerTools(false)}>
+					<div className="list" ref={listRef} onScroll={onScroll} onWheel={onChatWheel} onPointerDown={() => composerTools && setComposerTools(false)}>
 						<div className="flow">
 							{/* 欢迎区嵌在聊天流（学 ST）：顶栏/侧栏/输入框仍可用 */}
 							{welcome ? (
