@@ -305,10 +305,16 @@ export function ToolSegment({ activities, live }: { activities: WireActivity[]; 
 }
 
 /**
- * 回合时间线渲染：思考 / 工具 / 正文按**发生顺序**从上到下依次排列。
+ * 回合时间线渲染（8/09 两层折叠）：
  *
- * 这是本组件与旧结构的根本差别——旧版是三个固定分区各自累加（思考恒在顶、
- * 正文恒在底），时序信息在拼接时就丢了。live=true 时末段加光标。
+ * **定稿态（live=false）**——成品优先：正文段（稿段+尾巴）连续平铺，全部思考与
+ * 工具段收进末尾**一个**「本轮历程」折叠（第二层汇总折叠）。过程不删除——点开
+ * 历程按原时序看完整思考与调用；历程内思考默认展开（用户点开历程就是要读它）。
+ * 旧的按时序平铺会把正文切碎——续写段与前一段之间隔着 ask/重拟/思考一长串。
+ *
+ * **扮演中（live=true）**——跟读优先：正文段平铺（故事在长），正文之间连续的
+ * 思考/工具段聚成「扮演中」折叠组（第一层），只占一行、轮次间距收紧；最新一组
+ * 默认展开（正在动的过程可跟读），出新正文段后自动收起。
  */
 export function TurnTimeline({
 	segments,
@@ -319,13 +325,78 @@ export function TurnTimeline({
 	skin?: SkinProp | null;
 	live?: boolean;
 }) {
+	const countOf = (segs: TurnSegment[]) => {
+		const thinks = segs.filter((s) => s.kind === "thinking").length;
+		const calls = segs.reduce(
+			(n, s) => (s.kind === "tool" ? n + s.activities.filter((a) => a.kind === "tool_start").length : n),
+			0,
+		);
+		return { thinks, calls };
+	};
+
+	if (!live) {
+		const texts = segments.filter((s) => s.kind === "text");
+		const process = segments.filter((s) => s.kind !== "text");
+		const { thinks, calls } = countOf(process);
+		return (
+			<>
+				{texts.map((seg, i) => (
+					<RichContent key={i} text={(seg as Extract<TurnSegment, { kind: "text" }>).text} skin={skin} />
+				))}
+				{process.length > 0 && (
+					<details className="turn-process">
+						<summary>
+							本轮历程
+							{thinks > 0 && ` · 思考 ${thinks} 段`}
+							{calls > 0 && ` · ${calls} 步`}
+						</summary>
+						<div className="turn-process-body">
+							{segments.map((seg, i) => {
+								if (seg.kind === "thinking") return <ThinkingBlock key={i} text={seg.text} defaultOpen />;
+								if (seg.kind === "tool") return <ToolSegment key={i} activities={seg.activities} />;
+								return null; // 正文已平铺在外，历程里不重复
+							})}
+						</div>
+					</details>
+				)}
+			</>
+		);
+	}
+
+	// 扮演中：正文之间的连续过程段聚组
+	type Group = { kind: "text"; seg: Extract<TurnSegment, { kind: "text" }> } | { kind: "process"; segs: TurnSegment[] };
+	const groups: Group[] = [];
+	for (const seg of segments) {
+		if (seg.kind === "text") groups.push({ kind: "text", seg });
+		else {
+			const last = groups[groups.length - 1];
+			if (last && last.kind === "process") last.segs.push(seg);
+			else groups.push({ kind: "process", segs: [seg] });
+		}
+	}
 	return (
 		<>
-			{segments.map((seg, i) => {
-				const isLast = i === segments.length - 1;
-				if (seg.kind === "thinking") return <ThinkingBlock key={i} text={seg.text} live={live && isLast} />;
-				if (seg.kind === "tool") return <ToolSegment key={i} activities={seg.activities} live={live && isLast} />;
-				return <RichContent key={i} text={seg.text} skin={skin} />;
+			{groups.map((g, gi) => {
+				if (g.kind === "text") return <RichContent key={gi} text={g.seg.text} skin={skin} />;
+				const active = gi === groups.length - 1; // 最新过程组=正在动的，展开跟读
+				const { thinks, calls } = countOf(g.segs);
+				return (
+					<details key={gi} className="turn-process turn-process-live" open={active ? true : undefined}>
+						<summary className={active ? "pulse" : undefined}>
+							{active ? "扮演中" : "过程"}
+							{thinks > 0 && ` · 思考 ${thinks} 段`}
+							{calls > 0 && ` · ${calls} 步`}
+						</summary>
+						<div className="turn-process-body">
+							{g.segs.map((seg, i) => {
+								const isLast = active && i === g.segs.length - 1;
+								if (seg.kind === "thinking") return <ThinkingBlock key={i} text={seg.text} live={isLast} />;
+								if (seg.kind === "tool") return <ToolSegment key={i} activities={seg.activities} live={isLast} />;
+								return null;
+							})}
+						</div>
+					</details>
+				);
 			})}
 		</>
 	);
