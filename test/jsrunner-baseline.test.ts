@@ -103,6 +103,76 @@ test("ledger: toast 通道（setToastHandler / notifyToast）", () => {
 	assert.equal(got.length, 2, "未注册 handler 静默丢弃");
 });
 
+test("ledger: V2-2 move 排序（同区域相对重排，未收录按注册序追加）", () => {
+	ledger.upsert("o1", { title: "A", area: "status" });
+	ledger.upsert("o2", { title: "B", area: "status" });
+	ledger.upsert("o3", { title: "C", area: "status" });
+	// 初始无 order → 注册序
+	assert.deepEqual(ledger.getPanels().map((p) => p.scriptId), ["o1", "o2", "o3"]);
+	// o3 移到同区域首位
+	ledger.move("o3", 0);
+	assert.deepEqual(ledger.getPanels().map((p) => p.scriptId), ["o3", "o1", "o2"]);
+	// o1 移到同区域末位
+	ledger.move("o1", 2);
+	assert.deepEqual(ledger.getPanels().map((p) => p.scriptId), ["o3", "o2", "o1"]);
+	// 跨区域：roster 面板保持独立；status 内部重排不影响其相对位置
+	ledger.upsert("r1", { title: "R", area: "roster" });
+	assert.deepEqual(ledger.getPanels().map((p) => p.scriptId), ["o3", "o2", "o1", "r1"]);
+	// o3 拖到 status 区域队尾（越界按队尾钳制）——跨区域全局交错不影响各区域渲染
+	ledger.move("o3", 3);
+	const areaIds = (area: "status" | "roster") =>
+		ledger.getPanels().filter((p) => (p.entry.spec.area ?? "status") === area).map((p) => p.scriptId);
+	assert.deepEqual(areaIds("status"), ["o2", "o1", "o3"], "status 区域相对顺序正确");
+	assert.deepEqual(areaIds("roster"), ["r1"], "roster 区域不受影响");
+	// 清理
+	for (const id of ["o1", "o2", "o3", "r1"]) ledger.remove(id);
+	ledger.setOrder([]);
+});
+
+test("ledger: V2-2 setOrder/getOrder 持久化回灌（过滤未知/重复，同值不通知）", () => {
+	ledger.upsert("p1", spec);
+	ledger.upsert("p2", spec);
+	ledger.setOrder(["p2", "p1"]);
+	assert.deepEqual(ledger.getPanels().map((p) => p.scriptId), ["p2", "p1"]);
+	// 未知/重复 id 过滤
+	ledger.setOrder(["p2", "ghost", "p2", "p1"]);
+	assert.deepEqual(ledger.getPanels().map((p) => p.scriptId), ["p2", "p1"]);
+	assert.deepEqual([...ledger.getOrder()], ["p2", "p1"]);
+	let n = 0;
+	const off = ledger.subscribe(() => n++);
+	ledger.setOrder(["p2", "p1"]); // 同值不通知
+	assert.equal(n, 0, "同值 setOrder 不通知");
+	off();
+	// 清理
+	ledger.remove("p1");
+	ledger.remove("p2");
+	ledger.setOrder([]);
+});
+
+test("ledger: V2-5 activeTab / getTabIds（position=tab 进 status tab 条）", () => {
+	assert.equal(ledger.getActiveTab(), "standard", "默认标准视图");
+	ledger.upsert("t1", { title: "脚本A", position: "tab", area: "status" });
+	ledger.upsert("t2", { title: "脚本B", position: "tab", area: "status" });
+	ledger.upsert("a1", { title: "普通", area: "status" });
+	assert.deepEqual([...ledger.getTabIds()], ["t1", "t2"]);
+	ledger.setActiveTab("t2");
+	assert.equal(ledger.getActiveTab(), "t2");
+	ledger.setActiveTab("ghost"); // 非法 id 忽略
+	assert.equal(ledger.getActiveTab(), "t2");
+	ledger.setActiveTab("a1"); // 非 tab 面板忽略
+	assert.equal(ledger.getActiveTab(), "t2");
+	ledger.setActiveTab("standard");
+	assert.equal(ledger.getActiveTab(), "standard");
+	// tab 面板被移除 → 激活项回落标准视图
+	ledger.setActiveTab("t1");
+	ledger.remove("t1");
+	assert.equal(ledger.getActiveTab(), "standard", "tab 面板移除后回落标准视图");
+	assert.deepEqual([...ledger.getTabIds()], ["t2"]);
+	// 清理
+	ledger.remove("t2");
+	ledger.remove("a1");
+});
+
 // ---------- plan.ts 增量同步 ----------
 
 const meta = (id: string, patch: Partial<ScriptMeta> = {}): ScriptMeta => ({

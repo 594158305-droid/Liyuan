@@ -358,14 +358,22 @@ function implGetContext(): ContextSnapshot {
 
 // ---------- 账本面板 / 写面 / 通知 / 自由键 / 管理界面（D4 §2.5） ----------
 
-/** P2：注册账本面板（校验 title 非空、area 合法；重复注册 = 覆盖 spec） */
+/** P2：注册账本面板（校验 title 非空、area 合法；重复注册 = 覆盖 spec）。V2-4：area 支持
+ * status/roster/left/top/right（区域扩展），白名单与 types.ts LedgerPanelSpec 枚举对齐。 */
 function implRegisterLedgerPanel(scriptId: string, args: unknown[]): { ok: true } {
 	const raw = args[0];
 	const s = (raw !== null && typeof raw === "object" ? raw : {}) as Partial<LedgerPanelSpec>;
 	if (typeof s.title !== "string" || !s.title.trim()) {
 		throw new Error("registerLedgerPanel 需要 title");
 	}
-	if (s.area && s.area !== "status" && s.area !== "roster") {
+	if (
+		s.area &&
+		s.area !== "status" &&
+		s.area !== "roster" &&
+		s.area !== "left" &&
+		s.area !== "top" &&
+		s.area !== "right"
+	) {
 		throw new Error(`非法 area: ${String(s.area)}`);
 	}
 	ledger.upsert(scriptId, { area: "status", position: "append", ...s, title: s.title.trim() });

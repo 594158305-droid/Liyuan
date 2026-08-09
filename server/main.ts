@@ -2775,6 +2775,9 @@ const httpServer = createServer((req, res) => {
 					"cache-control": "public, max-age=86400",
 					"content-security-policy": "default-src 'none'",
 					"x-content-type-options": "nosniff",
+					// V2-6 sandbox 加固：脚本 iframe opaque origin（sandbox 无 allow-same-origin）下
+					// fetch('/uploads/…') 变跨源——静态资源加 * CORS 放行（对静态上传可接受，D4 V2-6）
+					"access-control-allow-origin": "*",
 				});
 				res.end(readFileSync(file));
 			} else {

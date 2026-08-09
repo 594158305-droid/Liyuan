@@ -48,6 +48,16 @@ const panels = new Map<string, LedgerEntry>();
 const listeners = new Set<() => void>();
 /** 快照缓存：写时重建数组引用，无变更时 getPanels() 返回同一引用（A2） */
 let panelsSnapshot: readonly LedgerPanelSnapshot[] = [];
+/**
+ * 面板顺序（V2-2）：scriptId 顺序数组；getPanels 按此排序，未收录的面板按注册序追加。
+ * 持久化由 UI 侧负责（LedgerScriptViews 读/写 extdata global:panel-order），本模块保持
+ * 零 DOM / 零网络（A5），只提供 setOrder/getOrder/move 状态机。
+ */
+let order: string[] = [];
+/** V2-5：status 区域 tab 条当前激活项（"standard" = 标准视图，其余 = tab 面板 scriptId） */
+let activeTab = "standard";
+/** V2-5：tab 面板 id 缓存（status 区域 position="tab" 的面板，按 order 排序，rebuildSnapshot 重建） */
+let tabIdsCache: readonly string[] = [];
 /** manager 请求订阅者（P4，ModalPanel 单例） */
 const managerSubs = new Set<(scriptId: string) => void>();
 /** toast 处理函数（宿主注入；未注册时 notifyToast 静默） */
@@ -70,9 +80,38 @@ function notifyListeners(): void {
 	}
 }
 
-/** 变更后重建快照缓存（新引用）+ 通知订阅者 */
+/**
+ * 全局有序 id 列表（V2-2）：order 在前，未收录的面板按注册序追加。
+ * move 与持久化回灌都以「当前面板全集」为基准，避免拖拽重排漏掉新注册面板。
+ */
+function orderedIds(): string[] {
+	const ranked = new Set(order);
+	return [...order, ...[...panels.keys()].filter((id) => !ranked.has(id))];
+}
+
+/** 变更后重建快照缓存（新引用）+ 通知订阅者；同时刷新 tab 列表与激活项归一化 */
 function rebuildSnapshot(): void {
-	panelsSnapshot = [...panels].map(([scriptId, entry]) => ({ scriptId, entry }));
+	// V2-2：按 order 排序（rank 相同的保持注册序——Array.sort 稳定）
+	const rank = new Map<string, number>();
+	order.forEach((id, i) => rank.set(id, i));
+	const entries = [...panels];
+	entries.sort((a, b) => {
+		const ra = rank.get(a[0]);
+		const rb = rank.get(b[0]);
+		if (ra === undefined && rb === undefined) return 0;
+		if (ra === undefined) return 1;
+		if (rb === undefined) return -1;
+		return ra - rb;
+	});
+	panelsSnapshot = entries.map(([scriptId, entry]) => ({ scriptId, entry }));
+	// V2-5：tab 面板 = status 区域 position="tab"（按全局顺序）
+	tabIdsCache = panelsSnapshot
+		.filter((p) => p.entry.spec.position === "tab" && (p.entry.spec.area ?? "status") === "status")
+		.map((p) => p.scriptId);
+	// V2-5：激活的 tab 面板被移除/改型后回落到标准视图
+	if (activeTab !== "standard" && !tabIdsCache.includes(activeTab)) {
+		activeTab = "standard";
+	}
 	notifyListeners();
 }
 
@@ -108,6 +147,8 @@ export const ledger = {
 	/** 注销（unregisterLedgerPanel 或 destroy 调用）；不存在时 no-op 不通知 */
 	remove(scriptId: string): void {
 		if (!panels.delete(scriptId)) return;
+		// V2-2：从顺序数组剔除，持久化数据保持干净（activeTab 回落由 rebuildSnapshot 归一化）
+		order = order.filter((id) => id !== scriptId);
 		rebuildSnapshot();
 	},
 
@@ -164,6 +205,94 @@ export const ledger = {
 		if (entry.modalized === next) return;
 		entry.modalized = next;
 		rebuildSnapshot();
+	},
+
+	// ---------- V2-2：面板顺序（拖拽/键盘排序；持久化由 UI 侧读写 extdata） ----------
+
+	/**
+	 * 应用持久化顺序（初始化时 UI 读 extdata global:panel-order 后调用）：
+	 * 过滤未知/重复 id；与当前 order 相同时不通知（防初始化空转）。
+	 */
+	setOrder(ids: readonly string[]): void {
+		if (!Array.isArray(ids)) return;
+		const seen = new Set<string>();
+		const next: string[] = [];
+		for (const id of ids) {
+			if (typeof id !== "string" || seen.has(id) || !panels.has(id)) continue;
+			seen.add(id);
+			next.push(id);
+		}
+		if (next.length === order.length && next.every((id, i) => id === order[i])) return;
+		order = next;
+		rebuildSnapshot();
+	},
+
+	/** 当前面板顺序（UI 在 move 后读它持久化） */
+	getOrder(): readonly string[] {
+		return order;
+	},
+
+	/**
+	 * 移动面板到「同区域面板」第 toAreaIndex 位之前（0 = 该区域最前；超出末尾 = 插到
+	 * 该区域队尾）。全局 order 同步重排，其它区域面板的相对顺序保持不变——UI 拖拽/键盘
+	 * 只需传「本区域容器内算出的目标序号」，无需感知跨区域排序细节。
+	 */
+	move(scriptId: string, toAreaIndex: number): void {
+		const entry = panels.get(scriptId);
+		if (!entry) return;
+		const area = entry.spec.area ?? "status";
+		const ids = orderedIds();
+		if (!ids.includes(scriptId)) return;
+		const rest = ids.filter((id) => id !== scriptId);
+		// 目标位置 = rest 中第 toAreaIndex 个同区域面板之前（越界则队尾）
+		const areaCount = rest.filter((id) => (panels.get(id)?.spec.area ?? "status") === area).length;
+		const to = Math.max(0, Math.min(Math.round(toAreaIndex), areaCount));
+		let target = rest.length;
+		if (to < areaCount) {
+			let seen = 0;
+			for (let i = 0; i < rest.length; i++) {
+				if ((panels.get(rest[i])?.spec.area ?? "status") === area) {
+					if (seen === to) {
+						target = i;
+						break;
+					}
+					seen += 1;
+				}
+			}
+		}
+		rest.splice(target, 0, scriptId);
+		order = rest;
+		rebuildSnapshot();
+	},
+
+	// ---------- V2-5：status 区域 tab 接管（[标准] [脚本A] [脚本B]） ----------
+
+	/** 切换 tab："standard" = 标准视图；scriptId = 该脚本 tab 面板。非法 id 忽略；同值不通知。 */
+	setActiveTab(id: string): void {
+		const next = id === "standard" ? "standard" : id;
+		if (next !== "standard") {
+			const entry = panels.get(next);
+			if (
+				!entry ||
+				entry.spec.position !== "tab" ||
+				(entry.spec.area ?? "status") !== "status"
+			) {
+				return;
+			}
+		}
+		if (activeTab === next) return;
+		activeTab = next;
+		rebuildSnapshot();
+	},
+
+	/** 当前激活 tab（默认 "standard"；tab 面板被移除后自动回落） */
+	getActiveTab(): string {
+		return activeTab;
+	},
+
+	/** status 区域 tab 面板 id 列表（按全局顺序；rebuildSnapshot 缓存，返回稳定引用） */
+	getTabIds(): readonly string[] {
+		return tabIdsCache;
 	},
 
 	/** P4：openManager 请求通道（helper.openManager → requestManager → 宿主 ModalPanel） */

@@ -9509,3 +9509,116 @@ label.drawer-btn {
 		height: 92vh;
 	}
 }
+
+/* ════ 共享文件管理（D4 PART 2 V2-3）════ */
+.shared-files-list {
+	margin-top: 6px;
+	display: flex; flex-direction: column; gap: 2px;
+}
+.shared-file-row {
+	display: flex; align-items: center; gap: 8px;
+	padding: 3px 4px; font-size: 12px;
+}
+.shared-file-name {
+	color: var(--text); font-weight: 500;
+	min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.shared-file-refs {
+	color: var(--text-faint); font-size: 11px; margin-left: auto; white-space: nowrap;
+}
+
+/* ════ 脚本视图区 V2（D4 PART 2：拖拽排序 V2-2 / 区域扩展 V2-4 / tab 接管 V2-5）════ */
+
+/* V2-2 拖拽把手：可聚焦 + 指针拖拽；touch-action:none 让触屏手势交给 pointer capture */
+.ledger-view-grip {
+	flex: none;
+	width: 18px;
+	height: 22px;
+	display: grid;
+	place-items: center;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: var(--text-faint);
+	font-size: 13px;
+	line-height: 1;
+	cursor: grab;
+	touch-action: none;
+	border-radius: 4px;
+}
+.ledger-view-grip:hover,
+.ledger-view-grip:focus-visible {
+	color: var(--accent);
+	background: var(--surface-dim);
+	outline: none;
+}
+.ledger-view-grip:active { cursor: grabbing; }
+
+/* V2-2 拖拽中高亮（.dragging 与 [data-dragging] 双通道） */
+.ledger-view.dragging,
+.ledger-view[data-dragging] {
+	opacity: 0.85;
+	box-shadow: 0 4px 16px rgb(33 30 27 / 18%);
+	outline: 2px dashed var(--accent);
+	outline-offset: 2px;
+}
+
+/* V2-4 区域容器：top 横向单行（顶栏下工具条）；left/right 自然高（侧栏底部） */
+.ledger-views-top {
+	flex-direction: row;
+	align-items: stretch;
+	flex-wrap: nowrap;
+	overflow-x: auto;
+	margin-top: 0;
+	padding: 6px 16px;
+	border-bottom: 1px solid var(--hairline);
+	background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+.ledger-views-top .ledger-view {
+	flex: 0 1 auto;
+	min-width: 220px;
+}
+.ledger-views-left,
+.ledger-views-right {
+	margin-top: 0;
+	padding: 10px 12px 0;
+}
+
+/* V2-5 tab 条（[标准] [脚本A] [脚本B]） */
+.ledger-tabs {
+	display: flex;
+	gap: 4px;
+	flex-wrap: wrap;
+	padding-bottom: 8px;
+	margin-bottom: 8px;
+	border-bottom: 1px solid var(--hairline);
+}
+.ledger-tab {
+	flex: none;
+	font-size: 12px;
+	line-height: 1;
+	padding: 6px 12px;
+	min-height: 26px;               /* ui-design access-target-size：≥24px 触控目标 */
+	border: 1px solid var(--hairline);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--text-soft);
+	cursor: pointer;
+}
+.ledger-tab:hover {
+	color: var(--text-strong);
+	background: var(--surface-dim);
+}
+.ledger-tab.active {
+	color: var(--accent);
+	background: var(--accent-wash);
+	border-color: var(--accent-wash-strong);
+	font-weight: 600;
+}
+.ledger-tab .ledger-view-icon { font-size: 12px; margin-right: 4px; }
+
+/* V2-5 脚本 tab 接管：status-card 内仅保留脚本视图区（隐藏标准字段区与提示） */
+.status-card:has(> .ledger-views.ledger-tab-script) > :not(.ledger-views) {
+	display: none;
+}
+

@@ -23,6 +23,8 @@ export interface ScriptMeta {
 	file?: string;
 	/** 附带数据文件列表（导入时登记；脚本 fetch('/uploads/jsrunner/<id>/assets/<name>') 引用） */
 	assets?: string[];
+	/** 共享区文件引用（V2-3：引用的 /uploads/ 共享文件；所有权全局，删除脚本不级联清理） */
+	sharedAssets?: string[];
 	/** 兼容字段（旧数据迁移后删除；V1 保留 content 可选，读取时 file 优先） */
 	content?: string;
 	/** 可选的说明文字 */
@@ -33,18 +35,24 @@ export interface ScriptMeta {
 
 /**
  * 账本面板注册规格（D4 §2.1，脚本经 registerLedgerPanel 上报，宿主 LedgerScriptViews 渲染）。
- * 所有字段可选（title 除外——helper 侧强制非空）；V1 只支持 status/roster 双区域 + append 位置。
+ * 所有字段可选（title 除外——helper 侧强制非空）；V2 扩展区域（V2-4）与 tab 位置（V2-5）。
  */
 export interface LedgerPanelSpec {
 	/** 面板标题（面板头显示；helper 侧 trim + 非空校验） */
 	title: string;
 	/** 可选：标题栏图标（emoji/文本，宿主渲染） */
 	icon?: string;
-	/** 挂载区域，默认 "status"（R3-①） */
-	area?: "status" | "roster";
-	/** V1 仅 "append"（"tab" 预留 V2） */
-	position?: "append";
-	/** 可选，覆盖默认上限（默认 480px） */
+	/** 挂载区域，默认 "status"（V2-4：扩展 left/top/right 顶栏/侧栏挂载点） */
+	area?: "status" | "roster" | "left" | "top" | "right";
+	/**
+	 * 位置（V2-5）："append" 追加面板（默认）；"tab" 进入 status 区域账本卡片顶部
+	 * tab 条接管视图（[标准] [脚本A] [脚本B]；同一 status 区域至多一个 tab 面板）。
+	 */
+	position?: "append" | "tab";
+	/**
+	 * 可选，覆盖默认高度上限（status/roster 默认 480px；left/top/right 区域默认自然高，
+	 * 指定本值才钳制；tab 面板永不钳制）。
+	 */
 	maxHeight?: number;
 }
 
@@ -54,14 +62,26 @@ export interface LedgerPanelSpec {
  * - log：脚本侧 console 输出透传（宿主转发到前端 console/面板）；
  * - invoke：调用宿主侧方法（M3b 的 RuntimeHost.onInvoke 分发，callId 用于配对回执）；
  * - event：脚本主动广播事件（如 eventEmit）；
- * - resize：bridge ResizeObserver 上报 iframe 内容高度（宿主驱动面板容器高度）。
+ * - resize：bridge ResizeObserver 上报 iframe 内容高度（宿主驱动面板容器高度）；
+ * - storage：脚本 localStorage 代理落盘（V2-6 sandbox 加固——opaque origin 无 storage，
+ *   桥内内存副本 + 异步落宿主；op="get" 时宿主经 invoke-result 通道回执）。
  */
 export type ScriptRequest =
 	| { kind: "ready" }
 	| { kind: "log"; level: "log" | "warn" | "error"; args: unknown[] }
 	| { kind: "invoke"; method: string; args: unknown[]; callId: string }
 	| { kind: "event"; name: string; args: unknown[] }
-	| { kind: "resize"; height: number };
+	| { kind: "resize"; height: number }
+	| {
+			kind: "storage";
+			op: "get" | "set" | "remove" | "clear";
+			/** set/remove/get 的目标键（get 时 "*" = 请求全量脚本可读快照） */
+			key?: string;
+			/** set 的写入值 */
+			value?: string;
+			/** op="get" 时携带：宿主经 invoke-result 回执配对（桥内 getItem 走缓存，通常不用） */
+			callId?: string;
+	  };
 
 /**
  * getContext() 白名单快照（宿主推给 iframe，脚本同步读）。
@@ -108,13 +128,15 @@ export interface ContextSnapshot {
  * - reload：宿主要求脚本整体重载（脚本侧收到后应自复位）；
  * - context：宿主推送 getContext() 白名单快照（脚本同步读的源；也可经 invoke getContext 拉取）。
  * - theme：宿主推送主题 token（--ly-* CSS 变量，bridge 侧写进自身 documentElement）。
+ * - storage-snapshot：宿主推送脚本可读 localStorage 快照（V2-6：桥内内存副本初始化源）。
  */
 export type HostMessage =
 	| { kind: "event"; name: string; args: unknown[] }
 	| { kind: "invoke-result"; callId: string; ok: boolean; value?: unknown; error?: string }
 	| { kind: "reload" }
 	| { kind: "context"; snapshot: ContextSnapshot }
-	| { kind: "theme"; tokens: Record<string, string> };
+	| { kind: "theme"; tokens: Record<string, string> }
+	| { kind: "storage-snapshot"; data: Record<string, string> };
 
 /**
  * 宿主侧 invoke / log / event 分发器（M3b 注册到 runtime）。

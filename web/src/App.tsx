@@ -42,6 +42,7 @@ import { jsrunnerBus } from "./jsrunner/bus.ts";
 import "./jsrunner/context.ts";
 import { bootstrapScripts } from "./jsrunner/helper.ts";
 import { scriptRuntimes } from "./jsrunner/runtime.ts";
+import { LedgerScriptViews } from "./jsrunner/ui/LedgerScriptViews.tsx";
 import { ModalPanel } from "./jsrunner/ui/ModalPanel.tsx";
 import { registerTavernChatBridge } from "./tavernShim.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
@@ -1780,6 +1781,8 @@ export default function App() {
 						</div>
 					);
 				})}
+				{/* V2-4 脚本视图区：左右侧栏底部挂载点（无注册脚本时组件内部渲染 null，零侵入） */}
+				{side === "left" ? <LedgerScriptViews area="left" /> : <LedgerScriptViews area="right" />}
 			</aside>
 		);
 	};
@@ -1940,6 +1943,9 @@ export default function App() {
 					{busy ? <span className="busy">生成中</span> : <span className={`dot dot-${conn}`} title={conn} />}
 				</div>
 			</header>
+
+			{/* V2-4 脚本视图区：顶栏底部工具条挂载点（横向单行自适应；无注册脚本时渲染 null） */}
+			<LedgerScriptViews area="top" />
 
 			{(centerMenu || dropKeep) && (
 				<div className={`tb-drop-root ${centerMenu ? "" : "tb-drop-collapsed"}`} aria-hidden={!centerMenu}>

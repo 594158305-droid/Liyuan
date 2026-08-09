@@ -10,6 +10,8 @@
  * - log        → host.onLog
  * - invoke     → host.onInvoke，结果以 invoke-result postMessage 回该 iframe
  * - event      → host.onEvent
+ * - resize     → ledger.setHeight（面板容器高度）
+ * - storage    → 脚本 localStorage 代理落盘（V2-6 sandbox 加固：桥内内存副本 + 异步落宿主）
  * 宿主推事件：emitToScript(scriptId, name, args)（M3b 从 jsrunnerBus 桥接）。
  *
  * M3b 接线（模块加载时执行，helper.ts → runtime.ts 依赖链触发）：
@@ -224,6 +226,38 @@ export class ScriptRuntimes {
 		);
 	}
 
+	// ---------- V2-6 sandbox 加固：localStorage 代理的宿主侧 ----------
+
+	/**
+	 * 收集「脚本可读」的宿主 localStorage 快照（storage-snapshot 帧载荷）。
+	 * 排除 Liyuan 应用自用键（`liyuan.` 前缀：面板布局/主题/排序等，保持宿主状态私有）；
+	 * 其余键打包给脚本桥——脚本经代理写入的键会落宿主 localStorage，刷新后经快照恢复。
+	 * 快照用完后局部变量即释放（postMessage 深拷贝），不长期驻留宿主内存。
+	 */
+	private collectScriptStorage(): Record<string, string> {
+		if (typeof localStorage === "undefined") return {};
+		const data: Record<string, string> = {};
+		try {
+			for (let i = 0; i < localStorage.length; i++) {
+				const key = localStorage.key(i);
+				if (!key || key.startsWith("liyuan.")) continue;
+				const value = localStorage.getItem(key);
+				if (value !== null) data[key] = value;
+			}
+		} catch (e) {
+			console.warn("[jsrunner] 读取 localStorage 快照失败", e);
+		}
+		return data;
+	}
+
+	/** 向单帧推送脚本可读 localStorage 快照（storage-snapshot 帧；桥覆盖式刷新内存副本） */
+	private postStorageSnapshot(iframe: HTMLIFrameElement): void {
+		iframe.contentWindow?.postMessage(
+			{ kind: "storage-snapshot", data: this.collectScriptStorage() },
+			"*",
+		);
+	}
+
 	// ---------- 内部 ----------
 
 	private ensureContainer(): HTMLDivElement {
@@ -275,9 +309,16 @@ export class ScriptRuntimes {
 		iframe.title = `jsrunner:${meta.id}`;
 		iframe.setAttribute("aria-hidden", "true");
 		iframe.tabIndex = -1;
+		// V2-6 sandbox 加固（D4 V2-6）：allow-scripts 但**不加** allow-same-origin → 帧 origin 变
+		// opaque，脚本无法访问 parent.document；localStorage 随之不可用——由桥内代理（内存副本 +
+		// postMessage 落宿主）承接。桥与宿主通信走 postMessage，不受 sandbox 影响；
+		// fetch('/uploads/…') 因跨源需要 CORS（server /uploads/ 已加 Access-Control-Allow-Origin: *）。
+		iframe.setAttribute("sandbox", "allow-scripts");
 		// 初始 context 同步注入（D4 冒烟修复）：脚本顶层 getContext() 即有值
 		iframe.srcdoc = buildScriptSrcDoc({ ...meta, content }, this.bridgeJs, getContextSnapshot());
 		this.ensureContainer().appendChild(iframe);
+		// 建帧即推送脚本可读 localStorage 快照（桥内内存副本初始化源；ready 时再补推一次保证到位）
+		this.postStorageSnapshot(iframe);
 		this.runtimes.set(meta.id, { iframe, ready: false, meta });
 	}
 
@@ -319,6 +360,9 @@ export class ScriptRuntimes {
 				entry.ready = true;
 				// 面板就绪标记（LedgerScriptViews 依据 ready 决定挂载/占位）
 				ledger.setReady(scriptId, true);
+				// V2-6：ready 时补推 localStorage 快照（建帧时的推送在 iframe 加载完成前发出，
+				// 可能被早到的消息时序覆盖——这里保证桥内内存副本最终到位）
+				this.postStorageSnapshot(entry.iframe);
 				// 新就绪脚本立即补发一次最新快照：否则要等下一帧 hello/message 才拿得到 context
 				const snapshot = getContextSnapshot();
 				if (snapshot) {
@@ -334,6 +378,37 @@ export class ScriptRuntimes {
 			case "resize": {
 				// bridge ResizeObserver 上报 → 面板容器高度（面板未注册时 ledger 静默忽略）
 				ledger.setHeight(scriptId, data.height);
+				return;
+			}
+			case "storage": {
+				// V2-6：脚本 localStorage 代理落盘（桥内内存副本 + 异步落宿主真实 localStorage）。
+				// op="get" 是协议完备面（桥内 getItem 走缓存同步读，通常不发 get）；
+				// key="*" 表示请求全量脚本可读快照，经 invoke-result 通道回执。
+				try {
+					switch (data.op) {
+						case "set":
+							localStorage.setItem(data.key ?? "", data.value ?? "");
+							break;
+						case "remove":
+							localStorage.removeItem(data.key ?? "");
+							break;
+						case "clear":
+							localStorage.clear();
+							break;
+						case "get": {
+							const value = data.key === "*"
+								? this.collectScriptStorage()
+								: localStorage.getItem(data.key ?? "");
+							entry.iframe.contentWindow?.postMessage(
+								{ kind: "invoke-result", callId: data.callId ?? "", ok: true, value },
+								"*",
+							);
+							break;
+						}
+					}
+				} catch (e) {
+					console.warn("[jsrunner] storage 代理落盘失败", scriptId, e);
+				}
 				return;
 			}
 			case "log": {

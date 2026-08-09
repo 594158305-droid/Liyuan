@@ -13,6 +13,7 @@
  *    + eventTypes 常量表 + stopGeneration/deleteLastMessage/setChatMessages/updateChatMetadata 等
  *  - console.log / warn / error 代理（原调用 + 透传宿主 log，不可序列化参数 String 化）
  *  - invoke Promise 通道（宿主 invoke-result 回执配对）
+ *  - localStorage 代理（V2-6 sandbox 加固）：内存副本 + setItem/removeItem/clear 异步落宿主
  *  - 顶层抛错 / Promise 未捕获 → 透传宿主 log（error 监听，不炸桥）
  *  - 脚本本体同步执行完后再上报 ready
  *
@@ -116,6 +117,67 @@ export const BRIDGE_JS = `(function () {
 		console.warn = makeProxy("warn");
 		console.error = makeProxy("error");
 	})();
+
+	// ---------- localStorage 代理（V2-6 sandbox 加固：iframe opaque origin 无 storage） ----------
+	// 沙箱 iframe（sandbox="allow-scripts"，无 allow-same-origin）访问 localStorage 会抛
+	// SecurityError——ST 生态脚本顶层/事件里读 localStorage 是常见模式，必须给兼容面。
+	// 方案：桥内维护内存副本 storageCache——getItem 同步读缓存（不抛错），setItem/removeItem/
+	// clear 同步改缓存 + postMessage 异步落宿主真实 localStorage（op:"set"/"remove"/"clear"）。
+	// 初始快照：宿主建帧时 push {kind:"storage-snapshot"}（脚本可读键，排除 liyuan.* 应用键），
+	// ready 上报时宿主再补推一次保证到位。权衡（见 D4 V2-6 实施结论）：postMessage 异步到达，
+	// 脚本顶层同步 getItem 在首次加载可能读到 null（不抛错）；持久值应在 ready/事件回调里读。
+	const storageCache = new Map();
+	const applyStorageSnapshot = (data) => {
+		if (!data || typeof data !== "object") return;
+		storageCache.clear();
+		Object.keys(data).forEach(function (k) {
+			storageCache.set(k, String(data[k]));
+		});
+	};
+	const storageProxy = {
+		getItem: function (key) {
+			key = String(key);
+			return storageCache.has(key) ? storageCache.get(key) : null;
+		},
+		setItem: function (key, value) {
+			key = String(key);
+			value = String(value);
+			storageCache.set(key, value);
+			post({ kind: "storage", op: "set", key: key, value: value });
+		},
+		removeItem: function (key) {
+			key = String(key);
+			storageCache.delete(key);
+			post({ kind: "storage", op: "remove", key: key });
+		},
+		clear: function () {
+			storageCache.clear();
+			post({ kind: "storage", op: "clear" });
+		},
+		get length() {
+			return storageCache.size;
+		},
+		key: function (i) {
+			if (typeof i === "number" && i >= 0 && i < storageCache.size) {
+				let idx = 0;
+				for (const k of storageCache.keys()) {
+					if (idx++ === i) return k;
+				}
+			}
+			return null;
+		},
+	};
+	// Window.prototype 的 localStorage 是访问器，直接赋值不生效（strict 下抛错）——defineProperty
+	// 在实例上建自有属性遮蔽原型访问器；个别宿主不允许重定义时降级（脚本照旧抛 SecurityError）
+	try {
+		Object.defineProperty(window, "localStorage", {
+			value: storageProxy,
+			writable: true,
+			configurable: true,
+		});
+	} catch (e) {
+		post({ kind: "log", level: "warn", args: ["localStorage 代理注入失败（sandbox 兼容降级）", e] });
+	}
 
 	// ---------- 同步便捷：getContext / getCurrentChatId / substituteParams ----------
 	function getContext() {
@@ -334,6 +396,10 @@ export const BRIDGE_JS = `(function () {
 				break;
 			case "context":
 				ctxSnapshot = data.snapshot || null;
+				break;
+			case "storage-snapshot":
+				// 宿主推送的脚本可读 localStorage 快照（建帧 + ready 时；覆盖式刷新内存副本）
+				applyStorageSnapshot(data.data);
 				break;
 			case "invoke-result": {
 				const entry = pending.get(data.callId);

@@ -6,7 +6,19 @@
 > 本文档按 AGENTS.md plan_doc 约定维护「当前实施范围 / 待办」两节；待办条目仅追踪，
 > 未经用户点名不得实现。
 
-## 当前实施范围（设计已完成）
+## 当前实施范围（V1 完成 + V2 点名实施中）
+
+**V1 已实施并验证**（2026-08-09，git 6b902ff）：P0 拆文件存储 + JsRunnerPanel 挂载 / P1 数据面
+（worldState + 三事件投影）/ P2 渲染面（ledger registry + 双区域挂载 + 收起展开 + 崩溃占位）/
+P3 写面（applyStatePatch + notify）/ P4 扩展面（自由键 + 按钮 + ModalPanel + 数据包）/
+验收物（自动化 12 用例 + baseline-demo 演示脚本）。冒烟修复 4 bug（eventOn 全局、初始快照注入、
+bootstrap 启动加载、ready 竞态补偿）。
+
+**V2 实施中**（2026-08-09 用户点名「开始准备 V2 实现」）：
+- **Lane A（V2-6 sandbox 加固）**：runtime.create 加 sandbox + localStorage 代理（bridge）+ /uploads/ CORS（server）——独立安全项，先并行。
+- **Lane B（V2-1 zip 打包 + V2-3 文件共享）**：JSZip 前端解包（manifest 约定）+ shared 命名空间 + ScriptMeta.sharedAssets + 共享文件管理。
+- **Lane C（V2-2 拖拽排序 + V2-4 区域扩展 + V2-5 tab 接管）**：ledger order/move + area 枚举扩展 + position:"tab" + 顶栏/侧栏挂载点 + tab 条。
+- **Lane D（V2-7 性能实测）**：N 面板实测脚本 + 指标 + 超标方案（依赖前序 lane 完成后的真实环境）。
 
 2026-08-09 用户点名进行设计，产出 `docs/DESIGN-jsrunner-ledger.md`（D2）。设计要点：
 

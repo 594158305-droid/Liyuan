@@ -747,6 +747,22 @@ function reportAll() {
 - 依赖：新依赖 JSZip（或后端 zip（V2 再定）——**V2 决策点**：前端解包 vs 后端解包。
   前端解包简单但浏览器端 JSZip 体积 ~100KB；后端解包需新增依赖 + 端点。倾向前端）。
 
+**实施结论（2026-08-09，V2 落地）**：
+- 解包/打包方式：**前端 JSZip@3.10.1**（web/package.json dependencies），V2 决策点定案「前端解包」；
+  导出同样前端 JSZip 生成 blob 下载。零后端改动。
+- zip 结构约定（可回导）：zip 根目录唯一 `main.js`，或带 `manifest.json` 声明
+  `{ main: "main.js", title?, assets?: ["assets/data.json", …], shared?: ["shared/icons.svg", …] }`；
+  无 manifest 时主脚本 = 根目录唯一 `.js`（0 个 / 多个均报错 toast）；`shared/` 子目录下文件恒归
+  共享区（manifest.shared 声明追加）；其余文件按附带处理。导出 zip 固定附 `manifest.json`，
+  保证「导出 → 再导入」完整还原主脚本名 / 标题 / 附带清单。
+- 物理落盘：沿用 `/api/upload` 通道，服务端 `sanitizeUploadName` 剥目录 → 所有文件拍平到
+  `.liyuan-uploads/` 顶层；上传名用拍平相对路径（`a/b.txt` → `a-b.txt`，主脚本 `jsrunner-<id>.js`），
+  登记引用沿用 V1 `uploadRef` 换算为 `/uploads/<时间戳>-<安全名>`。**设计「保留子目录」未能实现**
+  （服务端上传面不支持子目录，偏差见 V2-3 实施结论）；附带文件的 zip 相对路径拍平后仅体现在
+  引用名可读性上。
+- 与设计偏差：仅 ① 附带文件子目录不物理保留；② 导出用 manifest.json 显式声明（设计未提，为回导
+  一致性补的）。其余（根目录唯一 .js 推断、assets/shared 声明、单文件导出保留）按设计落地。
+
 ## V2-2. 面板顺序拖拽排序【V2】
 
 **目标**：用户拖拽面板头调整显示顺序（R1-② 必做项，V2 TODO ②）。
@@ -763,6 +779,26 @@ function reportAll() {
   靠 React 重排——注意 React 重排会触发挂载副作用？不：挂载副作用按 scriptId 稳定，
   重排仅改变 DOM 顺序，iframe 已在各自 body 内不动）。
 
+**实施结论（V2-2，已落地）**：
+- ledger 增 `order: string[]`（全局 scriptId 顺序）+ `move(scriptId, toAreaIndex)`；
+  `getPanels` 在 rebuildSnapshot 里按 order 排序（rank 相同保持注册序——Array.sort 稳定）。
+- **`move` 语义定为「同区域相对序号」**：把 scriptId 移到同区域面板第 `toAreaIndex` 位之前
+  （越界按队尾钳制），内部换算全局 order（先取全集 `order ∪ 未收录注册序`，剔出被拖面板后
+  在第 N 个同区域面板前插回）。UI 拖拽只需传「本容器内算出的目标序号」，跨区域相对顺序
+  自动保持——这是对 D4 原文「move(scriptId, toIndex)」的明确化（原设计未定义跨区域时
+  toIndex 的坐标系）。
+- 持久化走 UI 侧（LedgerScriptViews，满足「ledger 保持零 DOM/零网络」约束）：
+  scope=`global`、key=`panel-order`（≤128 字符、无点号）；初始化读一次
+  （`hydrateOrder`，模块级标记防多挂载点重复读），每次 move 后 `persistOrder` 写回；
+  读写失败均静默。D4 原文的 `global:panel-order` 记法按「scope=global + key=panel-order」落地。
+- 交互：面板头 grip 把手（⠿）→ pointer events + setPointerCapture + 释放算目标序号；
+  拖拽中根元素 `.ledger-view.dragging` + `data-dragging` 双通道高亮；grip 可聚焦 +
+  Alt+↑/↓（横向 top 区域 Alt+←/→）键盘移动，`aria-grabbed` 语义；grip click/pointerdown
+  均 stopPropagation，不误触收起/展开。
+- tab 面板（V2-5）不显示 grip（draggable=false）：tab 顺序在 tab 条内无拖拽入口，与
+  D4「tab 面板进 tab 条」一致；order 仍为全局数组，tab 面板位置随注册/顺序自然落位。
+- 测试：`move/setOrder/getOrder` 新增用例；「快照稳定性」等既有用例不变全绿。
+
 ## V2-3. 脚本间文件共享【V2】
 
 **目标**：多个脚本共享资源文件（如公共图标库、共同数据文件）（R2-③ 文件共享，V2 TODO ③）。
@@ -775,6 +811,24 @@ function reportAll() {
   「共享文件管理」入口，V2）。
 - 冲突：同名共享文件 = 覆盖（最后一次写入）；登记引用计数（防误删）。
 - 依赖：P0 拆文件存储就绪后扩展。
+
+**实施结论（2026-08-09，V2 落地）**：
+- 共享区结构：**逻辑命名空间 + 全局注册表**，不做物理目录。注册表存
+  `extdata global:shared-assets`（`{ name, ref }[]`；name = 拍平共享名如 `icons.svg` / `ui-theme.css`，
+  ref = `/uploads/<时间戳>-<安全名>` 平面引用）。同名共享文件首次上传登记后，后续导入**只复用 ref
+  不重复上传**（共享 = 同一 ref）；`ScriptMeta.sharedAssets: string[]` 记该脚本引用的共享 refs。
+- 共享区文件路径方案（偏差）：设计期望 `/uploads/jsrunner/shared/<name>` 物理目录；因服务端上传面
+  `sanitizeUploadName` 剥目录 + 无子目录托管（约束不可改 server），实际为**平面引用**
+  `/uploads/<ts>-shared-<name>`（上传名 `shared-<拍平名>`），脚本运行期 fetch 该平面 URL。
+- 共享文件管理：JsRunnerPanel 脚本 tab 底部小 section（注册表非空才渲染）；每行显示拍平名 + 被引用
+  脚本数；删除用 ConfirmButton 二击确认，被引用时 confirmText 提示「被 N 个脚本引用，确认删除？」——
+  删除 = 从全部脚本 sharedAssets 移除该 ref + 注册表移除 + DELETE /api/uploads（文件删除失败仅
+  console.warn，注册表与元数据已更新）。**引用计数为按需扫描脚本列表**（设计「登记引用计数防误删」
+  简化为删除前实时统计），未做常驻计数器。
+- 与设计偏差：① 共享文件不打包进单脚本 zip 导出（所有权全局，导出面只含主脚本 + 附带）；② 设计
+  「导入时可选勾选存入共享区」未实现——共享区由 zip 的 `shared/` 子目录 / manifest.shared 声明触发；
+  ③ 物理路径为平面引用而非目录形态（如上）；④ 权限「共享文件不被单脚本删除级联清理」已落实
+  （removeScript 只清理 file + assets，不碰 sharedAssets）。
 
 ## V2-4. 挂载区域扩展（顶栏/侧栏等）【V2】
 
@@ -789,6 +843,21 @@ function reportAll() {
 - 约束：同一脚本仍只挂一处（upsert 覆盖语义）；区域面板过多时靠面板收起兜底。
 - 依赖：P2 渲染面 + 双 area 就绪后扩展（纯加挂载点 + 枚举）。
 
+**实施结论（V2-4，已落地）**：
+- `LedgerPanelSpec.area` 枚举扩展为 `"status" | "roster" | "left" | "top" | "right"`。
+- 挂载点（App.tsx）：`</header>` 后插 `<LedgerScriptViews area="top" />`（顶栏底部工具条，
+  横向单行条）；`sidePanel` 的 aside 末尾插 `side==="left" ? <LedgerScriptViews area="left"/>
+  : <LedgerScriptViews area="right" />`（左右侧栏底部）。宿主 import 方向与既有
+  components→jsrunner/ui 一致。
+- 面积/高度：容器修饰类 `.ledger-views-top`（flex row + overflow-x auto）与
+  `.ledger-views-left/-right`（自然高）；LedgerView 高度策略改为
+  「status/roster 默认钳 480px，left/top/right 默认自然高（仅 spec.maxHeight 指定才钳制）」
+  ——经新 prop `clampHeight` 实现，D4 原文「maxHeight 默认 0（自然高）」按此落地。
+- 区域容器挂点语义：left/right 挂在 sidePanel aside 内，侧栏收起时随 aside 隐藏（D4 未
+  定义此场景，取「区域内嵌侧栏」的最小侵入方案）。
+- **依赖提示（并行 lane）**：helper.ts 的 registerLedgerPanel 目前仍校验 area 仅
+  status/roster（本任务按约束未改 helper.ts），新区域经脚本注册需并行 lane 放开白名单。
+
 ## V2-5. 面板 tab 接管视图【V2】
 
 **目标**：脚本可完全接管账本标准视图（替换默认字段表单，V2 TODO ⑤；D3 §3.2
@@ -802,6 +871,24 @@ function reportAll() {
   （unmount 一个再 mount 另一个——复用现有 mount/unmount）。
 - 约束：同一 area 至多一个 tab 面板（多个报错）；tab 面板高度不钳制（全卡片高度）。
 - 依赖：P2 渲染面 + ledger 状态扩展（activeTab + tab 列表）。
+
+**实施结论（V2-5，已落地）**：
+- `LedgerPanelSpec.position: "append" | "tab"`；ledger 增 `activeTab`（默认 "standard"）、
+  `setActiveTab`/`getActiveTab`/`getTabIds`（tabIdsCache 随 rebuildSnapshot 重建，稳定引用）。
+  tab 面板 = `(area ?? "status") === "status" && position === "tab"`；激活的 tab 面板被移除/
+  改型时 activeTab 自动回落 "standard"（rebuildSnapshot 归一化）。
+- 渲染（LedgerScriptViews）：status 区域存在 tab 面板 → 容器 `.ledger-views.ledger-status-tabs`
+  内先渲染 `.ledger-tabs` 条（[标准] [脚本A]…，role=tablist + aria-selected + .active），
+  再按 activeTab 渲染：标准 = append 面板（沿用 V1 渲染），脚本 tab = 该脚本单个
+  LedgerView（`clampHeight=false` 不钳制、`draggable=false` 无 grip）。无 tab 面板时走
+  V1 原路径，零侵入。
+- **标准字段区的隐藏**（D4 未给实现方案）：脚本 tab 激活时需把 StatusStrip 的标准字段
+  （时间/地点/角色…）隐藏——因 LedgerScriptViews 是 status-card 子组件、无法直接控制
+  兄弟节点，采用 CSS 方案：容器加 `.ledger-tab-script` 类 +
+  `.status-card:has(> .ledger-views.ledger-tab-script) > :not(.ledger-views) { display:none }`
+  （:has 已有代码库先例 app.css:1224）。这是本项与 D4 的唯一实现偏差（D4 未规定隐藏机制）。
+- 同一 area 至多一个 tab 面板的报错未实现：取「多 tab 面板共存但都进 tab 条」的宽容语义
+  （D4 说报错；为不引入新的脚本面错误通道，V2 先宽容处理，文档标记）。
 
 ## V2-6. iframe sandbox 加固【V2】
 
@@ -818,6 +905,35 @@ function reportAll() {
 - 迁移：V1 不加固（保持现状）；V2 加固时需跑全量基准测试确认无回归，并给出
   localStorage 代理方案。
 - 依赖：独立安全项，与功能无关。
+
+**实施结论**（V2-6 落地记录，2026-08-09）：
+
+- **sandbox**：`runtime.create` 建 iframe 时 `iframe.setAttribute("sandbox", "allow-scripts")`
+  （不加 `allow-same-origin` → 帧 origin 变 opaque，`parent.document` 访问被封；桥与宿主
+  postMessage 通信不受 sandbox 影响）。
+- **localStorage 代理——实际选型：内存副本 + 异步落盘**（采纳 D4 V2-6 决策点③推荐方案）：
+  - 桥内（BRIDGE_JS）`Object.defineProperty(window, "localStorage", …)` 注入兼容面：
+    `getItem` 同步读内存副本（永不抛 SecurityError，未命中返回 null）；
+    `setItem/removeItem/clear` 同步改副本 + postMessage `{kind:"storage", op:…}` 异步落宿主
+    真实 localStorage；另实现 `length` 访问器与 `key(i)` 供迭代。
+  - 宿主侧：新增 `ScriptRequest {kind:"storage"}`（op: get/set/remove/clear）与
+    `HostMessage {kind:"storage-snapshot"}`；`runtime.create` 建帧时与 `ready` 上报时各推一次
+    `storage-snapshot`（脚本可读键快照，排除 `liyuan.` 前缀的应用自用键，保持宿主状态私有）。
+  - **权衡**（注释 + 本结论记录）：postMessage 异步到达，脚本**顶层同步 getItem** 在首次加载
+    时可能读到 null（不抛错）；持久值应在 ready / 事件回调里读取。若未来要求顶层同步命中，
+    需在 frame.ts 的 srcdoc 组装里注入 `window.__INITIAL_STORAGE__`（与 __INITIAL_CTX__ 同法），
+    V1 未做。`op:"get"` 为协议完备面（宿主已处理，含 `key:"*"` 全量快照回执）；桥内 getItem
+    走缓存，通常不发 get。
+  - **CORS**：`server/main.ts` `/uploads/` 静态托管分支加
+    `Access-Control-Allow-Origin: *`（opaque origin 下 fetch('/uploads/…') 变跨源，静态资源
+    可接受；仅此分支，不动其它托管）。
+  - **兼容性验证**：`npm --prefix web run typecheck` 通过（涉及文件无错）；
+    `node --test test/jsrunner-baseline.test.ts` 12/12 通过；bridge 字符串约束
+    （无反引号 / 无 `${` / 无字面 `</script`）保持。V1 冒烟链路不受影响：脚本运行（postMessage
+    不依赖 sandbox）、`fetch('/uploads/…')`（CORS 放行）、面板注册（ledger 通道不变）；
+    baseline-demo 用 toastr 不直接读 localStorage，代理不干扰其运行。
+  - **已知边界**：`sessionStorage` 未代理（ST 生态少用；脚本访问仍抛 SecurityError）；
+    `allow-modals/popups` 未开（alert/open 被 sandbox 拦截，符合宿主全控边界）。
 
 ## V2-7. 面板上限与性能实测【V2】
 
