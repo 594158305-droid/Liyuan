@@ -241,7 +241,7 @@ P1/P2 可部分并行（外壳与数据提取独立）；P3 依赖 P2（内存�
 
 | 功能 | 现状 | 说明 |
 |---|---|---|
-| 采访/立绘/天赋树/地图/特卖/大调查/日历/NSFW 指导（generateRaw 13 点） | 占位/禁用 | 依赖独立项 ext_generate（D3 §5.10，~40 行服务端 handler）；该独立项落地后脚本改回真实调用即可（适配桥已留 `generateRaw` 通道） |
+| 采访/立绘/天赋树/地图/特卖/大调查/日历/NSFW 指导（generateRaw 13 点） | ✅ **已解锁**（2026-08-09） | ext_generate 服务端 handler 已实施（server/main.ts，约 40 行，用户批准）；脚本内降级桩已移除，走真实通道。冒烟：`[extgen-smoke] RESULT` 真实返回模型文本 |
 | 场景切换（改 API 预设） | 删除 | Liyuan 模型配置是全局的，无 ST API 面板对等 |
 | 移动端 overlay 修复 | 删除 | 无对等 DOM |
 | CHAT_CHANGED 事件 | 适配层包装 | 宿主不补投影（避免新增服务端/前端事件面），脚本侧 currentChatId 比对 |

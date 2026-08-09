@@ -839,6 +839,9 @@ interface PendingChoice {
 const pendingChoices = new Map<string, PendingChoice>();
 let choiceSeq = 0;
 
+/** JS Runner 程序化生成（ext_generate）进行中流：reqId → AbortController（ext_abort 用） */
+const extGenerateControllers = new Map<string, AbortController>();
+
 /** 未决卡帧（hello 补发 / 首次广播共用） */
 const choiceFrame = (id: string, p: PendingChoice): ServerFrame => ({
 	type: "choice",
@@ -3819,6 +3822,72 @@ wss.on("connection", (ws, req) => {
 								} satisfies ServerFrame),
 							);
 						}
+						break;
+					}
+					// ---- JS Runner 程序化生成（ext_generate / ext_abort，D3 §5.10）----
+					// 旁路 streamSimple（与 registerPlannerCaller 样板同款），不写会话树、不碰剧情链路；
+					// 流式逐 delta 广播 ext_gen{start/delta/end|error}，前端 helper.ts 按 reqId 配对。
+					case "ext_generate": {
+						const reqId = frame.reqId;
+						const params = frame.params;
+						// 模型：params.model 可覆盖（modelRegistry 查找），缺省跟随剧情模型
+						const model = (() => {
+							if (params.model?.provider && params.model?.id) {
+								const m = session.modelRegistry.find(params.model.provider, params.model.id);
+								if (m) return m as never;
+							}
+							return session.model as never;
+						})();
+						if (!model) {
+							broadcast({ type: "ext_gen", reqId, kind: "error", error: "尚无可用模型（未配置剧情模型）" });
+							break;
+						}
+						const auth = await session.modelRegistry.getApiKeyAndHeaders(model);
+						if (!auth.ok) {
+							broadcast({ type: "ext_gen", reqId, kind: "error", error: auth.error ?? `无法解析 ${String((model as { provider?: string }).provider)} 的 API key` });
+							break;
+						}
+						const controller = new AbortController();
+						extGenerateControllers.set(reqId, controller);
+						broadcast({ type: "ext_gen", reqId, kind: "start" });
+						try {
+							const s = streamSimple(
+								model,
+								{
+									systemPrompt: params.systemPrompt,
+									messages: params.messages.map((m) => ({
+										role: m.role,
+										content: [{ type: "text", text: m.content }],
+										timestamp: Date.now(),
+									})),
+								},
+								{
+									apiKey: auth.apiKey,
+									headers: auth.headers,
+									temperature: params.temperature,
+									maxTokens: params.maxTokens ?? 4096,
+									reasoning: params.reasoning,
+									signal: controller.signal,
+								},
+							);
+							for await (const e of s) {
+								if (e.type === "text_delta") {
+									broadcast({ type: "ext_gen", reqId, kind: "delta", delta: e.delta });
+								} else if (e.type === "done") {
+									broadcast({ type: "ext_gen", reqId, kind: "end" });
+								} else if (e.type === "error") {
+									broadcast({ type: "ext_gen", reqId, kind: "error", error: e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}` });
+								}
+							}
+						} finally {
+							extGenerateControllers.delete(reqId);
+						}
+						break;
+					}
+					case "ext_abort": {
+						// 中止对应生成流（AbortController）；stream 侧 emit error(aborted) → 广播 error 收尾
+						const ctrl = extGenerateControllers.get(frame.reqId);
+						if (ctrl) ctrl.abort();
 						break;
 					}
 				}

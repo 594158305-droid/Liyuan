@@ -135,13 +135,12 @@ window.AutoCardUpdaterAPI = {
 	switchTemplatePreset: () => ({ ok: true }),
 };
 
-// 4c. ST 世界书 API 桩 + LLM 生成降级（脚本内本地覆盖，**不改 Liyuan 宿主代码**）：
-//     - 世界书 7 方法（bundle play-wb 模块调用，宿主无这些方法 → 空值桩）
-//     - generateRaw/generate（采访/立绘/天赋树等 13 调用点 → 立即 reject 降级占位，
-//       依赖独立项 ext_generate；reject 由 bundle 内部 try/catch 消化，不炸宿主）
-//     用本地 Proxy 包装：已知方法返回桩，其余方法回退原 TavernHelper（invoke 面）。
+// 4c. ST 世界书 API 桩（脚本内本地覆盖，**不改 Liyuan 宿主代码**）：
+//     bundle play-wb 模块调用 TavernHelper.getCharWorldbookNames 等 7 个 ST 世界书方法，
+//     宿主 helper.ts 无这些方法（按「无对等 → 桩」原则在脚本侧补桩，宿主零改动）。
+//     generateRaw/generate 不再降级：ext_generate 服务端通道已实现（2026-08-09 批准），
+//     走真实通道（回退原 TavernHelper invoke 面）。
 const __lyOrigTavernHelper = window.TavernHelper;
-const __lyStubError = "LLM 生成通道未启用（依赖独立项 ext_generate，当前降级占位）";
 const __lyWorldbookStubs = {
 	getCharWorldbookNames: () => [],
 	getWorldbookNames: () => [],
@@ -150,8 +149,6 @@ const __lyWorldbookStubs = {
 	getOrCreateChatWorldbook: () => null,
 	deleteWorldbook: () => undefined,
 	rebindGlobalWorldbooks: () => undefined,
-	generateRaw: () => Promise.reject(new Error(__lyStubError)),
-	generate: () => Promise.reject(new Error(__lyStubError)),
 };
 window.TavernHelper = new Proxy({}, {
 	get(_t, method) {
