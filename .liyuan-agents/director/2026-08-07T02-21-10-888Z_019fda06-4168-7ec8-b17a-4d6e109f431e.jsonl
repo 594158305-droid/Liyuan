@@ -31,3 +31,5 @@
 {"type":"custom","customType":"rp-card","data":{"card":"assets/cards/StarMini.png","name":"StarMini","storyId":"019fe706-e9e1-7022-bf0e-cfca5cb512d0"},"id":"ece8775e","parentId":"c79c218c","timestamp":"2026-08-09T15:01:09.691Z"}
 {"type":"custom","customType":"rp-card","data":{"card":"assets/cards/StarMini.png","name":"StarMini","storyId":"019fe71d-8ea4-72fc-98d3-035c96576949"},"id":"588d28c1","parentId":"ece8775e","timestamp":"2026-08-09T15:22:16.063Z"}
 {"type":"custom","customType":"rp-card","data":{"card":"assets/cards/StarMini.png","name":"StarMini","storyId":"019fe720-1c2c-7770-858d-4eddeaf5c6e9"},"id":"15f0f55b","parentId":"588d28c1","timestamp":"2026-08-09T16:18:22.748Z"}
+{"type":"custom","customType":"rp-card","data":{"card":"assets/cards/StarMini.png","name":"StarMini","storyId":"019fe7a9-637e-74a7-a8af-006be66c0566"},"id":"3ef35451","parentId":"15f0f55b","timestamp":"2026-08-09T18:00:40.843Z"}
+{"type":"custom","customType":"rp-card","data":{"card":"assets/cards/StarMini.png","name":"StarMini","storyId":"019fe720-1c2c-7770-858d-4eddeaf5c6e9"},"id":"5f4f5129","parentId":"3ef35451","timestamp":"2026-08-09T18:22:24.995Z"}
