@@ -1385,12 +1385,19 @@ test("ask：注入 askUser 时 ask 上清单", async () => {
 	}
 });
 
-test("ask：作答回喂模型，计划据此重拟（P7 决策闭环）", async () => {
+test("ask：作答回喂模型，计划据此重拟（P7 决策闭环 + 8/09 时机门禁：首拦一次、坚持再调放行）", async () => {
 	const { cwd, sm } = makeStage();
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
 	try {
 		const asked: Array<{ q: string; opts: string[] }> = [];
 		const responses: unknown[] = [];
+		// 第 1 轮 ask（无稿）：时机门禁暂缓——引擎分不清主动触发/变量触发，先拦一次
+		responses.push(
+			fauxAssistantMessage([fauxToolCall("ask", { question: "你打算怎么处置这件事？", options: ["报官", "私了", "先按兵不动"] })], {
+				stopReason: "toolUse",
+			}),
+		);
+		// 模型坚持再调（判断用户就是在求方向 = 主动触发）→ 放行弹卡
 		responses.push(
 			fauxAssistantMessage([fauxToolCall("ask", { question: "你打算怎么处置这件事？", options: ["报官", "私了", "先按兵不动"] })], {
 				stopReason: "toolUse",

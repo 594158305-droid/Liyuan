@@ -286,6 +286,10 @@ function roundCardFor(
 			`读题（谁在场、上文到哪、用户要什么）、探索（拿不准就查设定/记忆/账本）、` +
 			`列路标（\`beat_plan\`）${range}。\`beat_plan\` 被接受前，不要落任何正文。` +
 			`预设的文风与行为边界从落笔起生效，这一轮不用逐条读。\n` +
+			`用户输入本身在求方向/递笔的（「接下来去找谁」「给个选项」）——直接 \`ask\`，那不需要上文。` +
+			`读题发现的**未定型重大变量**（如新人物还没定的性格/立场）——不要脑补定型：记着它，` +
+			`演到它实际影响剧情的段落之前再 \`ask\` 请用户定（那时用户手里有上文才好选；哪些变量值得问是动态的，` +
+			`看它此刻对剧情的影响程度，不是新的就要问）。\n` +
 			`**路标只写到「发生什么」的抽象层**（如「被值守弟子拦下」「褪衣取砚」）——` +
 			`具体怎么演（动作的先后、神态的变化、对白的语气、情绪的流转）留给演到那一段时再想，` +
 			`不要在这一轮预演各段的细节。\n` +
@@ -976,6 +980,7 @@ export class StageEngine {
 		let nudged = false; // 逼稿/报告喂回各只给一轮机会，防空转
 		let tailPass = false; // 收尾放行（模型停手且有稿时，给一轮机会写格式栈尾巴）
 		let sealNudged = false; // 封笔催告（M-E：分段续写完但忘了 draft_seal），只给一轮
+		let askEarlyNudged = false; // ask 时机门禁：首轮无上文时暂缓一次，坚持再调放行（求选项例外）
 		let userStopped = false; // P7：用户在 ask 选择卡上点了停止——本拍收束
 		let lastConsumed = 0; // 本轮开始时 text 长度——判定「本轮新产出文本」用
 		// 稿首次落地时的 text 长度：之前的 text 是读题/计划旁白（工具轮的 text 通道产出），
@@ -1119,6 +1124,36 @@ export class StageEngine {
 					// 用户停止（undefined）→ 本拍收束：不再续轮，直接以现稿定稿。
 					let r: ToolRunResult | MediaStageResult;
 					if (name === "ask" && this.#deps.askUser) {
+						// ask 时机门禁（8/09 三分类）：①主动触发（用户在求方向/递笔）随时可问，含第 1 轮；
+						// ②变量触发需要正文上文——没落笔时暂缓一次，导向「记着变量，演到跟前再问」。
+						// 引擎分不清 ①②（意图在用户输入里），故软硬结合：首拦一次；模型坚持再调
+						// ＝它判断属于①类（拒收文案已给出该例外），放行。
+						if (o.ws.appends === 0 && !o.ws.draft.trim() && !askEarlyNudged) {
+							askEarlyNudged = true;
+							r = {
+								text:
+									`还没落笔，暂缓一步：**变量类**的拍板要等用户看到段落上文才好选——记着这个变量，` +
+									`演到它实际影响剧情的段落之前再 ask。` +
+									`但如果用户本轮输入本身就是在求方向/递笔（「接下来去找谁」「给个选项」「让我选」），` +
+									`那属于主动触发、不需要上文——再调一次 ask 即可，会照常弹给用户。`,
+								activity: "ask 被暂缓（变量类需演出上文）",
+								ok: false,
+							};
+							ev.onActivity?.(r.activity);
+							recordSegment(o.ws, {
+								kind: "tool",
+								activity: { kind: "tool_start", name: "ask", detail: r.activity },
+							});
+							convo.push({
+								role: "toolResult",
+								toolCallId: call.id,
+								toolName: "ask",
+								content: [{ type: "text", text: r.text }],
+								isError: false,
+								timestamp: Date.now(),
+							});
+							continue;
+						}
 						const q = String(call.arguments?.question ?? "").trim() || "请你定夺";
 						const raw = call.arguments?.options;
 						const options = Array.isArray(raw)
