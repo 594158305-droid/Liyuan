@@ -21,7 +21,7 @@ import { addVar, buildSnapshot, getVar, saveExtensionSettings as persistExtensio
 import { pushLog, stringifyLogArgs } from "./log.ts";
 import { injectUserInput, parseOrderedPrompts } from "./prompts.ts";
 import { ledger, notifyToast } from "./ledger.ts";
-import type { ContextSnapshot, LedgerPanelSpec, RuntimeHost, ScriptMeta } from "./types.ts";
+import type { ContextSnapshot, LedgerPanelSpec, RuntimeHost, ScriptMeta, StatusCardSlot } from "./types.ts";
 import type { ClientFrame, ExtGenerateParams } from "../wire.ts";
 
 // ---------- 脚本元信息读取（getScriptName / getScriptInfo）：查 runtime 自身 ----------
@@ -510,6 +510,21 @@ export const tavernHelperImpl: Record<string, TavernHelperMethod> = {
 	// P4：独立管理界面（模态）
 	openManager(scriptId) {
 		return implOpenManager(scriptId);
+	},
+	// C 路径 L1：状态栏默认编辑区显隐（只有显式 false 才隐藏；恢复显示传 true 或缺省）
+	setStatusCardEditorVisible(scriptId, args) {
+		const visible = args[0] !== false;
+		ledger.setEditorVisible(scriptId, visible);
+		return { ok: true };
+	},
+	// C 路径 L2：状态栏内容槽（宿主原生渲染；过滤非对象/无 type 元素，校验由 ledger 兜底）
+	setStatusCardSlots(scriptId, args) {
+		const raw = args[0];
+		const slots = Array.isArray(raw)
+			? raw.filter((s) => s && typeof s === "object" && typeof (s as { type?: unknown }).type === "string")
+			: [];
+		ledger.setSlots(scriptId, slots as StatusCardSlot[]);
+		return { ok: true };
 	},
 	// G1：聊天元数据落盘（脚本在快照副本上改，传 partial 显式合并 + 落盘）
 	updateChatMetadata(scriptId, args) {

@@ -4,12 +4,15 @@
  * - SessionStatsBar：输入框下方，消息数 / token / 上下文占用（不计费）
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { apiPut, type StatePatchResult } from "../api.ts";
 import type { WireStats, WorldState } from "../wire.ts";
 import { IconChevronDown, IconPencil, IconTrash } from "./icons.tsx";
 import { ConfirmButton, useAction } from "./kit.tsx";
 import { LedgerScriptViews } from "../jsrunner/ui/LedgerScriptViews.tsx";
+import { ledger } from "../jsrunner/ledger.ts";
+import { scriptRuntimes } from "../jsrunner/runtime.ts";
+import type { StatusCardSlot } from "../jsrunner/types.ts";
 
 /** 行内编辑：点击铅笔→输入框（回车保存 / Esc 取消） */
 export function Editable({
@@ -123,6 +126,64 @@ export function SessionStatsBar({ stats }: { stats: WireStats | null }) {
 	);
 }
 
+/**
+ * C 路径 L2：单面板推送的内容槽（宿主原生渲染，非 iframe 内嵌）。
+ * fields→只读 kv 行（复用 .kv/.kv-k/.kv-v，不 Editable）；badges→徽章行；
+ * buttons→动作按钮行（点击 emitToScript STATUS_CARD_ACTION，args `{ key }`）。
+ */
+function StatusCardSlots({ scriptId, slots }: { scriptId: string; slots: StatusCardSlot[] }) {
+	if (slots.length === 0) return null;
+	return (
+		<>
+			{slots.map((slot, i) => {
+				if (slot.type === "fields") {
+					if (slot.items.length === 0) return null;
+					return (
+						<div key={i} className="status-card-slot-fields">
+							{slot.items.map((it, j) => (
+								<div key={j} className="kv">
+									<span className="kv-k">{it.label}</span>
+									<span className="kv-v">{it.value}</span>
+								</div>
+							))}
+						</div>
+					);
+				}
+				if (slot.type === "badges") {
+					if (slot.items.length === 0) return null;
+					return (
+						<div key={i} className="status-card-badges">
+							{slot.items.map((b, j) => (
+								<span key={j} className="badge">
+									{b.icon ? <span className="badge-icon">{b.icon}</span> : null}
+									{b.label}
+								</span>
+							))}
+						</div>
+					);
+				}
+				// buttons 槽
+				if (slot.items.length === 0) return null;
+				return (
+					<div key={i} className="status-card-actions">
+						{slot.items.map((btn, j) => (
+							<button
+								key={j}
+								type="button"
+								className="status-card-action"
+								onClick={() => scriptRuntimes.emitToScript(scriptId, "STATUS_CARD_ACTION", [{ key: btn.key }])}
+							>
+								{btn.icon ? <span className="badge-icon">{btn.icon}</span> : null}
+								{btn.label}
+							</button>
+						))}
+					</div>
+				);
+			})}
+		</>
+	);
+}
+
 /** 输入框上方：生效的世界状态（一行摘要，展开可编辑） */
 export function StatusStrip({
 	state,
@@ -133,6 +194,11 @@ export function StatusStrip({
 }) {
 	const [open, setOpen] = useState(false);
 	const { run } = useAction(toast);
+
+	// C 路径 L1/L2：订阅 ledger 快照（A2 稳定引用），读 status 区域面板的编辑区显隐与内容槽
+	const panels = useSyncExternalStore(ledger.subscribe, ledger.getPanels);
+	const statusPanels = panels.filter((p) => (p.entry.spec.area ?? "status") === "status");
+	const hideEditor = statusPanels.some((p) => p.entry.editorVisible === false);
 
 	const patch = (p: Record<string, unknown>) =>
 		run(async () => {
@@ -158,90 +224,101 @@ export function StatusStrip({
 			</button>
 			{open && (
 				<div className="status-card">
-					<div className="kv">
-						<span className="kv-k">时间</span>
-						<span className="kv-v">
-							<Editable value={state?.time ?? ""} onSave={(v) => patch({ time: v })} />
-						</span>
-					</div>
-					<div className="kv">
-						<span className="kv-k">地点</span>
-						<span className="kv-v">
-							<Editable value={state?.location ?? ""} onSave={(v) => patch({ location: v })} />
-						</span>
-					</div>
-					{Object.entries(state?.characters ?? {}).map(([name, c]) => (
-						<div key={name} className="sp-char">
-							<div className="sp-char-head">
-								<span className="sp-char-name">{name}</span>
-								<span className="sp-affinity">
-									好感{" "}
+					{hideEditor ? (
+						// C 路径 L2：脚本隐藏宿主默认编辑区 → 渲染各面板推送的原生内容槽（按面板顺序）
+						<div className="status-card-slots">
+							{statusPanels.map((p) => (
+								<StatusCardSlots key={p.scriptId} scriptId={p.scriptId} slots={p.entry.slots} />
+							))}
+						</div>
+					) : (
+						<>
+							<div className="kv">
+								<span className="kv-k">时间</span>
+								<span className="kv-v">
+									<Editable value={state?.time ?? ""} onSave={(v) => patch({ time: v })} />
+								</span>
+							</div>
+							<div className="kv">
+								<span className="kv-k">地点</span>
+								<span className="kv-v">
+									<Editable value={state?.location ?? ""} onSave={(v) => patch({ location: v })} />
+								</span>
+							</div>
+							{Object.entries(state?.characters ?? {}).map(([name, c]) => (
+								<div key={name} className="sp-char">
+									<div className="sp-char-head">
+										<span className="sp-char-name">{name}</span>
+										<span className="sp-affinity">
+											好感{" "}
+											<Editable
+												value={String(c.affinity)}
+												onSave={(v) => patch({ characters: { [name]: { affinity: num(v, c.affinity) } } })}
+											/>
+										</span>
+										<ConfirmButton
+											title={`移除「${name}」的状态记录`}
+											aria-label="移除角色记录"
+											confirmText="确认移除"
+											onConfirm={() => patch({ characters: { [name]: null } })}
+										>
+											<IconTrash size={12} />
+										</ConfirmButton>
+									</div>
+									<div className="affinity-bar" aria-hidden="true">
+										<div className="affinity-mid" />
+										<div
+											className={`affinity-fill ${c.affinity < 0 ? "neg" : ""}`}
+											style={
+												c.affinity >= 0
+													? { left: "50%", width: `${(c.affinity / 100) * 50}%` }
+													: { right: "50%", width: `${(-c.affinity / 100) * 50}%` }
+											}
+										/>
+									</div>
+									<div className="sp-char-line">
+										<Editable value={c.status} placeholder="（状态）" onSave={(v) => patch({ characters: { [name]: { status: v } } })} />
+									</div>
+									<div className="sp-char-line sp-notes">
+										<Editable value={c.notes} placeholder="（备注）" onSave={(v) => patch({ characters: { [name]: { notes: v } } })} />
+									</div>
+								</div>
+							))}
+							<div className="kv">
+								<span className="kv-k">物品</span>
+								<span className="kv-v">
 									<Editable
-										value={String(c.affinity)}
-										onSave={(v) => patch({ characters: { [name]: { affinity: num(v, c.affinity) } } })}
+										value={(state?.inventory ?? []).join("、")}
+										placeholder="（空）"
+										onSave={(v) => patch({ inventory: v.split(/[、,，]/).map((s) => s.trim()).filter(Boolean) })}
 									/>
 								</span>
-								<ConfirmButton
-									title={`移除「${name}」的状态记录`}
-									aria-label="移除角色记录"
-									confirmText="确认移除"
-									onConfirm={() => patch({ characters: { [name]: null } })}
-								>
-									<IconTrash size={12} />
-								</ConfirmButton>
 							</div>
-							<div className="affinity-bar" aria-hidden="true">
-								<div className="affinity-mid" />
-								<div
-									className={`affinity-fill ${c.affinity < 0 ? "neg" : ""}`}
-									style={
-										c.affinity >= 0
-											? { left: "50%", width: `${(c.affinity / 100) * 50}%` }
-											: { right: "50%", width: `${(-c.affinity / 100) * 50}%` }
-									}
+							{Object.entries(state?.flags ?? {}).map(([k, v]) => (
+								<div key={k} className="kv">
+									<span className="kv-k">{k}</span>
+									<span className="kv-v">
+										<Editable value={v} onSave={(nv) => patch({ flags: { [k]: nv } })} />
+										<ConfirmButton title={`删除标记「${k}」`} aria-label="删除标记" confirmText="确认" onConfirm={() => patch({ flags: { [k]: null } })}>
+											<IconTrash size={12} />
+										</ConfirmButton>
+									</span>
+								</div>
+							))}
+							<div className="sp-threads">
+								<div className="kv-k">剧情线</div>
+								<Editable
+									multiline
+									value={(state?.plot_threads ?? []).join("\n")}
+									placeholder="（每行一条）"
+									onSave={(v) => patch({ plot_threads: v.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) })}
 								/>
 							</div>
-							<div className="sp-char-line">
-								<Editable value={c.status} placeholder="（状态）" onSave={(v) => patch({ characters: { [name]: { status: v } } })} />
-							</div>
-							<div className="sp-char-line sp-notes">
-								<Editable value={c.notes} placeholder="（备注）" onSave={(v) => patch({ characters: { [name]: { notes: v } } })} />
-							</div>
-						</div>
-					))}
-					<div className="kv">
-						<span className="kv-k">物品</span>
-						<span className="kv-v">
-							<Editable
-								value={(state?.inventory ?? []).join("、")}
-								placeholder="（空）"
-								onSave={(v) => patch({ inventory: v.split(/[、,，]/).map((s) => s.trim()).filter(Boolean) })}
-							/>
-						</span>
-					</div>
-					{Object.entries(state?.flags ?? {}).map(([k, v]) => (
-						<div key={k} className="kv">
-							<span className="kv-k">{k}</span>
-							<span className="kv-v">
-								<Editable value={v} onSave={(nv) => patch({ flags: { [k]: nv } })} />
-								<ConfirmButton title={`删除标记「${k}」`} aria-label="删除标记" confirmText="确认" onConfirm={() => patch({ flags: { [k]: null } })}>
-									<IconTrash size={12} />
-								</ConfirmButton>
-							</span>
-						</div>
-					))}
-					<div className="sp-threads">
-						<div className="kv-k">剧情线</div>
-						<Editable
-							multiline
-							value={(state?.plot_threads ?? []).join("\n")}
-							placeholder="（每行一条）"
-							onSave={(v) => patch({ plot_threads: v.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) })}
-						/>
-					</div>
-					{/* 脚本视图区（D4 §2.10）：status 区域；无注册脚本时组件内部渲染 null，零侵入 */}
+						</>
+					)}
+					{/* 脚本视图区（D4 §2.10）：status 区域 iframe 面板，无论编辑区显隐始终保留 */}
 					<LedgerScriptViews area="status" />
-					<div className="field-hint">点铅笔可直接改；你的账本你说了算，改动随剧情分支走（回退会跟着回退）。登场名录已独立成面板（输入框工具区「名录」）。</div>
+					{!hideEditor && <div className="field-hint">点铅笔可直接改；你的账本你说了算，改动随剧情分支走（回退会跟着回退）。登场名录已独立成面板（输入框工具区「名录」）。</div>}
 				</div>
 			)}
 		</div>

@@ -9622,3 +9622,52 @@ label.drawer-btn {
 	display: none;
 }
 
+/* ════ 状态栏内容槽（C 路径 L2：宿主原生渲染脚本推送内容，非 iframe 内嵌）════ */
+.status-card-slots {
+	margin-top: 10px;               /* 与上方内容分隔（编辑区隐藏时作为卡片首块） */
+}
+.status-card-badges {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin-top: 6px;
+}
+.status-card-badges .badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 8px;
+	font-size: 11px;
+	border: 1px solid var(--hairline-strong);
+	border-radius: 999px;           /* 小圆角徽章 */
+	background: var(--surface-2, var(--surface));
+	color: var(--text-soft);
+}
+.status-card-badges .badge-icon {
+	font-size: 12px;
+}
+.status-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 6px;
+}
+.status-card-actions .status-card-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 12px;
+	min-height: 26px;               /* ui-design access-target-size：≥24px 触控目标 */
+	padding: 3px 10px;
+	border: 1px solid var(--hairline);
+	border-radius: 6px;
+	background: transparent;
+	color: var(--accent);
+	cursor: pointer;
+}
+.status-card-actions .status-card-action:hover {
+	background: var(--accent-wash);
+	border-color: var(--accent-wash-strong);
+}
+

@@ -441,4 +441,44 @@ eventOn("MESSAGE_RECEIVED", () => {
 	}
 });
 
+// ---------- 6. 状态栏原生定制（C 路径 L1+L2，用户批准 2026-08-09） ----------
+// L1：隐藏宿主编辑区（时间/地点/角色/物品/剧情线）——红框部分由脚本控制显隐。
+// L2：宿主用 React 原生渲染脚本推送的结构化内容槽（跨边界只传数据，不传 HTML）。
+// 数据流：getContext().worldState（账本投影）→ fields 槽 → 宿主 StatusStrip 原生渲染；
+// 账本变化（WORLD_STATE_CHANGED 投影）→ 刷新槽。
+function __lyPushStatusSlots() {
+	try {
+		const ws = (getContext() && getContext().worldState) || {};
+		const fields = [];
+		if (ws.time) fields.push({ label: "时间", value: String(ws.time) });
+		if (ws.location) fields.push({ label: "地点", value: String(ws.location) });
+		const chars = ws.characters && typeof ws.characters === "object" ? ws.characters : {};
+		for (const name of Object.keys(chars)) {
+			const c = chars[name] || {};
+			const parts = [];
+			if (c.status) parts.push(String(c.status));
+			if (typeof c.affinity === "number") parts.push("好感 " + c.affinity);
+			fields.push({ label: name, value: parts.join("；") || "—" });
+		}
+		if (Array.isArray(ws.inventory) && ws.inventory.length) {
+			fields.push({ label: "物品", value: ws.inventory.join("、") });
+		}
+		if (Array.isArray(ws.plot_threads) && ws.plot_threads.length) {
+			fields.push({ label: "剧情线", value: ws.plot_threads.join(" / ") });
+		}
+		const slots = [];
+		if (fields.length) slots.push({ type: "fields", items: fields });
+		TavernHelper.setStatusCardSlots(slots).catch(function () {});
+	} catch (e) {
+		console.warn("[liyuan-瑟瑟状态栏] 推送状态栏内容槽失败", e);
+	}
+}
+// 默认隐藏宿主编辑区（红框）；需要时脚本可调用 setStatusCardEditorVisible(true) 恢复
+TavernHelper.setStatusCardEditorVisible(false).catch(function () {});
+__lyPushStatusSlots();
+// 账本变化 → 刷新原生内容槽（宿主 projections 有 WORLD_STATE_CHANGED）
+eventOn("WORLD_STATE_CHANGED", function () {
+	__lyPushStatusSlots();
+});
+
 console.log("[liyuan-瑟瑟状态栏] 适配版已就绪（P1 外壳）");

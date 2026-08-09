@@ -17,7 +17,7 @@
  *   的 notify 方法与 bridge toastr 桩调用；
  * - manager 请求：requestManager/onManagerRequest（P4，openManager 触发宿主模态）。
  */
-import type { LedgerPanelSpec } from "./types.ts";
+import type { LedgerPanelSpec, StatusCardSlot } from "./types.ts";
 
 /** 注册表条目（ledger.ts 内部状态机；D4 §2.1） */
 export interface LedgerEntry {
@@ -31,6 +31,10 @@ export interface LedgerEntry {
 	ready: boolean;
 	/** 面板被模态占用（P4：账本侧不挂载） */
 	modalized: boolean;
+	/** C 路径 L1：status 区域编辑区显隐（默认 true；false = 脚本隐藏宿主默认编辑区） */
+	editorVisible: boolean;
+	/** C 路径 L2：status 区域内容槽（宿主 React 原生渲染；默认空数组） */
+	slots: StatusCardSlot[];
 }
 
 /** getPanels 快照元素（脚本Id + 内部条目） */
@@ -138,6 +142,9 @@ export const ledger = {
 				// 应用 ready 竞态补偿：ready 帧先于本次 upsert 到达时，条目直接就绪
 				ready: pendingReady.has(scriptId),
 				modalized: false,
+				// C 路径 L1/L2：编辑区默认显示、内容槽默认空（脚本调 setEditorVisible/setSlots 改）
+				editorVisible: true,
+				slots: [],
 			});
 			pendingReady.delete(scriptId);
 		}
@@ -204,6 +211,43 @@ export const ledger = {
 		const next = modalized === true;
 		if (entry.modalized === next) return;
 		entry.modalized = next;
+		rebuildSnapshot();
+	},
+
+	// ---------- C 路径 L1/L2：状态栏编辑区显隐 + 内容槽（脚本经 setStatusCard* 调用） ----------
+
+	/**
+	 * 编辑区显隐（L1：脚本隐藏/恢复宿主默认状态编辑区）。只更新 editorVisible，
+	 * 不影响面板本身渲染（LedgerScriptViews iframe 面板始终保留）；值未变不通知。
+	 */
+	setEditorVisible(scriptId: string, visible: boolean): void {
+		const entry = panels.get(scriptId);
+		if (!entry) return;
+		const next = visible === true;
+		if (entry.editorVisible === next) return;
+		entry.editorVisible = next;
+		rebuildSnapshot();
+	},
+
+	/**
+	 * 内容槽（L2：宿主原生渲染脚本推送的结构化内容）。浅校验：非数组整体忽略；
+	 * 数组元素须为非空对象且含字符串 type 字段，非法整体忽略保留原值。内容未变不通知。
+	 */
+	setSlots(scriptId: string, slots: StatusCardSlot[]): void {
+		const entry = panels.get(scriptId);
+		if (!entry) return;
+		if (!Array.isArray(slots)) return;
+		const valid = slots.every(
+			(s) => s !== null && typeof s === "object" && typeof (s as { type?: unknown }).type === "string",
+		);
+		if (!valid) return;
+		if (
+			entry.slots.length === slots.length &&
+			JSON.stringify(entry.slots) === JSON.stringify(slots)
+		) {
+			return;
+		}
+		entry.slots = slots;
 		rebuildSnapshot();
 	},
 

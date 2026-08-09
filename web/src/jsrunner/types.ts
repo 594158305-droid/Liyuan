@@ -57,6 +57,17 @@ export interface LedgerPanelSpec {
 }
 
 /**
+ * 状态栏内容槽（C 路径 L2，宿主 React 原生渲染脚本推送的结构化内容——非 iframe 内嵌）。
+ * 脚本经 TavernHelper.setStatusCardSlots 推送；宿主在 StatusStrip .status-card 内容槽区
+ * 按序渲染：fields→只读 kv 行、badges→徽章行、buttons→动作按钮行（点击回传脚本
+ * STATUS_CARD_ACTION 事件，args `{ key }`）。
+ */
+export type StatusCardSlot =
+	| { type: "fields"; items: Array<{ label: string; value: string }> }
+	| { type: "badges"; items: Array<{ label: string; icon?: string }> }
+	| { type: "buttons"; items: Array<{ label: string; key: string; icon?: string }> };
+
+/**
  * 脚本 iframe → 宿主 window 的 postMessage 请求。
  * - ready：脚本初始化完成，宿主标记该 iframe 可投递事件；
  * - log：脚本侧 console 输出透传（宿主转发到前端 console/面板）；
