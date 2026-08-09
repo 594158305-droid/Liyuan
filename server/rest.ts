@@ -360,6 +360,16 @@ export interface RestHost {
 	}>;
 	/** 表格历史回填（DESIGN-table-backfill §3：从当前分支历史楼层提取数据填充表；走旁路 LLM，耗时较长） */
 	applyTableBackfill(name: string): Promise<{ ok: boolean; rows?: number; chunks?: number; error?: string }>;
+	/** 原始导入（DESIGN-import-raw §2：逐层回放 ST 聊天记录到新会话；旁路 LLM 场记，可中断） */
+	importRaw(input: {
+		content: string;
+		tag?: string;
+		templateName?: string;
+		batchN?: number;
+		fileName?: string;
+		/** 中断信号（REST handler 监听 req aborted/close 触发；传给 replayFloors 与旁路 LLM） */
+		signal?: AbortSignal;
+	}): Promise<{ ok: boolean; floors?: number; scribeCalls?: number; error?: string; aborted?: boolean }>;
 	/** 世界状态只读（当前分支账本；与 applyStatePatch 同源；未就绪返回 null） */
 	worldState(): import("../src/types.ts").WorldState | null;
 	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮）；无宿主能力时缺省（路由回退纯管线结果）。
@@ -4389,6 +4399,36 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				// /import 全流程（解析→清洗→摘要→建账→注入）由扩展命令完成，进度经 notify 推送
 				await host.promptCommand(`/import ${rel}${tag ? ` ${tag}` : ""}`);
 				sendJson(res, 200, { ok: true });
+				return true;
+			}
+
+			// ---- 原始导入（DESIGN-import-raw §2）：逐层回放 ST 聊天记录到新会话（可中断）----
+			case "POST /api/import-raw": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					content?: string;
+					tag?: string;
+					templateName?: string;
+					batchN?: number;
+					fileName?: string;
+				};
+				if (!body.content?.trim()) throw new Error("聊天记录内容为空");
+				// 中断：客户端断开（点停止 / 关页面 / 断网）→ abort 正在跑的回放与旁路 LLM
+				const controller = new AbortController();
+				const onAbort = () => controller.abort();
+				req.on("aborted", onAbort);
+				req.on("close", onAbort);
+				try {
+					const r = await host.importRaw({ ...body, signal: controller.signal });
+					if (!r.ok) {
+						sendJson(res, 200, { ok: false, error: r.error ?? "导入失败", ...(r.aborted ? { aborted: true } : {}) });
+						return true;
+					}
+					sendJson(res, 200, { ok: true, floors: r.floors, scribeCalls: r.scribeCalls });
+				} finally {
+					req.off("aborted", onAbort);
+					req.off("close", onAbort);
+				}
 				return true;
 			}
 

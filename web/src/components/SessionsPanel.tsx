@@ -5,9 +5,11 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { apiDelete, apiGet, apiPost, type SessionSearchHit } from "../api.ts";
 import type { WireSessionInfo, WireStats } from "../wire.ts";
-import { IconDownload, IconPencil, IconTrash } from "./icons.tsx";
+import { subscribeFrames } from "../ws.ts";
+import { IconClose, IconDownload, IconHistory, IconPencil, IconTrash } from "./icons.tsx";
 import { ConfirmButton, Field, SearchInput, useAction } from "./kit.tsx";
 
 function timeAgo(ms: number): string {
@@ -230,6 +232,99 @@ export function SessionsPanel({
 		}
 	};
 
+	// ---- 原始导入（POST /api/import-raw：原始楼层逐层回放建会话，可选物化模板；
+	//      后端广播 activity note 帧 {"current","total","stage"} 报进度） ----
+	const [rawOpen, setRawOpen] = useState(false);
+	const rawFileRef = useRef<HTMLInputElement>(null);
+	const [rawFileName, setRawFileName] = useState("");
+	const [rawContent, setRawContent] = useState("");
+	const [rawTemplates, setRawTemplates] = useState<Array<{ name: string }> | null>(null);
+	const [rawTemplate, setRawTemplate] = useState(""); // "" = [无]
+	const [rawBatchN, setRawBatchN] = useState(1);
+	const [rawRunning, setRawRunning] = useState(false); // 蒙版显示中
+	const [rawStage, setRawStage] = useState("");
+	const [rawCurrent, setRawCurrent] = useState(0);
+	const [rawTotal, setRawTotal] = useState(0);
+	const [rawScribeCalls, setRawScribeCalls] = useState(0); // 已合并记账次数（进度帧 detail.scribeCalls）
+	const rawAbortRef = useRef<AbortController | null>(null);
+
+	const openRawModal = () => {
+		setRawOpen(true);
+		setRawFileName("");
+		setRawContent("");
+		setRawTemplate("");
+		setRawBatchN(1);
+		// 模板下拉列表（[无] 不物化）；失败静默（下拉留空即可）
+		void apiGet<{ templates: Array<{ name: string }> }>("/api/templates")
+			.then((r) => setRawTemplates(r.templates))
+			.catch(() => setRawTemplates(null));
+	};
+
+	// 进度监听：WS activity 帧（name=import-raw）→ 更新蒙版 current/total/stage/scribeCalls
+	useEffect(() => {
+		if (!rawRunning) return;
+		const unsub = subscribeFrames((frame) => {
+			if (frame.type !== "activity" || frame.activity?.kind !== "note" || frame.activity.name !== "import-raw") return;
+			try {
+				const d = JSON.parse(frame.activity.detail ?? "{}") as {
+					current?: number;
+					total?: number;
+					stage?: string;
+					scribeCalls?: number;
+				};
+				if (typeof d.current === "number") setRawCurrent(d.current);
+				if (typeof d.total === "number") setRawTotal(d.total);
+				if (typeof d.stage === "string" && d.stage) setRawStage(d.stage);
+				if (typeof d.scribeCalls === "number") setRawScribeCalls(d.scribeCalls);
+			} catch {
+				// 非 JSON detail 忽略（退化为固定文案）
+			}
+		});
+		return unsub;
+	}, [rawRunning]);
+
+	const startRawImport = async () => {
+		if (!rawContent.trim()) {
+			toast("error", "请先选择要导入的 .jsonl 文件");
+			return;
+		}
+		const ctrl = new AbortController();
+		rawAbortRef.current = ctrl;
+		setRawOpen(false);
+		setRawRunning(true);
+		setRawCurrent(0);
+		setRawTotal(0);
+		setRawStage("");
+		setRawScribeCalls(0);
+		try {
+			const r = await apiPost<{ ok: boolean; floors?: number; scribeCalls?: number; error?: string; aborted?: boolean }>(
+				"/api/import-raw",
+				{
+					content: rawContent,
+					tag: importTag.trim() || undefined,
+					templateName: rawTemplate || undefined,
+					batchN: rawBatchN,
+					fileName: rawFileName,
+				},
+				{ signal: ctrl.signal },
+			);
+			if (!r.ok) throw new Error(r.error ?? "原始导入失败");
+			toast("info", `已回放 ${r.floors ?? 0} 层${r.scribeCalls ? `（记账 ${r.scribeCalls} 次）` : ""}`);
+		} catch (e) {
+			if (e instanceof DOMException && e.name === "AbortError") {
+				toast("warning", "已停止回放");
+			} else {
+				toast("error", e instanceof Error ? e.message : String(e));
+			}
+		} finally {
+			setRawRunning(false);
+			rawAbortRef.current = null;
+			onRefresh();
+		}
+	};
+
+	const stopRawImport = () => rawAbortRef.current?.abort();
+
 	return (
 		<div className="panel-body">
 			{current && (
@@ -341,10 +436,171 @@ export function SessionsPanel({
 						if (f) void doImport(f);
 					}}
 				/>
-				<button className="drawer-btn" disabled={importing} onClick={() => fileRef.current?.click()}>
-					{importing ? "导入中（解析→摘要→建账）…" : "选择 .jsonl 文件导入"}
-				</button>
+				<div className="panel-row">
+					<button className="drawer-btn" disabled={importing} onClick={() => fileRef.current?.click()}>
+						{importing ? "导入中（解析→摘要→建账）…" : "选择 .jsonl 文件导入"}
+					</button>
+					<button className="drawer-btn" onClick={openRawModal} title="原始楼层逐层回放建会话，可选物化模板">
+						<IconHistory size={13} />
+						原始导入
+					</button>
+				</div>
 			</section>
+
+			{/* ── 原始导入弹窗（portal 到 body，避免面板容器 transform 使 fixed 退化） ── */}
+			{rawOpen &&
+				createPortal(
+					<div className="raw-modal-scrim" onClick={() => setRawOpen(false)}>
+						<div className="raw-modal" role="dialog" aria-label="原始导入" onClick={(e) => e.stopPropagation()}>
+							<div className="raw-modal-head">
+								<span>原始导入</span>
+								<button type="button" className="icon-btn" aria-label="关闭" onClick={() => setRawOpen(false)}>
+									<IconClose size={15} />
+								</button>
+							</div>
+							<div className="raw-modal-body">
+								<div className="field-hint">
+									选择要导入的 .jsonl/.json 原始楼层文件：按顺序逐层建会话并回放；可选物化模板、每 N 层合并记账。回放可能耗时较长，期间会锁定界面。
+								</div>
+								<div className="panel-row">
+									<button className="drawer-btn" onClick={() => rawFileRef.current?.click()}>
+										选择文件
+									</button>
+									<input
+										ref={rawFileRef}
+										type="file"
+										accept=".jsonl,.json,application/json"
+										hidden
+										onChange={(e) => {
+											const f = e.target.files?.[0];
+											if (!f) return;
+											setRawFileName(f.name);
+											void f
+												.text()
+												.then((t) => setRawContent(t))
+												.catch(() => toast("error", "读取文件失败"));
+											e.target.value = "";
+										}}
+									/>
+									{rawFileName && <span className="raw-file-name">{rawFileName}</span>}
+								</div>
+								<Field label="模板（可选）" hint="选中模板则在回放前物化到新会话（[无] = 不物化）">
+									<select className="panel-search" value={rawTemplate} onChange={(e) => setRawTemplate(e.target.value)}>
+										<option value="">[无]</option>
+										{rawTemplates?.map((t) => (
+											<option key={t.name} value={t.name}>
+												{t.name}
+											</option>
+										))}
+									</select>
+								</Field>
+								<Field label="每 N 层合并记账" hint="回放时每 N 层触发一次记账（1–30，默认 1 = 逐层记账）">
+									<input
+										className="panel-search num"
+										type="number"
+										min={1}
+										max={30}
+										value={rawBatchN}
+										onChange={(e) => setRawBatchN(Math.min(30, Math.max(1, Number(e.target.value) || 1)))}
+									/>
+								</Field>
+							</div>
+							<div className="raw-modal-foot">
+								<button type="button" className="act" onClick={() => setRawOpen(false)}>
+									取消
+								</button>
+								<button
+									type="button"
+									className="drawer-btn"
+									disabled={!rawContent.trim()}
+									onClick={() => void startRawImport()}
+								>
+									开始导入
+								</button>
+							</div>
+						</div>
+					</div>,
+					document.body,
+				)}
+
+			{/* ── 原始导入进度蒙版（portal 到 body，锁死一切点击） ── */}
+			{rawRunning && (
+				<RawImportOverlay
+					stage={rawStageText(rawStage, rawCurrent, rawTotal, rawScribeCalls)}
+					// 有楼层总数 → 百分比进度；监听不到进度帧（total=0）→ 不确定态（转圈退化）
+					percent={rawTotal > 0 ? Math.min(100, Math.round((rawCurrent / rawTotal) * 100)) : -1}
+					onStop={stopRawImport}
+				/>
+			)}
 		</div>
+	);
+}
+
+/** 原始导入阶段文字（stage → 中文；replay 显示层数与已合并记账次数；无进度帧时退化「正在回放…」） */
+function rawStageText(stage: string, current: number, total: number, scribeCalls: number): string {
+	switch (stage) {
+		case "create":
+			return "建会话…";
+		case "materialize":
+			return "物化模板…";
+		case "replay":
+			return total > 0
+				? `正在回放第 ${current}/${total} 层 · 已合并记账 ${scribeCalls} 次`
+				: "正在回放…";
+		case "done":
+			return "完成";
+		case "":
+			return "正在回放…";
+		default:
+			return stage;
+	}
+}
+
+/**
+ * 原始导入进度蒙版：portal 到 body、fixed 全屏、高 z-index 锁死一切点击。
+ * 进度条按 current/total 百分比；停止按钮 abort fetch（后端收到中断后广播收尾）。
+ */
+function RawImportOverlay({
+	stage,
+	percent,
+	onStop,
+}: {
+	stage: string;
+	percent: number;
+	onStop: () => void;
+}) {
+	return createPortal(
+		<div className="raw-overlay" role="dialog" aria-label="原始导入进度" aria-modal="true">
+			<div className="raw-overlay-card">
+				<div className="raw-overlay-title">原始导入中…</div>
+				<div className="raw-overlay-stage" title={stage}>
+					{stage}
+				</div>
+				{percent < 0 ? (
+					/* 监听不到进度帧：不确定态转圈（后端补进度帧后自动切到进度条） */
+					<div className="raw-overlay-unknown">
+						<span className="raw-overlay-spin" aria-hidden="true" />
+						<span>正在回放…</span>
+					</div>
+				) : (
+					<>
+						<div
+							className="raw-overlay-bar"
+							role="progressbar"
+							aria-valuenow={percent}
+							aria-valuemin={0}
+							aria-valuemax={100}
+						>
+							<div className="raw-overlay-fill" style={{ width: `${percent}%` }} />
+						</div>
+						<div className="raw-overlay-num">{percent}%</div>
+					</>
+				)}
+				<button type="button" className="drawer-btn" onClick={onStop}>
+					停止回放
+				</button>
+			</div>
+		</div>,
+		document.body,
 	);
 }

@@ -63,6 +63,8 @@ import {
 import { applyPatch, applyTableOperation, loadState, saveState } from "../src/state.ts";
 import { loadTemplate, materializeTemplate } from "../src/templates.ts";
 import { runTableBackfill } from "../src/table-backfill.ts";
+import { parseStChat, cleanChat, DEFAULT_STRIP_TAGS } from "../src/chatlog.ts";
+import { replayFloors, type ReplayFloor } from "../src/import-raw.ts";
 import { DEFAULT_CONFIG, type AgentConfig, type RpConfig, type WorldState } from "../src/types.ts";
 import {
 	loadTtsConfig,
@@ -1568,6 +1570,96 @@ const restHost: RestHost = {
 		syncStoryStateFromDisk(); // 同步 roleplay 内存 state + 树快照
 		return { ok: true, rows: r.rows, chunks: r.chunks };
 	},
+	// ---- 原始导入（DESIGN-import-raw §2）：逐层回放 ST 聊天记录到新会话（旁路 LLM 场记，可中断）----
+	async importRaw(input) {
+		const content = (input.content ?? "").trim();
+		if (!content) return { ok: false, error: "聊天记录内容为空" };
+		// 1) ST 解析 + 清洗 → floors（user/assistant 对，含 name/text）
+		let floors: ReplayFloor[];
+		try {
+			const parsed = parseStChat(content);
+			const cleaned = cleanChat(parsed.messages, {
+				...(input.tag && input.tag.trim() ? { extractTag: input.tag.trim() } : {}),
+				stripTags: [...DEFAULT_STRIP_TAGS, ...(loadConfig(cwd).importStripTags ?? [])],
+			});
+			floors = cleaned.map((m) => ({ role: m.role, name: m.name, text: m.text }));
+		} catch (e) {
+			return { ok: false, error: e instanceof Error ? e.message : String(e) };
+		}
+		if (floors.length === 0) return { ok: false, error: "清洗后聊天记录为空" };
+		// 2) 新会话（resolve 即 session_start 全跑完：卡/state/模板/开场白）
+		await runtime.newSession();
+		const sm = session.sessionManager;
+		// 3) 命名（jsonl 文件名去后缀；当前会话直接 appendSessionInfo——同 renameSession 的 current 分支）
+		const fileName = (input.fileName ?? "").trim();
+		if (fileName) {
+			const base = fileName.replace(/\.(jsonl?|txt)$/i, "").trim();
+			if (base) {
+				try {
+					sm.appendSessionInfo(base);
+				} catch {
+					// 命名失败不阻断回放
+				}
+			}
+		}
+		// 4) 模板物化（可选；与 restHost.applyTemplate 同逻辑：loadTemplate → materializeTemplate → 落盘 + 收编）
+		const templateName = (input.templateName ?? "").trim();
+		if (templateName) {
+			const def = loadTemplate(cwd, templateName);
+			if (!def) return { ok: false, error: `模板 ${templateName} 不存在` };
+			const tfile = join(stateDir, `${session.sessionId}.json`);
+			const tstate = loadState(tfile);
+			materializeTemplate(tstate, def);
+			saveState(tfile, tstate);
+			syncStoryStateFromDisk();
+		}
+		// 5) 工作状态（与 applyStatePatch 同源）
+		const file = join(stateDir, `${session.sessionId}.json`);
+		const state = loadState(file);
+		// 6) 回放：逐层注入 + 每 batchN 层合并场记；signal 可中断；进度经 activity 帧广播
+		const batchN = Math.min(30, Math.max(1, Math.floor(Number(input.batchN) || 1)));
+		const r = await replayFloors({
+			floors,
+			state,
+			userName: names.userName,
+			charName: names.charName,
+			batchN,
+			sideText: backfillSideText,
+			appendMessage: (role, text) => {
+				sm.appendMessage({ role, content: [{ type: "text", text }], timestamp: Date.now() });
+			},
+			save: () => {
+				saveState(file, state); // fs.watch 自动广播 state 帧
+				syncStoryStateFromDisk();
+			},
+			signal: input.signal,
+			onProgress: (current, total, stage, scribeCalls) =>
+				broadcast({
+					type: "activity",
+					activity: {
+						kind: "note",
+						name: "import-raw",
+						detail: JSON.stringify({ current, total, stage, scribeCalls }),
+					},
+				}),
+		});
+		if (!r.ok) {
+			// 中断/失败：已注入楼层保留——flush + 对齐内存消息 + 全量重放，让前端可见已回放部分
+			try {
+				sm.flush();
+				session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
+			} catch {
+				// 对齐失败不影响返回
+			}
+			resyncAll();
+			return { ok: false, error: r.error, aborted: r.aborted };
+		}
+		// 7) 收尾：flush + 对齐 agent 内存消息 + 全量重放（前端会话列表/消息刷新）
+		sm.flush();
+		session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
+		resyncAll();
+		return { ok: true, floors: r.floors, scribeCalls: r.scribeCalls };
+	},
 	/** 世界状态只读：与 storyBridge.worldState() 同源（currentState：树快照优先，磁盘缓存兜底） */
 	worldState() {
 		try {
@@ -2509,9 +2601,14 @@ registerPlannerCaller(async (prompt, llm) => {
 	return text;
 });
 
-// 表格历史回填（DESIGN-table-backfill §3）：旁路文本调用，与场记/压缩/规划同款 streamSimple 通道。
-// 模型取当前剧情模型（session.model）；失败返回 {error}——runTableBackfill 内部跳过该块继续，不中断整轮回填。
-async function backfillSideText(systemPrompt: string, userText: string): Promise<string | { error: string }> {
+// 表格历史回填（DESIGN-table-backfill §3）/ 原始导入（DESIGN-import-raw §2）：旁路文本调用，
+// 与场记/压缩/规划同款 streamSimple 通道。模型取当前剧情模型（session.model）；
+// 失败返回 {error}——调用方跳过该块继续，不中断整轮。signal 透传给 streamSimple 可中断。
+async function backfillSideText(
+	systemPrompt: string,
+	userText: string,
+	signal?: AbortSignal,
+): Promise<string | { error: string }> {
 	try {
 		const model = session.model as never;
 		if (!model) return { error: "尚无可用模型（未配置剧情模型）" };
@@ -2524,7 +2621,13 @@ async function backfillSideText(systemPrompt: string, userText: string): Promise
 				systemPrompt,
 				messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
 			},
-			{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, reasoning: "off" },
+			{
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				maxTokens: 4096,
+				reasoning: "off",
+				...(signal ? { signal } : {}),
+			},
 		);
 		let final: AssistantMsgLike | null = null;
 		for await (const e of s) {

@@ -16,6 +16,19 @@ export interface WsHandle {
 let activeWs: WebSocket | null = null;
 
 /**
+ * 模块级帧订阅（非 React 侧监听 ServerFrame，如 SessionsPanel 的原始导入进度帧）。
+ * useWire 收到每帧都会广播给订阅者（与 onFrame 回调并存，各司其职）。
+ */
+export type FrameListener = (frame: ServerFrame) => void;
+const frameListeners = new Set<FrameListener>();
+export function subscribeFrames(l: FrameListener): () => void {
+	frameListeners.add(l);
+	return () => {
+		frameListeners.delete(l);
+	};
+}
+
+/**
  * 非 React 侧发送帧（jsrunner/helper.ts 等模块级代码用）。
  * 未连接（activeWs 空 / 非 OPEN）时静默丢弃——与 WsHandle.send 同一纪律。
  */
@@ -50,7 +63,16 @@ export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: Conn
 			};
 			ws.onmessage = (ev) => {
 				try {
-					onFrameRef.current(JSON.parse(String(ev.data)) as ServerFrame);
+					const frame = JSON.parse(String(ev.data)) as ServerFrame;
+					onFrameRef.current(frame);
+					// 模块级订阅者（各组件自己的监听，互不干扰）
+					for (const l of [...frameListeners]) {
+						try {
+							l(frame);
+						} catch {
+							// 单个订阅者出错不影响主回调
+						}
+					}
 				} catch {
 					// 非 JSON 帧忽略
 				}

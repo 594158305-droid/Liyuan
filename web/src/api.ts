@@ -58,6 +58,8 @@ function invalidateAfterWrite(writePath: string): void {
 		{ test: /^\/api\/state/, prefixes: ["/api/state"] },
 		// 历史回填：写当前聊天 state.tables（连带清 state 缓存；WS 推帧为实时源）
 		{ test: /^\/api\/tables/, prefixes: ["/api/state"] },
+		// 原始导入：建会话/回放 → 会话列表缓存失效
+		{ test: /^\/api\/import/, prefixes: ["/api/sessions"] },
 		// 模板 CRUD / 物化：清模板列表缓存；apply 物化会改 state.tables → 连带清 state
 		{ test: /^\/api\/templates/, prefixes: ["/api/templates", "/api/state"] },
 	];
@@ -153,8 +155,8 @@ export function apiGetCacheClearForPanel(panelId: string): void {
 	for (const pref of prefixes) apiGetCacheClear(pref);
 }
 
-export const apiPost = <T,>(path: string, body: unknown) =>
-	api<T>(path, { method: "POST", body: JSON.stringify(body) });
+export const apiPost = <T,>(path: string, body: unknown, init?: RequestInit) =>
+	api<T>(path, { method: "POST", body: JSON.stringify(body), ...init });
 export const apiPut = <T,>(path: string, body: unknown) =>
 	api<T>(path, { method: "PUT", body: JSON.stringify(body) });
 export const apiDelete = <T,>(path: string) => api<T>(path, { method: "DELETE" });
