@@ -247,8 +247,6 @@ P1/P2 可部分并行（外壳与数据提取独立）；P3 依赖 P2（内存�
 | CHAT_CHANGED 事件 | 适配层包装 | 宿主不补投影（避免新增服务端/前端事件面），脚本侧 currentChatId 比对 |
 | AutoCardUpdaterAPI 世界书 | 内嵌库替换 | 数据同源（同一 ST 世界书导出），写回改走账本/存储 |
 
----
-
 ## 10. 与既有资产的衔接
 
 - **DB 路线资产**（plan_doc/db-statusbar-codex.md）：`.liyuan-codex/` 12 库（玩法/成就/
@@ -256,3 +254,38 @@ P1/P2 可部分并行（外壳与数据提取独立）；P3 依赖 P2（内存�
   「状态栏-梦鲸思客V4-0802」预设保持（剧情侧发卡/邂逅仍走 codex_mount 检索），与本
   脚本 UI 并行不冲突（预设=剧情侧、脚本=UI 侧，数据同源双轨）。
 - **ext_generate 独立项**（D3 §5.10）：本方案降级项的前置修复，独立立项随时可做。
+
+## 11. 实施结论（P1–P3，2026-08-09）
+
+### 交付物
+
+- `scripts/convert-statusbar.mjs`：自动化转换脚本（提取 EMBEDDED_HTML/内联数据/bundle、
+  parent 重定向、生成适配主脚本）；**宿主零改动**（用户裁决：瑟瑟状态栏适配不动 Liyuan
+  代码）
+- `assets/liyuan-statusbar/liyuan-瑟瑟状态栏.js`：转换产物（单文件，JsRunnerPanel 直接导入）
+
+### 冒烟验证（真实运行）
+
+1. **P1 外壳**：面板注册成功、UI 真实渲染（「点击收回状态栏」+ 📍位置 + 折叠/展开控件）；
+   Vue 报错清零（脚本内 CDN 注入）、AutoCardUpdaterAPI 桩就绪轮询立即通过
+2. **P2 数据面**：状态栏**真实显示账本数据**——`🕐 神历1024年3月20日 深夜（伊利亚斯离开后）
+   | 📍 失落废墟·无名祭坛前`（worldState 桥：exportTableAsJson 从 getContext().worldState
+   构建 5 表：全局数据表/主角信息表/在场角色表/物品表/备忘录；WORLD_STATE_CHANGED →
+   重建表 + 触发 registerTableUpdateCallback 刷新）；甚至触发了「确认地图地点归属」
+   对话框（bundle 地图模块读到真实地点数据）
+3. **P3 交互**：发送聊天替身（#send_textarea/#send_but 隐藏元素 → triggerSlash
+   `/send X|/trigger`）、generateRaw/generate 降级（立即 reject 占位，不挂起）
+
+### 冒烟迭代修复（记录）
+
+| 问题 | 修复 |
+|---|---|
+| bundle 引用全局 Vue（ST 宿主有，Liyuan iframe 无） | 脚本内 Vue 2 CDN 加载后再注入 bundle |
+| ST 世界书 API（getCharWorldbookNames 等 7 个）宿主无桩 | 脚本内 Proxy 包装 TavernHelper 返回空值（宿主零改动） |
+| AutoCardUpdaterAPI 桩结构不符（轮询条件 registerTableUpdateCallback + exportTableAsJson 期望 sheet 结构） | 桩对齐 + P2 升级为 worldState 桥 |
+| 转换脚本模板内反引号破坏生成产物 | 主脚本模板禁反引号（字符串拼接） |
+
+### 宿主改动记录
+
+- **helper.ts 世界书桩已回滚**（77ac0d7）：曾临时加 7 个桩，用户裁决「不动 Liyuan 代码」
+  后撤回，桩全部移至脚本内 Proxy 包装。当前 Liyuan 代码与 V2 基线一致，零差异。

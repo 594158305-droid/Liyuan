@@ -144,23 +144,111 @@ document.head.insertAdjacentHTML("beforeend", ${JSON.stringify(headInner)});
 document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(bodyInner)});
 
 // ---------- 4. 宿主全局补齐（冒烟实测：bundle 引用全局 Vue + AutoCardUpdaterAPI） ----------
-// 4a. AutoCardUpdaterAPI 最小桩（P1 外壳）：让主流程就绪轮询立即通过——
-//     轮询条件是 t 存在且 registerTableUpdateCallback 为函数（bundle 分析确认），
-//     exportTableAsJson 期望返回 {sheet_xxx: {...}} 结构（空对象即可让遍历无害）；
-//     真实数据桥（worldState/内嵌库）留 P2。
+// 4a. AutoCardUpdaterAPI 桩升级为 worldState 桥（P2 数据面）：
+//     - exportTableAsJson() 从 getContext().worldState 构建 bundle 期望的表结构
+//       （{sheet_xxx: {name, content: [[列名...],[行...]], ...}}，读侧 cj/z6 按列名匹配）
+//     - 账本变化（WORLD_STATE_CHANGED）→ 重建表 + 触发 registerTableUpdateCallback（bundle 刷新）
+//     - 脚本私有动态数据（瑟瑟能量/任务等）经 localStorage 代理落宿主（bundle 自带持久化）
+//     - 写路径：bundle k9 操作内存表（界面即时生效）；账本字段单向 账本→状态栏
+let __lyTableCb = null;
+let __lySheets = null;
+
+/** 构建 worldState 桥的表结构（每次调用重建——账本变化后刷新） */
+function __lyBuildSheets() {
+	const ws = getContext().worldState || {};
+	const chars = (ws.characters && typeof ws.characters === "object" ? ws.characters : {}) || {};
+	const charNames = Object.keys(chars);
+	const hero = charNames[0] || "";
+	const sheets = {};
+	// 全局数据表：时间/地点/是否色色
+	sheets["sheet_全局数据表"] = {
+		name: "全局数据表",
+		uid: "sheet_全局数据表",
+		key: "全局数据表",
+		content: [
+			["当前时间", "当前详细地点", "是否色色"],
+			[ws.time || "", ws.location || "", String(ws.flags?.["是否色色"] ?? "")],
+		],
+		sourceData: { ddl: "CREATE TABLE 全局数据表 (当前时间 TEXT, 当前详细地点 TEXT, 是否色色 TEXT)" },
+	};
+	// 主角信息表：姓名/瑟瑟能量/近况（好感）/身份背景（备注）
+	sheets["sheet_主角信息表"] = {
+		name: "主角信息表",
+		uid: "sheet_主角信息表",
+		key: "主角信息表",
+		content: [
+			["姓名", "瑟瑟能量", "近况", "性别", "年龄", "身份背景", "外貌特征"],
+			[hero, String(chars[hero]?.affinity ?? ""), chars[hero]?.status || "", "", "", chars[hero]?.notes || "", ""],
+		],
+		sourceData: { ddl: "CREATE TABLE 主角信息表 (姓名 TEXT, 瑟瑟能量 TEXT, 近况 TEXT, 性别 TEXT, 年龄 TEXT, 身份背景 TEXT, 外貌特征 TEXT)" },
+	};
+	// 在场角色表：姓名/情绪/当前状态/当前穿搭/内心想法/过往经历
+	sheets["sheet_在场角色表"] = {
+		name: "在场角色表",
+		uid: "sheet_在场角色表",
+		key: "在场角色表",
+		content: [
+			["姓名", "情绪", "当前状态", "当前穿搭", "内心想法", "过往经历"],
+			...charNames.map((n) => [n, "", chars[n]?.status || "", chars[n]?.outfit || "", chars[n]?.notes || "", ""]),
+		],
+		sourceData: { ddl: "CREATE TABLE 在场角色表 (姓名 TEXT, 情绪 TEXT, 当前状态 TEXT, 当前穿搭 TEXT, 内心想法 TEXT, 过往经历 TEXT)" },
+	};
+	// 物品表：物品名称/类型/数量/描述
+	sheets["sheet_物品表"] = {
+		name: "物品表",
+		uid: "sheet_物品表",
+		key: "物品表",
+		content: [["物品名称", "类型", "数量", "描述"], ...(Array.isArray(ws.inventory) ? ws.inventory.map((i) => [i, "", "", ""]) : [])],
+		sourceData: { ddl: "CREATE TABLE 物品表 (物品名称 TEXT, 类型 TEXT, 数量 TEXT, 描述 TEXT)" },
+	};
+	// 备忘录：flags 展平（键→条目）
+	const flagRows = [];
+	for (const k of Object.keys(ws.flags || {})) flagRows.push([k, String(ws.flags[k] ?? ""), ""]);
+	sheets["sheet_备忘录"] = {
+		name: "备忘录",
+		uid: "sheet_备忘录",
+		key: "备忘录",
+		content: [["备忘", "状态", "相关角色"], ...flagRows],
+		sourceData: { ddl: "CREATE TABLE 备忘录 (备忘 TEXT, 状态 TEXT, 相关角色 TEXT)" },
+	};
+	return sheets;
+}
+
+/** 账本变化 → 重建表 + 通知 bundle 刷新 */
+function __lyRefreshSheets() {
+	__lySheets = __lyBuildSheets();
+	if (typeof __lyTableCb === "function") {
+		try {
+			__lyTableCb({ kind: "table-update", sheets: __lySheets });
+		} catch (e) {
+			console.warn("[liyuan-瑟瑟状态栏] table update 回调出错", e);
+		}
+	}
+}
+eventOn("WORLD_STATE_CHANGED", () => {
+	__lyRefreshSheets();
+});
+
 window.AutoCardUpdaterAPI = {
-	registerTableUpdateCallback: () => {},
-	exportTableAsJson: () => ({}),
+	registerTableUpdateCallback: (cb) => {
+		__lyTableCb = cb;
+	},
+	exportTableAsJson: () => {
+		if (!__lySheets) __lySheets = __lyBuildSheets();
+		return __lySheets;
+	},
 	importTableAsJson: () => ({ ok: true }),
 	importTemplateFromData: () => ({ ok: true }),
 	switchTemplatePreset: () => ({ ok: true }),
 };
 
-// 4c. ST 世界书 API 桩（脚本内本地覆盖，**不改 Liyuan 宿主代码**）：
-//     bundle play-wb 模块调用 TavernHelper.getCharWorldbookNames 等 7 个 ST 世界书方法，
-//     宿主 helper.ts 无这些方法（按「无对等 → 桩」原则在脚本侧补桩，宿主零改动）。
-//     用本地 Proxy 包装：已知世界书方法返回空值桩，其余方法回退原 TavernHelper（invoke 面）。
+// 4c. ST 世界书 API 桩 + LLM 生成降级（脚本内本地覆盖，**不改 Liyuan 宿主代码**）：
+//     - 世界书 7 方法（bundle play-wb 模块调用，宿主无这些方法 → 空值桩）
+//     - generateRaw/generate（采访/立绘/天赋树等 13 调用点 → 立即 reject 降级占位，
+//       依赖独立项 ext_generate；reject 由 bundle 内部 try/catch 消化，不炸宿主）
+//     用本地 Proxy 包装：已知方法返回桩，其余方法回退原 TavernHelper（invoke 面）。
 const __lyOrigTavernHelper = window.TavernHelper;
+const __lyStubError = "LLM 生成通道未启用（依赖独立项 ext_generate，当前降级占位）";
 const __lyWorldbookStubs = {
 	getCharWorldbookNames: () => [],
 	getWorldbookNames: () => [],
@@ -169,6 +257,8 @@ const __lyWorldbookStubs = {
 	getOrCreateChatWorldbook: () => null,
 	deleteWorldbook: () => undefined,
 	rebindGlobalWorldbooks: () => undefined,
+	generateRaw: () => Promise.reject(new Error(__lyStubError)),
+	generate: () => Promise.reject(new Error(__lyStubError)),
 };
 window.TavernHelper = new Proxy({}, {
 	get(_t, method) {
@@ -178,6 +268,27 @@ window.TavernHelper = new Proxy({}, {
 		return __lyOrigTavernHelper[method];
 	},
 });
+
+// 4d. 发送聊天替身（P3 交互）：bundle 的「写 #send_textarea + 点 #send_but」DOM 操作
+//     （D()/R() 邂逅与选项栏发送）→ 脚本注入隐藏替身元素；send_but 点击 → triggerSlash
+//     （exp-1 确认的唯一「带文本直接发送并生成」入口）。宿主零改动。
+(function __lyInstallSendStub() {
+	const ta = document.createElement("textarea");
+	ta.id = "send_textarea";
+	ta.style.display = "none";
+	document.body.appendChild(ta);
+	const btn = document.createElement("button");
+	btn.id = "send_but";
+	btn.style.display = "none";
+	document.body.appendChild(btn);
+	btn.addEventListener("click", () => {
+		const text = (ta.value || "").trim();
+		if (!text) return;
+		ta.value = "";
+		// 注意：主脚本模板内禁反引号，用字符串拼接
+		TavernHelper.triggerSlash("/send " + text + "|/trigger").catch(() => {});
+	});
+})();
 
 // 4b. Vue 全局注入（bundle 引用 ST 宿主全局 Vue；Liyuan iframe 无——异步加载 CDN 后注入 bundle）
 const __liyuanLoadScript = (src) =>
