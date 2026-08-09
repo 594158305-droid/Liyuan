@@ -1263,6 +1263,75 @@ test("规划旁白不入正文：稿落地前工具轮的 text 产出被清理�
 	}
 });
 
+test("轮次耗尽收场：安全阀撤工具时注入【收场】指令，最后一轮产出拼进定稿（8/09 实弹）", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		let lastCtx = "";
+		let lastCtxHadTools = true;
+		const responses: unknown[] = [
+			fauxAssistantMessage(
+				[fauxToolCall("beat_plan", { steps: ["一", "二", "三", "四", "五", "六", "七", "八"] })],
+				{ stopReason: "toolUse" },
+			),
+		];
+		// 19 个 append，把轮次预算（20）耗到最后一轮
+		for (let i = 1; i <= 19; i++) {
+			responses.push(
+				fauxAssistantMessage(
+					[fauxThinking(`想第 ${i} 段。`), fauxToolCall("draft_append", { segment: `第 ${i} 段正文。` })],
+					{ stopReason: "toolUse" },
+				),
+			);
+		}
+		// 最后一轮（lastRound，工具已收起）：捕获上下文，收场输出尾巴
+		responses.push((ctx: { messages?: unknown[]; tools?: unknown }) => {
+			lastCtx = JSON.stringify(ctx.messages ?? []);
+			lastCtxHadTools = ctx.tools !== undefined;
+			return fauxAssistantMessage("<catsay>收场点评。</catsay>");
+		});
+		responses.push(fauxScribeEmpty());
+		reg.setResponses(responses as never);
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		await engine.performTurn("开演。");
+
+		assert.ok(lastCtx.includes("【收场】"), "轮次耗尽时注入收场指令（不再让模型不明所以干想散场）");
+		assert.equal(lastCtxHadTools, false, "最后一轮工具已收起");
+		const branchText = JSON.stringify(sm.getBranch());
+		assert.ok(branchText.includes("收场点评"), "最后一轮的产出拼进定稿");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("直出代收不静默放行：有计划=有戏，代收全绿也喂一轮让模型自决续/收（8/09 实弹）", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		let nudgeCtx = "";
+		reg.setResponses([
+			fauxAssistantMessage([fauxToolCall("beat_plan", { steps: ["解衣", "磨墨", "奉砚"] })], { stopReason: "toolUse" }),
+			// 列了路标却整拍直出（8/09 实弹形态：385 字一次写完三条路标）
+			fauxAssistantMessage("她解衣取砚，磨墨奉上，一气呵成。"),
+			(ctx: { messages?: unknown[] }) => {
+				nudgeCtx = JSON.stringify(ctx.messages ?? []);
+				return fauxAssistantMessage("");
+			},
+			fauxScribeEmpty(),
+		]);
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		await engine.performTurn("开始吧。");
+
+		assert.ok(nudgeCtx.includes("列了路标却把整拍一次直出"), "代收后喂回去向提示，不因全绿静默放行");
+		const branchText = JSON.stringify(sm.getBranch());
+		assert.ok(branchText.includes("一气呵成"), "直出正文仍代收落树（不推倒）");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 // ---------------- P7：ask 工具（剧情共创决策） ----------------
 
 test("ask：注入 askUser 才上清单；未注入则剔除（依赖缺失不上清单）", async () => {

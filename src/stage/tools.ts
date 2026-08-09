@@ -24,7 +24,9 @@ import type { WorldState } from "../types.ts";
 export const MAX_LOOKUPS = 3;
 
 /** agent 循环安全阀（PLAN-RP-AGENT-EXEC §2.3）：开放式循环的轮数上限，触阀以现稿定稿 */
-export const MAX_ROUNDS = 12;
+// 8/09 提额：ask 接回 + 续写出口后，正常一拍可达 12+ 轮（规划/3段/3勾/修/ask/重拟/续写…）——
+// 12 轮在实弹中被正常演出耗尽（安全阀吞掉了第三段与状态栏）。20 = 正常上限 × 安全余量。
+export const MAX_ROUNDS = 20;
 
 /** @liyuan/ai Tool 的结构子集（parameters 用裸 JSON Schema，避免 src/ 依赖 typebox） */
 export interface StageTool {

@@ -1023,7 +1023,6 @@ export class StageEngine {
 						});
 						continue;
 					}
-					if (text.trim()) break; // 本轮已有产出（可能正是尾巴）→ 正常谢幕
 					if (tailPass) break; // 谢幕轮只给一次，防空转
 					// 程序化谢幕（8/09 输出形式定案）：状态栏 = 本拍结束的标志，必须最后出现。
 					// 卡/预设定义了格式块而稿与 text 通道都还没出现过 → 必开一轮谢幕并点名清单，
@@ -1039,7 +1038,11 @@ export class StageEngine {
 						...(sbMissing ? [`状态栏（${sbGroup.map((t) => `<${t}>`).join(" 或 ")}）`] : []),
 						...missingReq.map((t) => `<${t}>`),
 					];
-					if (wanted.length === 0 && !hasTailIntent(last) && !hasTailIntent(o.first)) break;
+					// 缺格式块时无论本轮有无产出都催（产出里已有就不算缺）；不缺按旧逻辑收场
+					if (wanted.length === 0) {
+						if (text.trim()) break; // 本轮已有产出（可能正是尾巴）→ 正常谢幕
+						if (!hasTailIntent(last) && !hasTailIntent(o.first)) break;
+					}
 					tailPass = true;
 					convo.push(last);
 					convo.push({
@@ -1063,7 +1066,9 @@ export class StageEngine {
 					// internal=true 跳过门禁——代收是兜底，被拦下就等于把这拍正文丢了。
 					const r = runWriteTool(o.ws, o.wsDeps, "draft_write", { content: direct }, true);
 					ev.onActivity?.("直出正文已代收为 draft_write");
-					if (o.ws.lastGreen || nudged) break;
+					// 有计划 = 这拍有戏（8/09 实弹：列了 3 条路标却 385 字一次直出，代收全绿
+						// 静默放行，又短又糙还没状态栏）——即使全绿也喂一轮让模型自决续/收
+						if ((o.ws.lastGreen && o.ws.plan.length === 0) || nudged) break;
 					nudged = true;
 					convo.push(last);
 					convo.push({
@@ -1073,7 +1078,10 @@ export class StageEngine {
 								type: "text",
 								text:
 									`你的正文已被代收为 draft_write（正文本应经此工具提交）。验收报告：\n${r.text}\n` +
-									`如需修改请调用 draft_write 重新提交完整正文；无需修改则直接结束。`,
+									(o.ws.plan.length > 0
+											? `你列了路标却把整拍一次直出——已代收，不推倒重来。接下来自决：` +
+												`戏还没演完就用 draft_append 接着演；演完了就输出状态栏等格式块（若本卡定义）收场。`
+											: `如需修改请调用 draft_write 重新提交完整正文；无需修改则直接结束。`),
 							},
 						],
 						timestamp: Date.now(),
@@ -1313,6 +1321,16 @@ export class StageEngine {
 			const lastRound = round >= MAX_ROUNDS - 1;
 			const ctx: Record<string, unknown> = { systemPrompt: o.systemPrompt, messages: convo };
 			if (!lastRound) ctx.tools = o.tools;
+			else {
+				// 8/09：撤工具的同时必须告知收场（实弹：轮次耗尽后模型不明所以干想一轮
+				// 散场，状态栏没了）——点名输出格式块，这一轮产出走 text 通道拼进定稿。
+				const sbG = o.wsDeps.rules.statusBarTagGroup;
+				const sbNote =
+					sbG.length > 0 && !sbG.some((t) => hasFormatTag(`${o.ws.draft}\n${text}`, t))
+						? `直接输出状态栏（${sbG.map((t) => `<${t}>`).join(" 或 ")}）等格式块收场——不要再写正文。`
+						: `就此收场，不要再写正文。`;
+				convo.push(nowMsg(`【收场】本拍轮次已达上限，工具已收起。${sbNote}`));
+			}
 
 			// P1 注入层：按工作区状态注入当前轮次卡。
 			// 规划/开工卡：状态切换才注入一次（一次性指令）。
