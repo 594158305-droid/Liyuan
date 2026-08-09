@@ -65,7 +65,8 @@ html[data-theme="dark"] {
 	--text-soft: #c4bbb1;
 	--text-faint: #9a9188; /* 暗色次要字：仍可读，勿过淡 */
 	--text-em: #a89f96;
-	--text-quote: #faf6f1;
+	/* 黑夜对白橙色（2026-08-10 用户裁决：引号及引号内容橙渲染，仅本主题生效） */
+	--text-quote: #f0a03c;
 
 	--hairline: #3a342f;
 	--hairline-strong: #4d4540;
