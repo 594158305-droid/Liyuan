@@ -46,12 +46,33 @@ document.body.insertAdjacentHTML("beforeend", "<div id=\"ac-content\"></div><div
 let __lyTableCb = null;
 let __lySheets = null;
 
+/** 脚本私有状态（瑟瑟能量/任务等 bundle 表数据；localStorage 代理自动落宿主） */
+let __lyPrivate = null;
+function __lyLoadPrivate() {
+	if (__lyPrivate) return __lyPrivate;
+	try {
+		__lyPrivate = JSON.parse(localStorage.getItem("liyuan-statusbar-private") || "{}") || {};
+	} catch {
+		__lyPrivate = {};
+	}
+	return __lyPrivate;
+}
+function __lySavePrivate(next) {
+	__lyPrivate = next;
+	try {
+		localStorage.setItem("liyuan-statusbar-private", JSON.stringify(next));
+	} catch (e) {
+		console.warn("[liyuan-瑟瑟状态栏] 私有状态保存失败", e);
+	}
+}
+
 /** 构建 worldState 桥的表结构（每次调用重建——账本变化后刷新） */
 function __lyBuildSheets() {
 	const ws = getContext().worldState || {};
 	const chars = (ws.characters && typeof ws.characters === "object" ? ws.characters : {}) || {};
 	const charNames = Object.keys(chars);
 	const hero = charNames[0] || "";
+	const priv = __lyLoadPrivate();
 	const sheets = {};
 	// 全局数据表：时间/地点/是否色色
 	sheets["sheet_全局数据表"] = {
@@ -64,14 +85,22 @@ function __lyBuildSheets() {
 		],
 		sourceData: { ddl: "CREATE TABLE 全局数据表 (当前时间 TEXT, 当前详细地点 TEXT, 是否色色 TEXT)" },
 	};
-	// 主角信息表：姓名/瑟瑟能量/近况（好感）/身份背景（备注）
+	// 主角信息表：姓名/瑟瑟能量（脚本私有）/近况（好感）/身份背景（备注）
 	sheets["sheet_主角信息表"] = {
 		name: "主角信息表",
 		uid: "sheet_主角信息表",
 		key: "主角信息表",
 		content: [
 			["姓名", "瑟瑟能量", "近况", "性别", "年龄", "身份背景", "外貌特征"],
-			[hero, String(chars[hero]?.affinity ?? ""), chars[hero]?.status || "", "", "", chars[hero]?.notes || "", ""],
+			[
+				hero,
+				String(priv["瑟瑟能量"] ?? chars[hero]?.affinity ?? ""),
+				chars[hero]?.status || "",
+				"",
+				"",
+				chars[hero]?.notes || "",
+				"",
+			],
 		],
 		sourceData: { ddl: "CREATE TABLE 主角信息表 (姓名 TEXT, 瑟瑟能量 TEXT, 近况 TEXT, 性别 TEXT, 年龄 TEXT, 身份背景 TEXT, 外貌特征 TEXT)" },
 	};
@@ -122,6 +151,46 @@ eventOn("WORLD_STATE_CHANGED", () => {
 	__lyRefreshSheets();
 });
 
+/** 写映射：单元格写入 → 账本（applyStatePatch）或脚本私有存储（extdata/localStorage） */
+function __lyPersistCell(table, row, col, value) {
+	const ws = getContext().worldState || {};
+	const str = (v) => String(v ?? "");
+	try {
+		switch (table) {
+			case "全局数据表":
+				if (col === "当前时间") TavernHelper.applyStatePatch({ time: str(value) }).catch(() => {});
+				else if (col === "当前详细地点") TavernHelper.applyStatePatch({ location: str(value) }).catch(() => {});
+				else if (col === "是否色色") TavernHelper.applyStatePatch({ flags: { "是否色色": str(value) } }).catch(() => {});
+				break;
+			case "主角信息表":
+				if (col && value !== undefined) {
+					const next = { ...__lyLoadPrivate(), [col]: value };
+					__lySavePrivate(next);
+				}
+				break;
+			case "在场角色表": {
+				const name = __lySheets?.["sheet_在场角色表"]?.content?.[Number(row)]?.[0];
+				if (!name) break;
+				if (col === "当前状态") TavernHelper.applyStatePatch({ characters: { [name]: { status: str(value) } } }).catch(() => {});
+				else if (col === "内心想法") TavernHelper.applyStatePatch({ characters: { [name]: { notes: str(value) } } }).catch(() => {});
+				else if (col === "当前穿搭") TavernHelper.applyStatePatch({ characters: { [name]: { outfit: str(value) } } }).catch(() => {});
+				break;
+			}
+			case "物品表": {
+				const items = Array.isArray(ws.inventory) ? [...ws.inventory] : [];
+				const idx = Number(row) - 1;
+				if (col === "物品名称" && idx >= 0 && idx < items.length) items[idx] = str(value);
+				TavernHelper.applyStatePatch({ inventory: items }).catch(() => {});
+				break;
+			}
+			default:
+				break;
+		}
+	} catch (e) {
+		console.warn("[liyuan-瑟瑟状态栏] 写映射失败", table, row, col, e);
+	}
+}
+
 window.AutoCardUpdaterAPI = {
 	registerTableUpdateCallback: (cb) => {
 		__lyTableCb = cb;
@@ -130,10 +199,102 @@ window.AutoCardUpdaterAPI = {
 		if (!__lySheets) __lySheets = __lyBuildSheets();
 		return __lySheets;
 	},
+	// ---- 写方法族（bundle k9/updateRow/deleteRow/insertRow 全经桩调用，分析 #9 确认）----
+	updateCell: async (table, row, col, value) => {
+		try {
+			// 同步内存表（bundle 立即可见）
+			const sheet = __lySheets && __lySheets["sheet_" + table];
+			const colIdx = sheet?.content?.[0]?.indexOf(col);
+			if (sheet && sheet.content && Number.isInteger(Number(row)) && Number(row) >= 1 && colIdx >= 0) {
+				sheet.content[Number(row)][colIdx] = String(value ?? "");
+			}
+			__lyPersistCell(table, row, col, value);
+			return true;
+		} catch (e) {
+			console.warn("[liyuan-瑟瑟状态栏] updateCell failed:", e);
+			return false;
+		}
+	},
+	updateRow: async ({ tableName, rowIndex, data, skipNotify } = {}) => {
+		try {
+			const table = tableName || "";
+			const row = Number(rowIndex);
+			const dataObj = (data && typeof data === "object" ? data : {}) || {};
+			// 整行写：逐列映射（物品名称列优先）
+			for (const col of Object.keys(dataObj)) {
+				__lyPersistCell(table, row, col, dataObj[col]);
+			}
+			return true;
+		} catch (e) {
+			console.warn("[liyuan-瑟瑟状态栏] updateRow failed:", e);
+			return false;
+		}
+	},
+	deleteRow: async (table, rowIndex) => {
+		try {
+			const row = Number(rowIndex);
+			const name = __lySheets?.["sheet_" + table]?.content?.[row]?.[0];
+			if (table === "在场角色表" && name) {
+				TavernHelper.applyStatePatch({ characters: { [name]: null } }).catch(() => {});
+			} else if (table === "物品表") {
+				const ws = getContext().worldState || {};
+				const items = Array.isArray(ws.inventory) ? [...ws.inventory] : [];
+				items.splice(row - 1, 1);
+				TavernHelper.applyStatePatch({ inventory: items }).catch(() => {});
+			}
+			return true;
+		} catch (e) {
+			console.warn("[liyuan-瑟瑟状态栏] deleteRow failed:", e);
+			return false;
+		}
+	},
+	insertRow: async (table, data) => {
+		try {
+			if (table === "物品表") {
+				const ws = getContext().worldState || {};
+				const name =
+					(data && typeof data === "object" && (data["物品名称"] ?? data[0])) ?? "";
+				if (name) {
+					TavernHelper.applyStatePatch({ inventory: [...(Array.isArray(ws.inventory) ? ws.inventory : []), String(name)] }).catch(() => {});
+				}
+			}
+			return true;
+		} catch (e) {
+			console.warn("[liyuan-瑟瑟状态栏] insertRow failed:", e);
+			return false;
+		}
+	},
+	_notifyTableUpdate: () => {
+		// bundle 通知「表已更新」→ 重建内存表 + 触发回调
+		__lyRefreshSheets();
+	},
 	importTableAsJson: () => ({ ok: true }),
 	importTemplateFromData: () => ({ ok: true }),
 	switchTemplatePreset: () => ({ ok: true }),
 };
+
+// 写方法族自检（不碰账本：主角信息表瑟瑟能量 = localStorage 私有通道）：
+// 验证 updateCell → __lyPersistCell → 私有持久化真实工作（2s 后执行，避开 bundle 初始化竞态）
+setTimeout(() => {
+	try {
+		const ACU = window.AutoCardUpdaterAPI;
+		if (!ACU || typeof ACU.updateCell !== "function") {
+			console.warn("[liyuan-瑟瑟状态栏] 自检：updateCell 缺失");
+			return;
+		}
+		ACU.updateCell("主角信息表", 1, "瑟瑟能量", 100).then((r) => {
+			let priv = {};
+			try {
+				priv = JSON.parse(localStorage.getItem("liyuan-statusbar-private") || "{}") || {};
+			} catch (e) {}
+			console.log("[liyuan-瑟瑟状态栏] 写方法族自检: updateCell=" + r + " 私有瑟瑟能量=" + String(priv["瑟瑟能量"]));
+			// 改回
+			ACU.updateCell("主角信息表", 1, "瑟瑟能量", 0).catch(() => {});
+		}).catch((e) => console.warn("[liyuan-瑟瑟状态栏] 自检失败", String(e)));
+	} catch (e) {
+		console.warn("[liyuan-瑟瑟状态栏] 自检异常", String(e));
+	}
+}, 2000);
 
 // 4c. ST 世界书 API 桩（脚本内本地覆盖，**不改 Liyuan 宿主代码**）：
 //     bundle play-wb 模块调用 TavernHelper.getCharWorldbookNames 等 7 个 ST 世界书方法，

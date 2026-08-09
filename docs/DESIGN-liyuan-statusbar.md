@@ -284,6 +284,19 @@ P1/P2 可部分并行（外壳与数据提取独立）；P3 依赖 P2（内存�
 | ST 世界书 API（getCharWorldbookNames 等 7 个）宿主无桩 | 脚本内 Proxy 包装 TavernHelper 返回空值（宿主零改动） |
 | AutoCardUpdaterAPI 桩结构不符（轮询条件 registerTableUpdateCallback + exportTableAsJson 期望 sheet 结构） | 桩对齐 + P2 升级为 worldState 桥 |
 | 转换脚本模板内反引号破坏生成产物 | 主脚本模板禁反引号（字符串拼接） |
+| **bundle 写操作（k9/updateRow/deleteRow/insertRow）静默失败**（分析 #9：全部经 `p()` 桩调用 `updateCell/updateRow/deleteRow/insertRow/addRow`，桩未实现） | **写方法族实现（v6/v7）**：updateCell/updateRow/deleteRow/insertRow + `_notifyTableUpdate`，写映射到账本（applyStatePatch：时间/地点/角色状态/物品）或脚本私有存储（localStorage 代理：瑟瑟能量等） |
+
+### 写回账本链路（v7 自检验证）
+
+```
+bundle k9/updateRow → 桩 updateCell/updateRow → __lyPersistCell
+  ├─ 全局数据表.当前时间/地点/是否色色 → applyStatePatch（账本落盘 + WORLD_STATE_CHANGED 回流）
+  ├─ 在场角色表.当前状态/内心想法/当前穿搭 → applyStatePatch({characters})
+  ├─ 物品表 → applyStatePatch({inventory})
+  ├─ 主角信息表.瑟瑟能量 → localStorage 私有通道（刷新保留）
+  └─ deleteRow/insertRow（角色/物品增删）→ applyStatePatch
+自检：updateCell=true 私有瑟瑟能量=100（写→读回一致）
+```
 
 ### 宿主改动记录
 
