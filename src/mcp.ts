@@ -277,6 +277,7 @@ export function setDefaultEnabled(cwd: string, id: string, enabled: boolean): vo
 // ---------- 内置 MCP（随梨园发布包走） ----------
 
 export const BUILTIN_VISION_ID = "liyuan_vision";
+export const BUILTIN_WEBSEARCH_ID = "liyuan_websearch";
 
 /** 仓库根（src/mcp.ts 的上一级）：内置 server 脚本按此定位，与进程 cwd 无关 */
 function appRootDir(): string {
@@ -291,16 +292,27 @@ const VISION_ENV_KEYS = [
 	"LIYUAN_VISION_TIMEOUT_MS",
 ] as const;
 
+const WEBSEARCH_ENV_KEYS = [
+	"LIYUAN_WEBSEARCH_BACKEND",
+	"LIYUAN_WEBSEARCH_SEARXNG_URL",
+	"LIYUAN_WEBSEARCH_TIMEOUT_MS",
+] as const;
+
 /**
  * 内置 MCP 目录：endpoint（command/args/cwd）每次运行时解析，不依赖任何持久化路径；
- * env 取进程环境里的 LIYUAN_VISION_*，可被 ~/.liyuan/mcp.json 或项目覆盖层盖掉。
+ * env 取进程环境里的 LIYUAN_VISION_* / LIYUAN_WEBSEARCH_*，可被 ~/.liyuan/mcp.json 或项目覆盖层盖掉。
  */
 export function builtinMcpServers(): McpCatalogEntry[] {
 	const root = appRootDir();
-	const env: Record<string, string> = {};
+	const visionEnv: Record<string, string> = {};
 	for (const k of VISION_ENV_KEYS) {
 		const v = process.env[k];
-		if (v) env[k] = v;
+		if (v) visionEnv[k] = v;
+	}
+	const websearchEnv: Record<string, string> = {};
+	for (const k of WEBSEARCH_ENV_KEYS) {
+		const v = process.env[k];
+		if (v) websearchEnv[k] = v;
 	}
 	return [
 		{
@@ -310,7 +322,21 @@ export function builtinMcpServers(): McpCatalogEntry[] {
 			transport: "stdio",
 			command: process.execPath,
 			args: [join(root, "server", "mcp", "vision-server.mjs")],
-			env: Object.keys(env).length ? env : undefined,
+			env: Object.keys(visionEnv).length ? visionEnv : undefined,
+			cwd: root,
+			source: "builtin",
+			sources: ["builtin"],
+			discovered: true,
+			builtin: true,
+		},
+		{
+			id: BUILTIN_WEBSEARCH_ID,
+			name: "网络搜索",
+			enabled: false,
+			transport: "stdio",
+			command: process.execPath,
+			args: [join(root, "server", "mcp", "websearch-server.mjs")],
+			env: Object.keys(websearchEnv).length ? websearchEnv : undefined,
 			cwd: root,
 			source: "builtin",
 			sources: ["builtin"],

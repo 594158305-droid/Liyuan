@@ -119,6 +119,14 @@ powershell -File scripts/pack-for-linux.ps1
 - **斜杠命令**（Web 输入框直接敲，带补全）：`/state` 账本 · `/lore` 设定检索 · `/import` 导入旧档 · `/store` `/back` `/line` 存档与世界线 · `/rewind` `/branch` 回退与分支 · `/compact` 手动压缩 等；
 - **MCP**：分**内置 / 外部**两栏。内置随梨园发布包走（见下条视觉识图）；外部启动时自动扫描 `~/.claude.json`、Cursor 配置、`~/.liyuan/mcp.json`、项目 `.mcp.json` / `.liyuan-mcp.json`。**默认全关**，在「扩展能力 → MCP」按对话开启；开关记为新对话默认；
 - **视觉识图（内置 MCP）**：给无视觉能力的主模型补眼睛——把图片交给任意 OpenAI 兼容的视觉模型分析。在「扩展能力 → MCP → 内置 → 视觉识图 → 编辑」的 `env` 里填 `LIYUAN_VISION_BASE_URL` / `LIYUAN_VISION_API_KEY` / `LIYUAN_VISION_MODEL`（须支持图片输入）即可；
+- **网络搜索（内置 MCP）**：给 agent 补上网——原生 web 搜索（查资料、核实信息），台上 / 助手 / 剧情三面可用。后端默认 **SearXNG**（自托管：无 Key、无限次、中文好、查询不出本机）。「扩展能力 → MCP → 内置 → 网络搜索」开开关即可用；未部署时工具会返回含启动指引的报错。SearXNG 快速部署（Docker，挂载目录里放 `settings.yml`）：
+  ```
+  docker run -d --name liyuan-searxng --restart unless-stopped \
+    -p 127.0.0.1:8080:8080 \
+    -v "$PWD:/etc/searxng/" -v searxng-data:/var/cache/searxng/ \
+    docker.io/searxng/searxng:latest
+  ```
+  `settings.yml` 必须：`search.formats` 加 `json`（默认仅 html 会 403）、把 `baidu` / `bing`（建议加 `base_url: https://cn.bing.com`）的 `disabled` 改 `false` 启用中文引擎；验证 `curl http://127.0.0.1:8080/healthz` 返回 OK。完整配置见 `docs/DESIGN-websearch.md` §5。搜索后端可插拔（环境变量 `LIYUAN_WEBSEARCH_BACKEND`，预留 tavily）；SearXNG 是独立 Python 服务，梨园不捆绑、不自动拉起——避免为纯 Node 栈引入 Docker/Python 强依赖，想开箱即用可切云 API 后端（tavily 填 key 即可，预留中）；
 - **语音（TTS）**：配置环境变量 `LIYUAN_TTS_BASE_URL` + `LIYUAN_TTS_API_KEY`（或直接用 `OPENAI_API_KEY`）后，agent 可用语音工具朗读；模型与音色用 `LIYUAN_TTS_MODEL` / `LIYUAN_TTS_VOICE` 指定；
 - **技能**：`.liyuan-skills/` 下的 markdown 即技能，可让 agent 自写（详见上文第 4 条），也可手写后在「扩展能力」面板控制是否暴露给 agent。
 
