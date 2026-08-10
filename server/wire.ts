@@ -716,8 +716,9 @@ export function foldTurnNarratives(msgs: WireMsg[]): WireMsg[] {
 					continue;
 				}
 				const thinking = join(prev.thinking, m.thinking);
-				const unfinished = prev.unfinished === true || m.unfinished === true;
-				const edited = prev.edited === true || m.edited === true;
+				// Boolean() 防 TS 对数组索引成员的控制流误收窄（unfinished/edited 可选字段，=== true 会报无重叠）
+				const unfinished = Boolean(prev.unfinished) || Boolean(m.unfinished);
+				const edited = Boolean(prev.edited) || Boolean(m.edited);
 				const joinedText = join(prev.text, m.text);
 				// 套皮原文合并：任一段带 raw 则合并后也带（编辑时取回各段原文）；raw 与 text 一致时不产出
 				const mergedRaw = join(prev.raw ?? prev.text, m.raw ?? m.text);
