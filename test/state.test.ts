@@ -248,7 +248,7 @@ test("applyPatch tables：旧状态无 tables 字段时补丁自动初始化", (
 	assert.deepEqual(r.state.tables!.x, undefined);
 });
 
-test("formatState：追加 auto 表全量内容；formatTableIndex：只列非 auto 表", () => {
+test("formatState：不含自定义表内容；formatTableIndex：列全部表（含 auto）", () => {
 	let s = defaultState();
 	s = applyTableOperation(s, {
 		kind: "create",
@@ -260,19 +260,13 @@ test("formatState：追加 auto 表全量内容；formatTableIndex：只列非 a
 	s = applyTableOperation(s, { kind: "create", name: "世界地理", columns: [{ name: "地名" }], auto: false }).state!;
 
 	const text = formatState(s);
-	assert.ok(text.includes("表格「主角信息」"), "auto 表应全量注入");
-	assert.ok(text.includes("阿远") && text.includes("25"), "行数据应在");
-	assert.ok(!text.includes("世界地理"), "非 auto 表不进全量注入");
+	assert.ok(!text.includes("表格「主角信息」") && !text.includes("阿远"), "auto 表内容不注入【世界状态】");
+	assert.ok(!text.includes("世界地理"), "非 auto 表内容不注入【世界状态】");
 
 	const idx = formatTableIndex(s);
-	assert.ok(idx && idx.includes("世界地理"), "非 auto 表应进索引");
-	assert.ok(!idx.includes("主角信息"), "auto 表不进索引");
+	assert.ok(idx && idx.includes("[auto] 主角信息") && idx.includes("1 行"), "auto 表进索引且带标记、含行数");
+	assert.ok(idx && idx.includes("世界地理"), "非 auto 表进索引");
 
-	// 空 auto 表也亮出列名
-	const s2 = applyTableOperation(defaultState(), { kind: "create", name: "空自动表", columns: [{ name: "a" }], auto: true }).state!;
-	assert.ok(formatState(s2).includes("暂无数据"), "空 auto 表应提示暂无数据");
-
-	// 只有 auto 表 / 无表 → 索引为空
-	assert.equal(formatTableIndex(s2), undefined, "只有 auto 表时索引为空");
+	// 无表 → 索引为空
 	assert.equal(formatTableIndex(defaultState()), undefined, "无表时索引为空");
 });

@@ -265,23 +265,6 @@ export function formatState(state: WorldState): string {
 	if (state.inventory.length) lines.push(`物品：${state.inventory.join("、")}`);
 	for (const [k, v] of Object.entries(state.flags)) lines.push(`${k}：${v}`);
 	if (state.plot_threads.length) lines.push(`剧情线：${state.plot_threads.map((t) => `「${t}」`).join(" ")}`);
-	if (state.tables) {
-		// auto 表每轮全量注入：非空用 markdown 风格表格，空表也亮出列名（提示结构、勿乱建行）
-		for (const t of Object.values(state.tables)) {
-			if (!t.auto) continue;
-			const cols = t.columns.map((c) => c.name);
-			if (t.rows.length === 0) {
-				lines.push(`表格「${t.name}」（${cols.join("、")}）：（暂无数据）`);
-				continue;
-			}
-			const header = cols.join(" | ");
-			const sep = cols.map(() => "---").join(" | ");
-			lines.push(`表格「${t.name}」：\n| ${header} |\n| ${sep} |`);
-			for (const row of t.rows) {
-				lines.push(`| ${cols.map((c) => String(row[c] ?? "")).join(" | ")} |`);
-			}
-		}
-	}
 	return lines.length ? lines.join("\n") : "（尚无记录）";
 }
 
@@ -565,16 +548,15 @@ export function applyTableOperation(state: WorldState, op: TableOp): TableOpResu
 }
 
 /**
- * 自定义表索引：只列非 auto 表（表名（列名…，N 行））——auto 表每轮已全量进【世界状态】，
- * 索引只补「有这张静态表、内容需用 table_query 取」这一层。全空返回 undefined。
+ * 自定义表索引：列全部表（表名（列名…，N 行），[auto] 前缀标出场记自动维护）。
+ * 所有表内容都不注入上下文，需用 table_query 现查。全空返回 undefined。
  */
 export function formatTableIndex(state: WorldState): string | undefined {
 	const tables = state.tables;
 	if (!tables) return undefined;
 	const entries: string[] = [];
 	for (const t of Object.values(tables)) {
-		if (t.auto) continue;
-		entries.push(`${t.name}（${t.columns.map((c) => c.name).join("、")}，${t.rows.length} 行）`);
+		entries.push(`${t.auto ? "[auto] " : ""}${t.name}（${t.columns.map((c) => c.name).join("、")}，${t.rows.length} 行）`);
 	}
 	return entries.length ? entries.join("；") : undefined;
 }

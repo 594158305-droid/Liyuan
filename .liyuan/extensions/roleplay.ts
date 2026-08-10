@@ -121,8 +121,8 @@ import {
 // lorebook_write：新造设定固化为正典，写入补充设定集 .liyuan-lore/，用户原始世界书永远只读；
 // show_image / show_audio / show_video：媒体通道交付；panel_*：agent 自建面板（PLAN-PHASE4 柱 2）。
 // skill_save 已迁往右栏「助手」（2026-07-14 拆分）：沉淀归助手，使用权（read 笔记照调）仍在剧情侧）
-// table_*：自定义表格（2026-08-09）——auto 表由场记每轮自动维护 + 全量注入【世界状态】；
-// 非 auto 表是静态参考表，模型用 table_insert/update/delete 手动维护、内容用 table_query 取（只进索引）。
+// table_*：自定义表格（2026-08-09）——auto 表由场记每轮自动维护；所有表内容都不注入上下文，
+// 只进【自定义表索引】（[auto] 前缀标出），需要时用 table_query 现查；无 auto 标记的表模型可手动维护。
 // template_*：表格模板（2026-08-09）——全局文件（.liyuan-templates/），与卡绑定（config.cardTemplates）
 // 自动物化；template_apply 把模板的表建进当前聊天（幂等）。
 const RP_TOOLS = [
@@ -966,15 +966,15 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		});
 
 		// 自定义表格（custom tables，2026-08-09）：账本新增 tables 字段，随世界线/回档一致回退。
-		// auto 表由场记（旁侧模型）每轮自动维护 + 全量注入【世界状态】，主演不要手动写它；
-		// 非 auto 表是静态参考表——内容不进上下文（只进【自定义表索引】），
-		// 需用 table_insert/update/delete 手动维护、table_query 取内容。写操作沿用 world_state_update
+		// auto 表由场记（旁侧模型）每轮自动维护，主演不要手动写它；
+		// 所有表内容都不进上下文（只进【自定义表索引】，[auto] 前缀标出），
+		// 需要时用 table_query 现查；无 auto 标记的表用 table_insert/update/delete 手动维护。写操作沿用 world_state_update
 		// 的持久化：applyTableOperation → 更新内存 state → saveState 落盘 → snapshotState 进会话树。
 		pi.registerTool({
 			name: "table_create",
 			label: "创建自定义表格",
 			description:
-				"Create a custom table in the world state. auto:true = the scene recorder (scribe) maintains this table every turn and its full content is injected into context automatically — you only define the columns once and never write it manually. auto:false (default) = a static reference table you maintain yourself via table_insert/table_update/table_delete; its content is NOT injected (only a name/columns/row-count index is), so read it back with table_query. Use for structured long-lived data (item catalogs, faction relations, timelines) that would bloat the fixed world-state fields.",
+				"Create a custom table in the world state. auto:true = the scene recorder (scribe) maintains this table every turn — you only define the columns once and never write it manually. Table content is NEVER injected into context (only a name/columns/row-count index is); read any table back with table_query whenever you need its rows. Use for structured long-lived data (item catalogs, faction relations, timelines) that would bloat the fixed world-state fields.",
 			parameters: Type.Object({
 				name: Type.String({ description: "Unique table name (reuse an existing one will fail)" }),
 				columns: Type.Array(
@@ -995,7 +995,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				),
 				description: Type.Optional(Type.String({ description: "What this table records" })),
 				auto: Type.Optional(
-					Type.Boolean({ description: "true = scribe auto-maintains + full context injection every turn; default false" }),
+					Type.Boolean({ description: "true = scribe auto-maintains every turn; default false. Content is never injected either way — query with table_query" }),
 				),
 			}),
 			async execute(_id, params) {
@@ -1015,7 +1015,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 					...(r.applied ?? []).map((a) => `✓ ${a}`),
 					...(r.warnings ?? []).map((w) => `⚠ ${w}`),
 				];
-				if (params.auto) lines.push("（auto 表：场记每轮自动维护并全量注入上下文，无需主演手动写）");
+				if (params.auto) lines.push("（auto 表：场记每轮自动维护，主演无需手动写）");
 				return {
 					content: [{ type: "text", text: lines.join("\n") || "（无变更）" }],
 					details: { state },
@@ -1028,7 +1028,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			name: "table_list",
 			label: "列出自定义表格",
 			description:
-				"List all custom tables: name, columns, row count, auto flag, description. auto tables are already fully injected into context each turn; non-auto tables appear here only as an index — read their content with table_query.",
+				"List all custom tables: name, columns, row count, auto flag, description. Table content is never injected into context — read any table with table_query when you need its rows.",
 			parameters: Type.Object({}),
 			async execute() {
 				const tables = state.tables ?? {};
@@ -1146,7 +1146,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			name: "table_query",
 			label: "查询表格内容",
 			description:
-				"Query rows of a custom table. Without `filter` returns all rows; with a filter returns only rows where every filter key equals the stored value. Use this to read non-auto reference tables — their content is NOT injected into context automatically.",
+				"Query rows of a custom table. Without `filter` returns all rows; with a filter returns only rows where every filter key equals the stored value. Table content is never injected into context — use this to read any table you need.",
 			parameters: Type.Object({
 				table: Type.String({ description: "Table name" }),
 				filter: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Optional row selector" })),
@@ -1202,7 +1202,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 							{ description: "列定义，至少 1 列" },
 						),
 						auto: Type.Optional(
-							Type.Boolean({ description: "true = 物化后由场记自动维护 + 全量注入；缺省 false" }),
+							Type.Boolean({ description: "true = 物化后由场记自动维护；缺省 false（内容不注入，需用时 table_query 查）" }),
 						),
 						instructions: Type.Optional(Type.String({ description: "维护规则（供场记/模型参考）" })),
 					}),

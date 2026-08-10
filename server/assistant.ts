@@ -932,7 +932,7 @@ function createStagehandTools(
 				),
 				description: Type.Optional(Type.String({ description: "表用途说明（给模型看的）" })),
 				auto: Type.Optional(
-					Type.Boolean({ description: "true = 场记每轮自动维护 + 全量注入上下文；缺省 false（静态参考表）" }),
+					Type.Boolean({ description: "true = 场记每轮自动维护；缺省 false。无论是否 auto，内容都不注入上下文，需用时用 table_query 查" }),
 				),
 			}),
 			async execute(_id, params) {
@@ -951,7 +951,7 @@ function createStagehandTools(
 			name: "table_list",
 			label: "列自定义表",
 			description:
-				"列出当前世界状态里的全部自定义表（表名、列名、行数、auto 标记、说明）。非 auto 表内容不会自动进上下文，明细需用 table_query 取。",
+				"列出当前世界状态里的全部自定义表（表名、列名、行数、auto 标记、说明）。所有表内容都不进上下文，明细需用 table_query 取。",
 			parameters: Type.Object({}),
 			async execute() {
 				const state = bridge.worldState();
@@ -1042,7 +1042,7 @@ function createStagehandTools(
 			name: "table_query",
 			label: "查询自定义表",
 			description:
-				"查询自定义表内容。filter 为 JSON 对象字符串（键值相等过滤，可省略 = 返回全部行）。非 auto 表的内容不会自动进上下文，取明细用本工具。",
+				"查询自定义表内容。filter 为 JSON 对象字符串（键值相等过滤，可省略 = 返回全部行）。表内容不会自动进上下文，取明细用本工具。",
 			parameters: Type.Object({
 				table: Type.String({ description: "表名" }),
 				filter: Type.Optional(Type.String({ description: "JSON 对象字符串（过滤条件，键值相等；省略返回全部行）" })),

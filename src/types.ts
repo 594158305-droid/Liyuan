@@ -64,7 +64,7 @@ export interface CustomTable {
 	description?: string;
 	columns: CustomTableColumn[];
 	rows: Record<string, unknown>[];
-	/** true = 场记每轮自动维护 + 每轮全量注入上下文；非 auto 表只注入索引，内容走 table_query */
+	/** true = 场记每轮自动维护；内容不注入上下文，与其它表一样走索引 + table_query 现查 */
 	auto?: boolean;
 }
 
@@ -73,7 +73,7 @@ export interface TableTemplate {
 	name: string;
 	description?: string;
 	columns: CustomTableColumn[];
-	/** true = 场记自动维护 + 每轮全量注入（建表时写入 CustomTable.auto） */
+	/** true = 场记自动维护（建表时写入 CustomTable.auto；内容不注入上下文） */
 	auto?: boolean;
 	/** 表格说明（TavernDB note；物化时并入表 description） */
 	note?: string;
