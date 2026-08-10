@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { applyTableOperation } from "./state.ts";
 import type { CustomTableColumn, TableColumnType, TableTemplate, TableTemplateDef, WorldState } from "./types.ts";
+import { TABLE_DISCIPLINE } from "./table-discipline.ts";
 
 /** 模板存储目录（相对项目根；与其它 .liyuan-* 数据目录同级） */
 export const TEMPLATES_DIR = ".liyuan-templates";
@@ -349,9 +350,17 @@ export function materializeTemplate(
 			warnings.push(`表「${t.name}」已存在，跳过（模板幂等物化）`);
 			continue;
 		}
-		// 表 description = [description, note, initNode, insertNode, updateNode, deleteNode] 合并
-		// （旧模板 instructions 兜底），让助手/场记在表描述里看到维护规则
-		const descParts = [t.description, t.note, t.initNode, t.insertNode, t.updateNode, t.deleteNode];
+		// 表 description = [全局填表纪律, description, note, initNode, insertNode, updateNode, deleteNode] 合并
+		// （纪律前置：场记/回填/UI 第一眼看到执行层红线；旧模板 instructions 兜底）
+		const descParts = [
+			TABLE_DISCIPLINE,
+			t.description,
+			t.note,
+			t.initNode,
+			t.insertNode,
+			t.updateNode,
+			t.deleteNode,
+		];
 		if (t.instructions) descParts.push(t.instructions);
 		const description = descParts.filter((x): x is string => Boolean(x?.trim())).join("\n");
 		const r = applyTableOperation(state, {

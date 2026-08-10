@@ -181,8 +181,10 @@ test("materializeTemplate：建表 + instructions 并入 description + auto 传�
 	assert.equal(t.rows.length, 0, "只建结构不填数据");
 	assert.ok(t.description!.includes("用途说明"), "description 原样写入");
 	assert.ok(t.description!.includes("每轮更新体力"), "instructions 并入 description");
-	// 无 description/instructions 的表 → description 缺省
-	assert.equal(state.tables!["世界观设定"].description, undefined);
+	assert.ok(t.description!.startsWith("【全局填表纪律】"), "全局纪律注入在 description 最前");
+	// 无 description/instructions 的表 → description 仅含全局纪律
+	assert.ok(state.tables!["世界观设定"].description?.includes("【全局填表纪律】"), "纪律仍注入");
+	assert.ok(!(state.tables!["世界观设定"].description ?? "").includes("每轮更新体力"), "不混入他表内容");
 });
 
 test("materializeTemplate：幂等——已存在的表跳过不重复建", () => {

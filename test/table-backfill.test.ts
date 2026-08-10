@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
 	buildTableBackfillPrompt,
 	parseTableBackfillOps,
+	relatedTableNames,
 	runTableBackfill,
 	type TableBackfillDeps,
 } from "../src/table-backfill.ts";
@@ -46,10 +47,45 @@ test("buildTableBackfillPrompt：含表名/列名/当前状态/历史片段", ()
 	assert.ok(systemPrompt.includes("姓名"), "system 含列名");
 	assert.ok(systemPrompt.includes("体力（integer）"), "system 含列类型");
 	assert.ok(systemPrompt.includes("insert"), "system 说明输出格式");
+	assert.ok(systemPrompt.includes("全局填表纪律"), "system 注入全局纪律");
+	assert.ok(systemPrompt.includes("只填事实"), "纪律含不编造约束");
+	assert.ok(systemPrompt.includes("信息隔离"), "纪律含隔离约束");
+	assert.ok(systemPrompt.includes("引用不是搬运"), "纪律含关联约束");
 	assert.ok(userText.includes("主角信息"), "user 含当前表状态");
 	assert.ok(userText.includes("我刚喝了药"), "user 含历史片段");
 	assert.ok(userText.includes("【当前表状态】"));
 	assert.ok(userText.includes("【历史片段】"));
+	assert.ok(userText.includes("【关联表数据】"), "user 有关联表块");
+});
+
+test("buildTableBackfillPrompt：关联表数据注入 userText", () => {
+	const table: CustomTable = {
+		name: "在场角色表",
+		columns: [{ name: "姓名" }],
+		rows: [{ 姓名: "黎维塔" }],
+		description: "记录在场角色。涉及地点必须与世界地图点表一致。",
+	};
+	const related: Record<string, CustomTable> = {
+		世界地图点: { name: "世界地图点", columns: [{ name: "地点名称" }], rows: [{ 地点名称: "夙世酒馆" }] },
+	};
+	const { userText } = buildTableBackfillPrompt(table, JSON.stringify(table), "片段", related);
+	assert.ok(userText.includes("世界地图点"), "关联表名出现");
+	assert.ok(userText.includes("夙世酒馆"), "关联表行数据出现");
+	assert.ok(userText.includes("禁止写入"), "关联表标注只读");
+});
+
+test("relatedTableNames：description 提到其他表才命中，排除自身与无关表", () => {
+	const all: Record<string, CustomTable> = {
+		世界地图点: { name: "世界地图点", columns: [{ name: "地点名称" }], rows: [] },
+		全局数据表: { name: "全局数据表", columns: [{ name: "当前详细地点" }], rows: [] },
+		物品表: { name: "物品表", columns: [{ name: "物品名称" }], rows: [] },
+	};
+	assert.deepEqual(
+		relatedTableNames("地点必须与「世界地图点」表保持一致。", all, "全局数据表"),
+		["世界地图点"],
+		"命中被引用表，排除自身",
+	);
+	assert.deepEqual(relatedTableNames("无引用。", all), [], "无引用不命中");
 });
 
 test("parseTableBackfillOps：合法 JSON / 围栏 / 前言带 { / 垃圾输入", () => {

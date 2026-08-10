@@ -14,6 +14,7 @@ import { applyTableOperation } from "./state.ts";
 import { branchHistory } from "./stage/compact.ts";
 import type { BranchEntryLike } from "./stage/assemble.ts";
 import type { CustomTable, WorldState } from "./types.ts";
+import { TABLE_DISCIPLINE } from "./table-discipline.ts";
 
 /** 提取器输出：三类操作（与 applyTableOperation 的 insert/update/delete 一一对应） */
 export interface TableBackfillOps {
@@ -30,13 +31,17 @@ export function buildTableBackfillPrompt(
 	table: CustomTable,
 	stateSnapshot: string,
 	chunkText: string,
+	relatedTables?: Record<string, CustomTable>,
 ): { systemPrompt: string; userText: string } {
 	const columns = table.columns.map((c) => (c.type ? `${c.name}（${c.type}）` : c.name)).join("、");
 	const systemPrompt = `你是【表格数据提取器】。你的唯一工作：依据<正文数据>与<当前表格数据>，把与目标表「${table.name}」相关的数据以 JSON 操作形式写入该表。
 
 ## 数据来源
 - <当前表格数据>：目标表当前状态（列定义、表说明、已有行）——一切操作必须基于它，是操作基础。
+- <关联表数据>：目标表说明中引用的其他表（用于核对一致性，例如姓名/地点引用）。只读不写。
 - <正文数据>：一段历史剧情原文——数据来源，从中提取与目标表相关的实体与变化。
+
+${TABLE_DISCIPLINE}
 
 ## 目标表
 列定义：${columns}
@@ -74,9 +79,33 @@ ${stateSnapshot}
 【表说明（description，优先级最高）】
 ${table.description ?? "（无）"}
 
+【关联表数据】（表说明中引用的其他表，只用于核对一致性，禁止写入）
+${
+	relatedTables && Object.keys(relatedTables).length > 0
+		? Object.entries(relatedTables)
+				.map(([name, t]) => `表「${name}」（列：${t.columns.map((c) => c.name).join("、")}）：\n${JSON.stringify(t.rows)}`)
+				.join("\n\n")
+		: "（无）"
+}
+
 【历史片段】
 ${chunkText}`;
 	return { systemPrompt, userText };
+}
+
+/**
+ * 从目标表 description 里提取被引用的其他表名（与当前全部表名做包含匹配）。
+ * 目标表自身与匹配空串的键排除；命中即注入（可能命中与目标表无关的同名词，
+ * 但多带一张表比少带一张导致一致性核对失败更划算）。
+ */
+export function relatedTableNames(
+	description: string | undefined,
+	allTables: Record<string, CustomTable>,
+	excludeName?: string,
+): string[] {
+	if (!description) return [];
+	const names = Object.keys(allTables).filter((n) => n.trim().length > 0 && n !== excludeName);
+	return names.filter((n) => description.includes(n));
 }
 
 /**
@@ -220,12 +249,21 @@ export async function runTableBackfill(deps: TableBackfillDeps): Promise<
 	const maxRetries = deps.maxRetries ?? 5;
 	const baseDelay = deps.retryBaseDelayMs ?? 2000;
 	let rows = 0;
+	// 目标表说明中引用的其他表（多表一致性核对用；只读不写）——循环外算一次
+	let relatedTables: Record<string, CustomTable> | undefined;
 	for (let i = 0; i < chunks.length; i++) {
 		deps.onProgress?.(`回填 ${i + 1}/${chunks.length}…`);
 		// 当前表状态含此前各块已应用的行（增量式：后块只见前块之后的状态）
 		const current = deps.state.tables?.[deps.tableName];
 		if (!current) break; // 表被并发删掉（异常树）；收尾
-		const prompt = buildTableBackfillPrompt(current, JSON.stringify(current), chunks[i]);
+		if (!relatedTables) {
+			const names = relatedTableNames(current.description, deps.state.tables ?? {}, deps.tableName);
+			if (names.length > 0) {
+				relatedTables = {};
+				for (const n of names) relatedTables[n] = deps.state.tables![n]!;
+			}
+		}
+		const prompt = buildTableBackfillPrompt(current, JSON.stringify(current), chunks[i], relatedTables);
 		// 块级重试：失败（调用错误 / 输出垃圾）→ 2s 倍增退避重试，重试成功照样应用
 		let attempts = 0;
 		let done = false;

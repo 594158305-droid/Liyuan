@@ -2681,8 +2681,13 @@ async function backfillSideText(
 			{
 				apiKey: auth.apiKey,
 				headers: auth.headers,
-				maxTokens: 4096,
-				reasoning: "off",
+				// 大预算（2026-08-10 用户裁决，较初值 4096 放大 20 倍）：high 思考 + 多表/长剧情提取
+				// 需要充足输出空间；超限由 API 拒绝（旁路重试机制兜底）
+				maxTokens: 81920,
+				// 中等思考（2026-08-10 用户裁决）：填表/回放场记需按表规则推理，关思考引导质量差。
+				// deepseek-v4-flash 的 thinkingLevelMap 不支持 medium（minimal/low/medium 均为 null），
+				// clampThinkingLevel 会自动升档到 high；maxTokens 同步加大给推理预留预算（推理计入 token）。
+				reasoning: "medium",
 				...(signal ? { signal } : {}),
 			},
 		);

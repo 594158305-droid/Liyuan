@@ -1961,7 +1961,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				userName: config.userName,
 			});
 			// 只抽 patch，输出短，token 上限收紧
-			const text = await sideComplete(c, prompt.systemPrompt, prompt.userText, 1024);
+			// 2026-08-10 放大 10 倍（10240）：场记要维护 auto 表（高思考档下推理计入 token），1024 必然写不满
+			const text = await sideComplete(c, prompt.systemPrompt, prompt.userText, 10240);
 			if (!text) return;
 			const result = parseScribeResult(text);
 			if (!result) {
@@ -2707,7 +2708,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				});
 				let scribeText: string | null = null;
 				try {
-					scribeText = await sideCompleteWithRetry(ctx, scribePrompt.systemPrompt, scribePrompt.userText, 2048);
+					scribeText = await sideCompleteWithRetry(ctx, scribePrompt.systemPrompt, scribePrompt.userText, 20480);
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					console.log(`[import] 场记建账失败：${msg}`);
@@ -2744,7 +2745,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 							charName: card.name,
 							sideText: async (sys, user) => {
 								try {
-									return (await sideComplete(ctx, sys, user, 4096)) ?? { error: "空响应" };
+									// 与 server 旁路同预算（81920）：high 思考 + 多表提取需充足输出空间
+									return (await sideComplete(ctx, sys, user, 81920)) ?? { error: "空响应" };
 								} catch (err) {
 									return { error: err instanceof Error ? err.message : String(err) };
 								}
@@ -2803,7 +2805,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				charName: card.name,
 				sideText: async (sys, user) => {
 					try {
-						const text = await sideComplete(ctx, sys, user, 4096);
+						// 与 server 旁路同预算（81920）：high 思考 + 单表多块提取需充足输出空间
+						const text = await sideComplete(ctx, sys, user, 81920);
 						return text ?? { error: "空响应" };
 					} catch (err) {
 						return { error: err instanceof Error ? err.message : String(err) };
