@@ -1807,7 +1807,8 @@ const restHost: RestHost = {
 	/**
 	 * 从当前分支全部消息正文剥离指定 slotId 的 [image:slotId] 占位符并保存（删除所有图时用）：
 	 * 逐条 extractEntryText → 独立成段的占位符连周围空白一起清（\n 收拢），内联残留清空 →
-	 * 有改动的经 editEntryViaStoryChannel（rp-edited-reply 通道）保存。
+	 * 有改动的经 editEntryViaStoryChannel（rp-edited-reply 通道）保存（skipScribe：占位符非叙事内容，
+	 * 2026-08-10 用户裁决删除图片不刷新场记）。
 	 * editEntryViaStoryChannel 对「目标之后已有更新角色回复」会失败（只清当前分支可安全编辑的），
 	 * 失败原因记入 errors 继续，不 console 刷屏。
 	 */
@@ -1843,7 +1844,8 @@ const restHost: RestHost = {
 				newText = newText.split(placeholder).join("");
 			}
 			if (newText === text) continue;
-			const r = await editEntryViaStoryChannel(entryId, newText);
+			// 2026-08-10 用户裁决：图片占位符不属于叙事内容，删除图片不刷新场记（跳过重记账模型调用）
+			const r = await editEntryViaStoryChannel(entryId, newText, { skipScribe: true });
 			if (r.ok) stripped++;
 			else errors.push(r.error ?? `条目 ${entryId} 保存失败`);
 		}
@@ -2375,7 +2377,11 @@ function applyDraftOpToText(text: string, patch: Record<string, unknown>): strin
  * 场记网关等待 → 目标条目仍在分支且其后无更新的角色回复（否则放弃）→
  * branchCommitToTarget 钉回 → sendCustomMessage rp-edited-reply → 旁路重记账 → resyncAll。
  */
-async function editEntryViaStoryChannel(entryId: string, newText: string): Promise<{ ok: boolean; error?: string }> {
+async function editEntryViaStoryChannel(
+	entryId: string,
+	newText: string,
+	opts?: { skipScribe?: boolean },
+): Promise<{ ok: boolean; error?: string }> {
 	const scribeGate = (globalThis as typeof globalThis & {
 		__liyuanScribeGateway__?: {
 			waitForScribeIdle: (ms?: number) => Promise<void>;
@@ -2412,7 +2418,10 @@ async function editEntryViaStoryChannel(entryId: string, newText: string): Promi
 			}
 		}
 		if (userText.trim() && !isBackstageText(userText)) {
-			await scribeGate.scribeTurnOnceExported(userText, newText);
+			// skipScribe（如删除图片占位符）：正文改动不影响叙事/场记状态，跳过重记账模型调用
+			if (!opts?.skipScribe) {
+				await scribeGate.scribeTurnOnceExported(userText, newText);
+			}
 		}
 		resyncAll();
 		return { ok: true };
