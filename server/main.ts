@@ -2616,12 +2616,19 @@ const promptAssistant = async (host: AssistantHost, text: string) => {
 };
 
 // 生图管线规划 LLM（draw-pipeline）：注册旁路实现，与场记/压缩同款 streamSimple 通道。
-// settings.llm 可覆盖 provider/model（经 modelRegistry 查找）；缺省跟随剧情模型（session.model）。
+// 模型解析优先级：settings.llm（draw 局部配置）→ sideModel（全局旁挂模型）→ 剧情模型（session.model）。
+// systemPrompt 最前拼破甲（sideJailbreak，2026-08-10 用户裁决）。
 registerPlannerCaller(async (prompt, llm) => {
 	const model = (() => {
 		if (llm?.provider && llm?.model) {
 			const m = session.modelRegistry.find(llm.provider, llm.model);
 			if (m) return m as never;
+		}
+		const sm = loadConfig(cwd).sideModel;
+		if (sm?.provider && sm?.id) {
+			const m = session.modelRegistry.find(sm.provider, sm.id);
+			if (m) return m as never;
+			console.warn(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
 		}
 		return session.model as never;
 	})();
@@ -2634,14 +2641,15 @@ registerPlannerCaller(async (prompt, llm) => {
 	const s = streamSimple(
 		model,
 		{
-			systemPrompt: prompt.system,
+			systemPrompt: sideJailbreakPrefix() + prompt.system,
 			messages: [{ role: "user", content: [{ type: "text", text: prompt.user }], timestamp: Date.now() }],
 		},
 		{
 			apiKey,
 			headers,
-			maxTokens: 4096,
-			reasoning: "off",
+			// 旁路参数统一（2026-08-10 用户裁决）：思考 medium + 大预算
+			maxTokens: 81920,
+			reasoning: "medium",
 		},
 	);
 	let final: AssistantMsgLike | null = null;
@@ -2658,24 +2666,44 @@ registerPlannerCaller(async (prompt, llm) => {
 	return text;
 });
 
+// 旁路 LLM 的旁挂模型与破甲解析（2026-08-10，sideModel/sideJailbreak 配置）：
+// - 旁挂模型：config.sideModel 存在且 modelRegistry 找得到 → 用之；否则回退剧情模型（session.model）。
+// - 破甲提示词：config.sideJailbreak 非空时固定拼接在 systemPrompt 最前（绕过模型限制用，用户主动配置）。
+// backfillSideText / registerPlannerCaller 共用；loadConfig 每次读盘 → 配置改动即时生效。
+
+/** 破甲前缀：非空时返回「破甲文本 + 空行」，供拼在旁路 systemPrompt 最前 */
+function sideJailbreakPrefix(): string {
+	const jb = loadConfig(cwd).sideJailbreak?.trim();
+	return jb ? `${jb}\n\n` : "";
+}
+
 // 表格历史回填（DESIGN-table-backfill §3）/ 原始导入（DESIGN-import-raw §2）：旁路文本调用，
-// 与场记/压缩/规划同款 streamSimple 通道。模型取当前剧情模型（session.model）；
-// 失败返回 {error}——调用方跳过该块继续，不中断整轮。signal 透传给 streamSimple 可中断。
+// 与场记/压缩/规划同款 streamSimple 通道。模型：旁挂模型（sideModel）→ 剧情模型兜底；
+// systemPrompt 最前拼破甲（sideJailbreak）；失败返回 {error}——调用方跳过该块继续。
+// signal 透传给 streamSimple 可中断。
 async function backfillSideText(
 	systemPrompt: string,
 	userText: string,
 	signal?: AbortSignal,
 ): Promise<string | { error: string }> {
 	try {
-		const model = session.model as never;
+		// 旁挂模型优先（modelRegistry 找不到回退剧情模型）
+		let model: unknown = null;
+		const sm = loadConfig(cwd).sideModel;
+		if (sm?.provider && sm?.id) {
+			model = session.modelRegistry.find(sm.provider, sm.id);
+			if (!model) console.warn(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
+		}
+		model = model ?? (session.model as never);
 		if (!model) return { error: "尚无可用模型（未配置剧情模型）" };
 		// 必须 await：getApiKeyAndHeaders 返回 Promise，缺 await 会解构到 Promise 实例（同 registerPlannerCaller 坑）
-		const auth = await session.modelRegistry.getApiKeyAndHeaders(model);
+		const auth = await session.modelRegistry.getApiKeyAndHeaders(model as never);
 		if (!auth.ok) return { error: auth.error ?? `无法解析 ${String((model as { provider?: string }).provider)} 的 API key` };
 		const s = streamSimple(
-			model,
+			model as never,
 			{
-				systemPrompt,
+				// 破甲固定在最前（2026-08-10 用户裁决：绕过模型限制；除每轮剧情场记外所有旁路生效）
+				systemPrompt: sideJailbreakPrefix() + systemPrompt,
 				messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
 			},
 			{

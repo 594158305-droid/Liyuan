@@ -276,6 +276,18 @@ export interface RpConfig {
 	 * 建账塞不下多张表）；≤ 阈值时由场记建账顺手填充。缺省 6。
 	 */
 	tableBackfillThreshold?: number;
+	/**
+	 * 旁挂模型（2026-08-10）：旁路 LLM 调用（表格回填/回放场记/导入建账与摘要/世界书别名/
+	 * 生图规划等）统一使用的独立模型。空 = 跟随剧情模型（session.model）。
+	 * 解析经 modelRegistry.find(provider, id)，找不到回退剧情模型。
+	 */
+	sideModel?: { provider: string; id: string };
+	/**
+	 * 破甲提示词（2026-08-10，可选）：固定拼接在旁路调用 systemPrompt 的最前面，
+	 * 用于绕过模型内容限制。除「每轮剧情场记」（agent_end 钩子）外所有旁路调用生效；
+	 * 空 = 不注入。用户主动配置，默认保护不变。
+	 */
+	sideJailbreak?: string;
 }
 
 export const DEFAULT_CONFIG: RpConfig = {

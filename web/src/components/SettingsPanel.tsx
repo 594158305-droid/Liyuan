@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { api, apiGet, apiPut, type RpConfigView } from "../api.ts";
+import { api, apiGet, apiPut, type ModelsResponse, type RpConfigView } from "../api.ts";
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
 import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
 
@@ -705,6 +705,8 @@ function ChatWindowSection() {
 
 export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
+	// 旁挂模型下拉的数据源（与连接面板同款：/api/models）
+	const modelsData = usePanelData(() => apiGet<ModelsResponse>("/api/models"), { cacheKey: "/api/models" });
 	const { busy, run } = useAction(toast);
 
 	const [scanDepth, setScanDepth] = useState(4);
@@ -714,6 +716,9 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	const [askMode, setAskMode] = useState(false);
 	const [dirty, setDirty] = useState(false);
 	const [dark, setDark] = useState(() => getTheme() === "dark");
+	// 旁挂模型 + 破甲（2026-08-10）：sideModelKey = "provider/id" 或 ""（跟随剧情模型）
+	const [sideModelKey, setSideModelKey] = useState("");
+	const [sideJailbreak, setSideJailbreak] = useState("");
 
 	useEffect(() => {
 		if (data) {
@@ -722,6 +727,8 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 			setCompactEvery(data.config.compactEveryNTurns ?? 30);
 			setBackendControl(data.config.backendControl !== false);
 			setAskMode(data.config.creationMode === "ask");
+			setSideModelKey(data.config.sideModel?.provider && data.config.sideModel.id ? `${data.config.sideModel.provider}/${data.config.sideModel.id}` : "");
+			setSideJailbreak(data.config.sideJailbreak ?? "");
 			setDirty(false);
 		}
 	}, [data]);
@@ -738,6 +745,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	const save = () =>
 		run(async () => {
 			// 只改本面板可见项；不碰 lorebook / importStripTags（由别处或默认处理）
+			const sm = sideModelKey.split("/");
 			await apiPut("/api/config", {
 				greeting: true,
 				scanDepth,
@@ -745,6 +753,8 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 				compactEveryNTurns: compactEvery,
 				backendControl,
 				creationMode: askMode ? "ask" : "silent",
+				sideModel: sm.length === 2 && sm[0] && sm[1] ? { provider: sm[0], id: sm[1] } : null,
+				sideJailbreak: sideJailbreak.trim(),
 			});
 			reload();
 		}, "已保存并重载会话");
@@ -833,6 +843,49 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 						</div>
 						<div className="field-hint">
 							开=询问档：剧情相关（含「我该怎么办」）一律戏内，用选择卡共创；关=静默档自行推进。戏外只办系统事，不处理剧情。
+						</div>
+					</section>
+
+					<section className="sp-section">
+						<h4>旁挂模型</h4>
+						<div className="field-row">
+							<span className="field-label">旁路模型</span>
+							<select
+								value={sideModelKey}
+								disabled={busy}
+								onChange={(e) => {
+									setSideModelKey(e.target.value);
+									touch();
+								}}
+								style={{ maxWidth: "100%" }}
+							>
+								<option value="">跟随剧情模型</option>
+								{(modelsData.data?.models ?? []).map((m) => (
+									<option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
+										{m.providerName} / {m.name}
+									</option>
+								))}
+							</select>
+						</div>
+						<div className="field-hint">
+							表格回填 / 导入建账与摘要 / 场记 / 生图规划等旁路调用统一使用的独立模型；空 = 跟随剧情模型。改动保存后立即生效。
+						</div>
+						<div style={{ marginTop: 8 }}>
+							<span className="field-label">破甲提示词（可选）</span>
+							<textarea
+								value={sideJailbreak}
+								disabled={busy}
+								rows={4}
+								placeholder="固定放在旁路提示词最前，用于绕过模型限制；留空不注入"
+								onChange={(e) => {
+									setSideJailbreak(e.target.value);
+									touch();
+								}}
+								style={{ width: "100%", boxSizing: "border-box" }}
+							/>
+						</div>
+						<div className="field-hint">
+							除每轮剧情场记外，所有旁路调用（回填/建账/摘要/规划）的 systemPrompt 最前都会带上这段文本。由你主动配置，谨慎使用。
 						</div>
 					</section>
 

@@ -313,6 +313,10 @@ export interface RpConfigView {
 	creationMode?: "ask" | "silent";
 	/** 固定楼层压缩：每 N 个叙事轮主动压缩一次早期正文（0=关闭主动压缩） */
 	compactEveryNTurns?: number;
+	/** 旁挂模型（旁路 LLM 统一使用；空 = 跟随剧情模型） */
+	sideModel?: { provider: string; id: string } | null;
+	/** 破甲提示词（可选，固定放旁路 systemPrompt 最前；空 = 不注入） */
+	sideJailbreak?: string;
 }
 
 export interface CardResponse {

@@ -465,23 +465,41 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	/** 旁侧模型调用（场记/审计/摘要/别名共用）。返回文本或 null；错误上抛由调用方定夺 */
 	type SideCtx = {
 		model?: Parameters<typeof completeSimple>[0];
-		modelRegistry: { getApiKeyAndHeaders: (m: never) => Promise<{ apiKey?: string; headers?: Record<string, string> }> };
+		modelRegistry: {
+			/** 按 provider/id 找模型（旁挂模型解析用；ExtensionContext 的 ModelRegistry 具备） */
+			find?: (provider: string, modelId: string) => unknown | undefined;
+			getApiKeyAndHeaders: (m: never) => Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+		};
 	};
+	/**
+	 * 旁路文本调用统一入口（2026-08-10 扩展）：
+	 * - 旁挂模型：config.sideModel 存在且 modelRegistry 找得到 → 用之；否则回退剧情模型（ctx.model）。
+	 * - 破甲：opts.jailbreak 缺省 true——systemPrompt 最前拼 config.sideJailbreak（绕过模型限制，用户主动配置）；
+	 *   每轮剧情场记（scribeTurnOnce）显式传 { jailbreak: false } 排除（2026-08-10 用户裁决）。
+	 */
 	const sideComplete = async (
 		ctx: SideCtx,
 		systemPrompt: string,
 		userText: string,
 		maxTokens: number,
 		signal?: AbortSignal,
+		opts?: { jailbreak?: boolean },
 	): Promise<string | null> => {
-		if (!ctx.model) return null;
-		const { apiKey, headers } = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model as never);
+		// 旁挂模型优先（找不到回退剧情模型；RP_DEBUG 下打印告警便于追踪）
+		let model: Parameters<typeof completeSimple>[0] | undefined = ctx.model;
+		const sm = config.sideModel;
+		if (sm?.provider && sm?.id) {
+			const m = ctx.modelRegistry.find?.(sm.provider, sm.id);
+			if (m) model = m as never;
+			else if (process.env.RP_DEBUG) console.error(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
+		}
+		if (!model) return null;
+		const { apiKey, headers } = await ctx.modelRegistry.getApiKeyAndHeaders(model as never);
+		const jb = opts?.jailbreak !== false ? (config.sideJailbreak ?? "").trim() : "";
+		const sys = jb ? `${jb}\n\n${systemPrompt}` : systemPrompt;
 		const response = await completeSimple(
-			ctx.model,
-			{
-				systemPrompt,
-				messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
-			},
+			model as never,
+			{ systemPrompt: sys, messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
 			{ apiKey, headers, signal, maxTokens },
 		);
 		if (response.stopReason === "error") {
@@ -1962,7 +1980,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			});
 			// 只抽 patch，输出短，token 上限收紧
 			// 2026-08-10 放大 10 倍（10240）：场记要维护 auto 表（高思考档下推理计入 token），1024 必然写不满
-			const text = await sideComplete(c, prompt.systemPrompt, prompt.userText, 10240);
+			// jailbreak:false——每轮剧情场记排除破甲（2026-08-10 用户裁决：破甲只给手动/批量类旁路）
+			const text = await sideComplete(c, prompt.systemPrompt, prompt.userText, 10240, undefined, { jailbreak: false });
 			if (!text) return;
 			const result = parseScribeResult(text);
 			if (!result) {

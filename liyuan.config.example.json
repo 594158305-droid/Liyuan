@@ -13,6 +13,8 @@
 	"creationMode": "ask",
 	"importStripTags": [],
 	"tableBackfillThreshold": 6,
+	"sideModel": null,
+	"sideJailbreak": "",
 	"greetingIndex": 0,
 	"plugins": {},
 	"agents": [

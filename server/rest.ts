@@ -889,6 +889,8 @@ const CONFIG_EDITABLE = new Set([
 	"backendControl",
 	"creationMode",
 	"assistantModel",
+	"sideModel",
+	"sideJailbreak",
 	"agents",
 	"plugins",
 ]);
@@ -936,6 +938,22 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 			delete next.assistantModel;
 		} else {
 			next.assistantModel = { provider: am.provider, id: am.id };
+		}
+	}
+	// 旁挂模型：只认 { provider, id } 形；非法值删除（缺省=跟随剧情模型）
+	if (next.sideModel !== undefined) {
+		const sm = next.sideModel as { provider?: unknown; id?: unknown } | null;
+		if (
+			!sm ||
+			typeof sm !== "object" ||
+			typeof sm.provider !== "string" ||
+			!sm.provider ||
+			typeof sm.id !== "string" ||
+			!sm.id
+		) {
+			delete next.sideModel;
+		} else {
+			next.sideModel = { provider: sm.provider, id: sm.id };
 		}
 	}
 	// 挂载书：lorebooks 数组优先；兼容旧单本 lorebook
