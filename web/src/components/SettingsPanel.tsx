@@ -986,6 +986,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 						<div className="field-row">
 							<span className="field-label">旁路模型</span>
 							<select
+								className="field-input"
 								value={sideModelKey}
 								disabled={busy}
 								onChange={(e) => {
@@ -1008,6 +1009,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 						<div style={{ marginTop: 8 }}>
 							<span className="field-label">破甲提示词（可选）</span>
 							<textarea
+								className="field-input"
 								value={sideJailbreak}
 								disabled={busy}
 								rows={4}
