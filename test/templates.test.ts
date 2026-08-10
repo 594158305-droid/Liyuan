@@ -187,7 +187,7 @@ test("materializeTemplate：建表 + instructions 并入 description + auto 传�
 	assert.ok(!(state.tables!["世界观设定"].description ?? "").includes("每轮更新体力"), "不混入他表内容");
 });
 
-test("materializeTemplate：幂等——已存在的表跳过不重复建", () => {
+test("materializeTemplate：幂等——已存在的表覆写说明不重复建", () => {
 	const state = defaultState();
 	const def: TableTemplateDef = {
 		name: "主角档案",
@@ -195,9 +195,9 @@ test("materializeTemplate：幂等——已存在的表跳过不重复建", () =
 	};
 	materializeTemplate(state, def);
 	const r2 = materializeTemplate(state, def);
-	assert.equal(r2.applied.length, 0, "第二次不再建表");
+	assert.equal(r2.applied.length, 1, "第二次只覆写说明不再建表");
 	assert.equal(r2.warnings.length, 1);
-	assert.ok(r2.warnings[0].includes("已存在"));
+	assert.ok(r2.warnings[0].includes("已存在，说明已按模板覆写"), "警告注明说明已覆写");
 	assert.equal(Object.keys(state.tables!).length, 1);
 });
 
@@ -209,14 +209,17 @@ test("materializeTemplate：旧状态无 tables 字段时自动初始化", () =>
 	assert.ok(state.tables?.["表"]);
 });
 
-test("materializeTemplate：建表填初始行 + note/触发器并入 description + 幂等不重复插", () => {
+test("materializeTemplate：建表填初始行 + note/触发器并入 description + 幂等覆写说明不重复插", () => {
 	const state = defaultState();
 	const def: TableTemplateDef = {
 		name: "主角档案",
 		tables: [
 			{
 				name: "主角信息表",
-				columns: [{ name: "姓名" }, { name: "体力", type: "integer" }],
+				columns: [
+					{ name: "姓名" },
+					{ name: "体力", type: "integer", description: "体力值（0~100）" },
+				],
 				note: "每轮维护的主角状态",
 				updateNode: "每轮更新体力",
 				initNode: "建档时初始化",
@@ -233,6 +236,8 @@ test("materializeTemplate：建表填初始行 + note/触发器并入 descriptio
 
 	const t = state.tables!["主角信息表"];
 	assert.equal(t.auto, undefined, "模板未标 auto 不写 auto");
+	// 列说明随物化落地（dedupeColumns 保留 description）
+	assert.equal(t.columns[1].description, "体力值（0~100）", "列 description 落地");
 	// 初始行填入且列类型做 advisory 转换（integer ← "80"）
 	assert.deepEqual(t.rows, [
 		{ 姓名: "小明", 体力: 80 },
@@ -242,11 +247,20 @@ test("materializeTemplate：建表填初始行 + note/触发器并入 descriptio
 	assert.ok(t.description!.includes("每轮更新体力"), "updateNode 并入 description");
 	assert.ok(t.description!.includes("建档时初始化"), "initNode 并入 description");
 
-	// 幂等：第二次不建表、不重复插初始行
+	// 幂等：第二次不建表、不重复插初始行，但覆写说明（模板为真值源）
 	const r2 = materializeTemplate(state, def);
-	assert.equal(r2.applied.length, 0, "第二次不再建表/插行");
-	assert.ok(r2.warnings.some((w) => w.includes("已存在")));
+	assert.equal(r2.applied.length, 1, "第二次只覆写说明不建表/插行");
+	assert.ok(r2.warnings.some((w) => w.includes("已存在，说明已按模板覆写")));
 	assert.equal(state.tables!["主角信息表"].rows.length, 2, "初始行不重复插入");
+
+	// 列结构不一致 → 跳过并警告
+	const def2: TableTemplateDef = {
+		name: "主角档案",
+		tables: [{ name: "主角信息表", columns: [{ name: "姓名" }, { name: "新列" }], auto: true }],
+	};
+	const r3 = materializeTemplate(state, def2);
+	assert.equal(r3.applied.length, 0, "列结构不一致不覆写");
+	assert.ok(r3.warnings.some((w) => w.includes("列结构与模板不一致")), "警告注明差异");
 });
 
 test("loadTemplate 向后兼容：旧模板 instructions 读时映射到 updateNode", () => {

@@ -410,7 +410,7 @@ function coerceCell(type: TableColumnType | undefined, value: unknown): unknown 
 	}
 }
 
-/** 列名去重（空白列名一并丢弃） */
+/** 列名去重（空白列名一并丢弃；列 description 保留——模板列说明随物化落地） */
 function dedupeColumns(columns: CustomTableColumn[]): CustomTableColumn[] {
 	const seen = new Set<string>();
 	const out: CustomTableColumn[] = [];
@@ -418,7 +418,9 @@ function dedupeColumns(columns: CustomTableColumn[]): CustomTableColumn[] {
 		const n = c.name.trim();
 		if (!n || seen.has(n)) continue;
 		seen.add(n);
-		out.push(c.type ? { name: n, type: c.type } : { name: n });
+		const col: CustomTableColumn = c.description ? { name: n, description: c.description } : { name: n };
+		if (c.type) col.type = c.type;
+		out.push(col);
 	}
 	return out;
 }

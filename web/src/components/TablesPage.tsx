@@ -1064,25 +1064,34 @@ export function TablesPage({
 												<IconChevronDown size={14} />
 											</button>
 										</div>
-										{!collapsed["triggers"] && (
-											<div className="tbl-card-body">
-												{TRIGGER_BLOCKS.map((t) => (
-													<label className="tbl-trigger" key={t.key}>
-														<span className="tbl-trigger-label">
-															{t.label}
-															<span className="tbl-trigger-hint">{t.hint}</span>
-														</span>
-														<textarea
-															className="tbl-input tbl-input-ta"
-															rows={3}
-															placeholder={`${t.label}规则（可选）`}
-															value={curTableDef[t.key] ?? ""}
-															onChange={(e) => setTableField(t.key, e.target.value)}
-														/>
-													</label>
-												))}
-											</div>
-										)}
+										{!collapsed["triggers"] &&
+											(TRIGGER_BLOCKS.every((t) => !(curTableDef[t.key] ?? "")) ? (
+												/* 四触发器全空：维护规则已并入「表格说明」（引擎不支持 SQL 触发器语法） */
+												<div className="tbl-card-body">
+													<div className="tbl-card-hint">
+														本模板的维护规则已并入上方「表格说明」——引擎不支持 SQL 触发器语法（initNode/insertNode/updateNode/deleteNode 仅为 TavernDB 导入兼容保留），
+														规则统一写在「表格说明」里即可生效。
+													</div>
+												</div>
+											) : (
+												<div className="tbl-card-body">
+													{TRIGGER_BLOCKS.map((t) => (
+														<label className="tbl-trigger" key={t.key}>
+															<span className="tbl-trigger-label">
+																{t.label}
+																<span className="tbl-trigger-hint">{t.hint}</span>
+															</span>
+															<textarea
+																className="tbl-input tbl-input-ta"
+																rows={3}
+																placeholder={`${t.label}规则（可选）`}
+																value={curTableDef[t.key] ?? ""}
+																onChange={(e) => setTableField(t.key, e.target.value)}
+															/>
+														</label>
+													))}
+												</div>
+											))}
 									</div>
 								</>
 							)}

@@ -332,10 +332,41 @@ export function parseTavernDB(raw: unknown, fallbackName?: string): TableTemplat
 // ---------- 物化（DESIGN-template-system §2/§4） ----------
 
 /**
+ * 表 description 合并串（物化写入 / 覆写共用）：
+ * [全局填表纪律, description, note, initNode, insertNode, updateNode, deleteNode] 拼接
+ * （纪律前置：场记/回填/UI 第一眼看到执行层红线；旧模板 instructions 兜底）。
+ */
+function buildTableDescription(t: TableTemplate): string {
+	const parts = [
+		TABLE_DISCIPLINE,
+		t.description,
+		t.note,
+		t.initNode,
+		t.insertNode,
+		t.updateNode,
+		t.deleteNode,
+	];
+	if (t.instructions) parts.push(t.instructions);
+	return parts.filter((x): x is string => Boolean(x?.trim())).join("\n");
+}
+
+/** 列结构一致性（只看 name+type 序列，忽略 description——列说明允许模板侧覆写） */
+function sameColumnStructure(a: CustomTableColumn[], b: CustomTableColumn[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].name !== b[i].name) return false;
+		if ((a[i].type ?? undefined) !== (b[i].type ?? undefined)) return false;
+	}
+	return true;
+}
+
+/**
  * 把模板物化进世界状态：对每个表——不存在则 create（columns / auto / description 写入；
  * description = [description, note, initNode, insertNode, updateNode, deleteNode] 合并，避免改
- * CustomTable 类型），已有 rows 则建表后逐个 insert 填初始数据；表已存在跳过（幂等，不重复插）。
- * 返回 applied（建表/填数据摘要）与 warnings（已存在/失败/未知列丢弃）。
+ * CustomTable 类型），已有 rows 则建表后逐个 insert 填初始数据；
+ * **表已存在且列结构（name+type 序列）一致 → 覆写表 description 与逐列 description**（模板为
+ * 真值源：说明可随模板迭代更新，不碰 rows/列结构）；列结构不一致 → 跳过 + warning 注明差异。
+ * 返回 applied（建表/覆写/填数据摘要）与 warnings（已存在/失败/未知列丢弃）。
  * 注意：applyTableOperation 直接改传入 state——调用方须自行 clone（loadState 已返回新对象）。
  */
 export function materializeTemplate(
@@ -347,22 +378,28 @@ export function materializeTemplate(
 	for (const t of def.tables) {
 		const existing = state.tables?.[t.name];
 		if (existing) {
-			warnings.push(`表「${t.name}」已存在，跳过（模板幂等物化）`);
+			if (sameColumnStructure(existing.columns, t.columns)) {
+				const description = buildTableDescription(t);
+				if (description) existing.description = description;
+				// 逐列覆写列说明（模板列有说明才写；name 对齐）
+				let colsWritten = 0;
+				for (const tc of t.columns) {
+					const ec = existing.columns.find((c) => c.name === tc.name);
+					if (ec && tc.description) {
+						ec.description = tc.description;
+						colsWritten++;
+					}
+				}
+				warnings.push(
+					`表「${t.name}」已存在，说明已按模板覆写${colsWritten ? `（列说明 ${colsWritten} 个）` : ""}`,
+				);
+				applied.push(`表「${t.name}」说明已按模板更新`);
+			} else {
+				warnings.push(`表「${t.name}」已存在但列结构与模板不一致（模板 ${t.columns.map((c) => c.name).join("、")} vs 现有 ${existing.columns.map((c) => c.name).join("、")}），跳过——需删表后重新物化`);
+			}
 			continue;
 		}
-		// 表 description = [全局填表纪律, description, note, initNode, insertNode, updateNode, deleteNode] 合并
-		// （纪律前置：场记/回填/UI 第一眼看到执行层红线；旧模板 instructions 兜底）
-		const descParts = [
-			TABLE_DISCIPLINE,
-			t.description,
-			t.note,
-			t.initNode,
-			t.insertNode,
-			t.updateNode,
-			t.deleteNode,
-		];
-		if (t.instructions) descParts.push(t.instructions);
-		const description = descParts.filter((x): x is string => Boolean(x?.trim())).join("\n");
+		const description = buildTableDescription(t);
 		const r = applyTableOperation(state, {
 			kind: "create",
 			name: t.name,
