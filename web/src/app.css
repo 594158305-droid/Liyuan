@@ -8367,8 +8367,21 @@ label.drawer-btn {
 	padding: 2px;
 	z-index: 5;
 }
-.draw-slot-wrap:hover .draw-slot-actions {
-	display: flex;
+/* 不随图片 hover 弹出：操作条默认完全透明（不占视觉、不碍事），悬浮到操作条实际位置才显示。
+   隐藏态点击穿透（pointer-events:none），避免误触不可见的按钮；显示后恢复可点 */
+.draw-slot-actions {
+	opacity: 0;
+	transition: opacity 0.15s ease;
+}
+.draw-slot-actions .act {
+	pointer-events: none;
+}
+.draw-slot-actions:hover,
+.draw-slot-actions:focus-within {
+	opacity: 1;
+}
+.draw-slot-actions:hover .act {
+	pointer-events: auto;
 }
 .draw-slot-actions .act {
 	font-size: 11px;
@@ -9085,8 +9098,9 @@ label.drawer-btn {
 		max-width: 100%;
 	}
 }
-/* 右侧竖排工具条（hover 显示） */
+/* 右侧竖排工具条（常驻低可见度，悬浮到工具条本身才完全显示） */
 .draw-slot-actions {
+	display: flex;
 	flex-direction: column;
 	align-items: stretch;
 	top: 8px;
