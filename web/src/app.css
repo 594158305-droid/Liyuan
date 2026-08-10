@@ -837,6 +837,33 @@ html[data-theme="dark"] [data-tip]:focus-visible::after {
 	color: var(--text-faint);
 }
 
+/* 通用字段输入框（设置面板/登录页/世界线面板等）：
+   与 .panel-search 同观感，随主题变量昼夜自适应 */
+.field-input {
+	width: 100%;
+	box-sizing: border-box;
+	border: 1px solid var(--hairline-strong);
+	border-radius: var(--radius-s);
+	padding: 7px 10px;
+	font: inherit;
+	font-size: 13px;
+	color: var(--text);
+	background: var(--surface);
+	outline: none;
+	transition: border-color 0.15s;
+}
+.field-input:focus {
+	border-color: var(--accent);
+}
+.field-input::placeholder {
+	color: var(--text-faint);
+}
+textarea.field-input {
+	resize: vertical;
+	line-height: 1.5;
+	font-family: var(--font);
+}
+
 /* ── 聊天流:内容道居中(≈桌面 6 成) ── */
 .list {
 	flex: 1;
