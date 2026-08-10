@@ -656,6 +656,9 @@ function AccessSection({ toast }: { toast: (level: "info" | "warning" | "error",
 /** 主聊天「回合窗口化渲染」设置事件：App 监听后重读 localStorage 即时生效 */
 const CHAT_WINDOW_SETTINGS_EVENT = "liyuan:chat-window-settings";
 
+/** 界面自定义设置事件：App 监听后重读 localStorage 即时生效（默认收起用户消息） */
+const UI_CUSTOM_SETTINGS_EVENT = "liyuan:ui-custom-settings";
+
 /** 读取回合窗口设置（localStorage；未设置/非法值回落默认，clamp 到合法区间） */
 function readWindowSetting(key: string, fallback: number, min: number, max: number): number {
 	try {
@@ -669,18 +672,23 @@ function readWindowSetting(key: string, fallback: number, min: number, max: numb
 	return fallback;
 }
 
-/** 自定义 UI（页面宽度 + 字体比例）：纯本机显示设置，变更即时生效，不写服务端配置 */
+/** 自定义 UI（页面宽度 + 字体比例 + 默认收起用户消息）：纯本机显示设置，变更即时生效，不写服务端配置 */
 function UiCustomSection() {
 	const [chatW, setChatW] = useState(() => getUiCustom().chatW);
 	const [fontScale, setFontScale] = useState(() => getUiCustom().fontScale);
-	const apply = (next: { chatW?: number; fontScale?: number }) => {
+	const [collapseUser, setCollapseUser] = useState(() => getUiCustom().collapseUser);
+	const apply = (next: { chatW?: number; fontScale?: number; collapseUser?: boolean }) => {
 		const ui = {
 			chatW: next.chatW ?? chatW,
 			fontScale: next.fontScale ?? fontScale,
+			collapseUser: next.collapseUser ?? collapseUser,
 		};
 		applyUiCustom(ui);
 		if (next.chatW !== undefined) setChatW(ui.chatW);
 		if (next.fontScale !== undefined) setFontScale(ui.fontScale);
+		if (next.collapseUser !== undefined) setCollapseUser(ui.collapseUser);
+		// 聊天页监听后重读默认收起状态，即时生效
+		window.dispatchEvent(new Event(UI_CUSTOM_SETTINGS_EVENT));
 	};
 	return (
 		<>
@@ -705,12 +713,23 @@ function UiCustomSection() {
 				step={UI_FONT_STEP}
 				onChange={(v) => apply({ fontScale: v })}
 			/>
+			<div className="toggle-row">
+				<span>默认收起用户消息</span>
+				<Toggle
+					checked={collapseUser}
+					onChange={(v) => apply({ collapseUser: v })}
+					title="新加载/新发送的用户消息只显示楼层头，点展开才见正文与操作条"
+				/>
+			</div>
+			<div className="field-hint">
+				开=新消息默认收起（只露楼层头）；每条消息仍可在操作条里单独展开/收起，自己的选择即时覆盖默认。改动即时生效。
+			</div>
 			<div className="access-actions">
 				<button
 					type="button"
 					className="drawer-btn"
-					disabled={chatW === UI_DEFAULTS.chatW && fontScale === UI_DEFAULTS.fontScale}
-					onClick={() => apply({ chatW: UI_DEFAULTS.chatW, fontScale: UI_DEFAULTS.fontScale })}
+					disabled={chatW === UI_DEFAULTS.chatW && fontScale === UI_DEFAULTS.fontScale && collapseUser === UI_DEFAULTS.collapseUser}
+					onClick={() => apply({ chatW: UI_DEFAULTS.chatW, fontScale: UI_DEFAULTS.fontScale, collapseUser: UI_DEFAULTS.collapseUser })}
 				>
 					恢复默认
 				</button>

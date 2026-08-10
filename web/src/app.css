@@ -986,6 +986,45 @@ html[data-theme="dark"] [data-tip]:focus-visible::after {
 	user-select: none;
 }
 
+/* 用户消息收起态：只露楼层头，紧凑一栏 */
+.msg-collapsed {
+	padding: 8px 18px 8px 16px;
+}
+.msg-collapsed .msg-head {
+	margin-bottom: 0;
+}
+
+/* 收起态楼层头末尾的展开钮：与 floor 同排、hover 浮现 */
+.msg-head-expand {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	margin-left: 2px;
+	border: none;
+	border-radius: 6px;
+	background: none;
+	color: var(--text-faint);
+	cursor: pointer;
+	transition: color 0.15s, background 0.15s;
+}
+.msg-head-expand:hover {
+	color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+@media (hover: hover) {
+	.msg .msg-head-expand {
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+	.msg:hover .msg-head-expand,
+	.msg:focus-within .msg-head-expand {
+		opacity: 1;
+	}
+}
+
 .chip {
 	font-size: 11px;
 	color: var(--text-faint);

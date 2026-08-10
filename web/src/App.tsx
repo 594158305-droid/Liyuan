@@ -45,6 +45,7 @@ import { scriptRuntimes } from "./jsrunner/runtime.ts";
 import { LedgerScriptViews } from "./jsrunner/ui/LedgerScriptViews.tsx";
 import { ModalPanel } from "./jsrunner/ui/ModalPanel.tsx";
 import { registerTavernChatBridge } from "./tavernShim.ts";
+import { getUiCustom } from "./ui-custom.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
 import {
 	IconApi,
@@ -289,6 +290,20 @@ export default function App() {
 	/** 消息内联编辑：idx + 草稿 + 类型（用户改写后 reroll / agent 改写后 editreply） */
 	const [msgEdit, setMsgEdit] = useState<{ idx: number; kind: "user" | "narrative" | "greeting"; draft: string } | null>(
 		null,
+	);
+	/** 用户消息收起：用户逐条显式选择（idx → 是否收起），绝对优先于默认；未操作过的消息跟随默认 */
+	const [userCollapsedIdx, setUserCollapsedIdx] = useState<Map<number, boolean>>(() => new Map());
+	const [defaultCollapseUser, setDefaultCollapseUser] = useState(() => getUiCustom().collapseUser);
+	const toggleUserCollapsed = useCallback(
+		(idx: number) => {
+			setUserCollapsedIdx((m) => {
+				const n = new Map(m);
+				// 未操作过的消息以当前默认为基准翻转；显式选择后一直按用户意图
+				n.set(idx, !(n.get(idx) ?? defaultCollapseUser));
+				return n;
+			});
+		},
+		[defaultCollapseUser],
 	);
 	/** 手机端输入框左侧工具收纳：展开成上方一行（桌面端按钮常驻，此态无效） */
 	const [composerTools, setComposerTools] = useState(false);
@@ -1430,6 +1445,13 @@ export default function App() {
 		return () => window.removeEventListener("liyuan:chat-window-settings", reload);
 	}, []);
 
+	// 界面自定义变更即时生效：重读默认收起用户消息
+	useEffect(() => {
+		const reload = () => setDefaultCollapseUser(getUiCustom().collapseUser);
+		window.addEventListener("liyuan:ui-custom-settings", reload);
+		return () => window.removeEventListener("liyuan:ui-custom-settings", reload);
+	}, []);
+
 	/**
 	 * 场外标记粗判（仅 UX 用：发出后顺手展开助手面板）。
 	 * 路由权威在 server（src/stance.ts isBackstageText）——此处判错顶多少开一次面板。
@@ -2385,21 +2407,29 @@ export default function App() {
 																	}
 																: undefined
 														}
-														edit={
-															msgEdit && msgEdit.idx === b.idx
-																? {
-																		draft: msgEdit.draft,
-																		onChange: (v) => setMsgEdit((e) => (e ? { ...e, draft: v } : e)),
-																		onCancel: cancelMsgEdit,
-																		onSubmit: submitMsgEdit,
-																		submitLabel:
-																			msgEdit.kind === "user"
-																				? "按修改后的输入重新生成"
-																				: "采用改写（或未改时重新生成）",
-																	}
-																: undefined
-														}
-													/>
+							edit={
+								msgEdit && msgEdit.idx === b.idx
+									? {
+											draft: msgEdit.draft,
+											onChange: (v) => setMsgEdit((e) => (e ? { ...e, draft: v } : e)),
+											onCancel: cancelMsgEdit,
+											onSubmit: submitMsgEdit,
+											submitLabel:
+												msgEdit.kind === "user"
+													? "按修改后的输入重新生成"
+													: "采用改写（或未改时重新生成）",
+										}
+									: undefined
+							}
+							collapsed={
+								b.msg.channel === "user"
+									? userCollapsedIdx.get(b.idx) ?? defaultCollapseUser
+									: undefined
+							}
+							onToggleCollapsed={
+								b.msg.channel === "user" ? () => toggleUserCollapsed(b.idx) : undefined
+							}
+						/>
 												),
 											)}
 										</div>

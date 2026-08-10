@@ -28,8 +28,10 @@ import { DrawSlotImage } from "./draw-slot-image.tsx";
 /** 一档卡皮肤：显示向规则 + 宏名（Task 7 由 App 注入） */
 export type SkinProp = SkinMacros;
 import {
+	IconChevronDown,
 	IconChevronLeft,
 	IconChevronRight,
+	IconChevronUp,
 	IconCopy,
 	IconEdit,
 	IconImage,
@@ -697,6 +699,10 @@ export interface BubbleProps {
 	edit?: BubbleEditState;
 	/** 一档卡皮肤（显示层；缺省 null=与旧行为一致） */
 	skin?: SkinProp | null;
+	/** 用户消息收起态：只露楼层头（正文/附件/操作条隐藏），编辑态自动顶开 */
+	collapsed?: boolean;
+	/** 收起/展开切换（用户消息操作条末尾按钮 + 楼层头展开钮） */
+	onToggleCollapsed?: () => void;
 }
 
 export function Bubble({
@@ -718,6 +724,8 @@ export function Bubble({
 	swipe,
 	edit,
 	skin,
+	collapsed,
+	onToggleCollapsed,
 }: BubbleProps) {
 	if (msg.channel === "info") {
 		return <div className="info-line">{msg.text}</div>;
@@ -791,6 +799,8 @@ export function Bubble({
 	const { body, attachments } = isUser ? splitAttachments(msg.text) : { body: msg.text, attachments: [] };
 	const name = msg.name || fallbackName;
 	const editing = !!edit;
+	// 收起态：仅用户消息可收起，编辑中自动顶开（楼层头展开钮仍可见）
+	const collapsedUser = isUser && !!onToggleCollapsed && !!collapsed && !editing;
 	/**
 	 * 回合时间线：agent 回复才有（用户消息无过程），编辑态退回纯文本框。
 	 * 有多于一段时才按时间线渲染——单段正文走旧路径可保留整楼界面判定。
@@ -801,7 +811,7 @@ export function Bubble({
 	const stage = !isUser && !editing && isFullInterface(skinnedBody);
 	return (
 		<div
-			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${msg.edited ? "msg-edited" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""}`}
+			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${msg.edited ? "msg-edited" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""} ${collapsedUser ? "msg-collapsed" : ""}`}
 		>
 			{!stage && (
 				<div className="msg-head">
@@ -820,10 +830,21 @@ export function Bubble({
 					)}
 					{editing && <span className="chip chip-edit">编辑中</span>}
 					{floor !== undefined && <span className="floor">#{floor}</span>}
+					{collapsedUser && (
+						<button
+							type="button"
+							className="msg-head-expand"
+							onClick={onToggleCollapsed}
+							title="展开本条消息"
+							aria-label="展开本条消息"
+						>
+							<IconChevronDown size={14} />
+						</button>
+					)}
 				</div>
 			)}
 			{/* 有时间线时思考内联在时间线里（按发生顺序）；旧消息才走顶部固定块 */}
-			{!timeline && msg.thinking && !editing && (
+			{!timeline && msg.thinking && !editing && !collapsedUser && (
 				<ThinkingBlock text={msg.thinking} defaultOpen={msg.unfinished === true} />
 			)}
 			{editing ? (
@@ -857,6 +878,7 @@ export function Bubble({
 					</div>
 				</div>
 			) : (
+				!collapsedUser && (
 				<>
 					{/* 时间线态：思考/工具/正文按发生顺序依次上屏（codex 式）。
 					    附件仍取自正文尾行，故正文用时间线渲染、附件另挂。 */}
@@ -996,9 +1018,15 @@ export function Bubble({
 									{illustrateBusy ? "配图中…" : "配图"}
 								</button>
 							)}
+							{onToggleCollapsed && (
+								<button className="act" onClick={onToggleCollapsed} title="收起本条消息（只留楼层头）">
+									<IconChevronUp size={13} /> 收起
+								</button>
+							)}
 						</div>
 					)}
 				</>
+				)
 			)}
 		</div>
 	);
