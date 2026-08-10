@@ -126,7 +126,7 @@ powershell -File scripts/pack-for-linux.ps1
     -v "$PWD:/etc/searxng/" -v searxng-data:/var/cache/searxng/ \
     docker.io/searxng/searxng:latest
   ```
-  `settings.yml` 必须：`search.formats` 加 `json`（默认仅 html 会 403）、把 `baidu` / `bing`（建议加 `base_url: https://cn.bing.com`）的 `disabled` 改 `false` 启用中文引擎；验证 `curl http://127.0.0.1:8080/healthz` 返回 OK。完整配置见 `docs/DESIGN-websearch.md` §5。搜索后端可插拔（环境变量 `LIYUAN_WEBSEARCH_BACKEND`，预留 tavily）；SearXNG 是独立 Python 服务，梨园不捆绑、不自动拉起——避免为纯 Node 栈引入 Docker/Python 强依赖，想开箱即用可切云 API 后端（tavily 填 key 即可，预留中）；
+  `settings.yml` 必须：`search.formats` 加 `json`（默认仅 html 会 403）、把 `baidu` / `bing`（建议加 `base_url: https://cn.bing.com`）的 `disabled` 改 `false` 启用中文引擎；验证 `curl http://127.0.0.1:8080/healthz` 返回 OK。完整配置见 `docs/DESIGN-websearch.md` §5。搜索后端可插拔（环境变量 `LIYUAN_WEBSEARCH_BACKEND`：`searxng` 默认 / `tavily` 已实现，配 `LIYUAN_WEBSEARCH_TAVILY_API_KEY` 即可）；SearXNG 是独立 Python 服务，梨园不捆绑、不自动拉起——避免为纯 Node 栈引入 Docker/Python 强依赖，想开箱即用可切云 API 后端（tavily 填 key 即可）；
 - **语音（TTS）**：配置环境变量 `LIYUAN_TTS_BASE_URL` + `LIYUAN_TTS_API_KEY`（或直接用 `OPENAI_API_KEY`）后，agent 可用语音工具朗读；模型与音色用 `LIYUAN_TTS_MODEL` / `LIYUAN_TTS_VOICE` 指定；
 - **技能**：`.liyuan-skills/` 下的 markdown 即技能，可让 agent 自写（详见上文第 4 条），也可手写后在「扩展能力」面板控制是否暴露给 agent。
 

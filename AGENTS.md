@@ -11,9 +11,10 @@
 
 ## 快速索引（upstream 引入的分轮演出文档）
 
+- `docs/README.md` — 全量文档总索引（35 份分类/状态/待办汇总/文档↔代码对应/过时标注，2026-08-10 整理）
 - `docs/PLAN-ROUND-FLOW.md` — 分轮演出流程（最终形态 + 落地记录）
 - `docs/READING-THINKING.md` — 读思考记录的**正确方法**（先读这个再碰会话文件）
-- `docs/DRAFT-prompt-rp-agent.md` — 「怎么演这一拍」演出指导草稿（B 版）
+- `docs/DRAFT-prompt-rp-agent.md` — 「怎么演这一拍」演出指导草稿（B 版，已落地 assemble.ts:349，本文为底稿）
 - `src/stage/` — 台上引擎（assemble 提示词 / engine 回合循环 / workspace 稿纸 / tools 工具 schema）
 
 ## 命令

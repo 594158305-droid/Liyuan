@@ -2,6 +2,11 @@
 
 > 版本：M5 兼容性审计 · 适用代码基线：`web/src/jsrunner/*` + `server/script-events.ts` + `server/main.ts`（ext_generate / scriptEditMessage）
 > 目标：SillyTavern JS-Slash-Runner（TavernHelper）→ Liyuan 的能力等价移植，**旧脚本零改动**运行。
+>
+> ⚠ **部分内容与当前代码不符（2026-08-10 核对，详见 docs/README.md §4）**：
+> ① §3.2/§6 声称的服务端事件桥未接线——`server/script-events.ts` 的 `mapPiEventsToSt` 在 `server/main.ts` 零调用、`ext_event` 帧零广播，实际改前端投影（`web/src/jsrunner/events.ts:28-46`）；
+> ② `POST /api/script/message` 路由不存在（`web/src/jsrunner/helper.ts:311,320` 仍调用会 404，DESIGN-jsrunner-ledger.md §11 断链表第 6 项同此）；
+> ③ §5 缺口表中 G2/G6/G10 已修复但未更新。本文档保留为 M5 审计基线，缺口全表仍有效（G1–G12 逐条见 §5）。
 
 ---
 
