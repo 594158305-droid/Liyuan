@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, apiGet, apiPut, type ModelsResponse, type RpConfigView } from "../api.ts";
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
 import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { IconChevronDown } from "./icons.tsx";
 
 type MemoryStoreStats = {
 	id: string;
@@ -320,8 +321,7 @@ function MemorySection({ toast }: { toast: (level: "info" | "warning" | "error",
 	const extMax = data?.stores.find((s) => s.id === "external")?.maxChunks ?? "—";
 
 	return (
-		<section className="sp-section">
-			<h4>向量记忆</h4>
+		<>
 			<div className="field-hint">
 				按「当前角色卡 + 当前对话」隔离。
 				<strong>剧情数据库</strong>仅 agent 自动<strong>合并</strong>入库；
@@ -557,7 +557,7 @@ function MemorySection({ toast }: { toast: (level: "info" | "warning" | "error",
 					</div>
 				</div>
 			)}
-		</section>
+		</>
 	);
 }
 
@@ -592,8 +592,7 @@ function AccessSection({ toast }: { toast: (level: "info" | "warning" | "error",
 		}, turningOff ? "已关闭访问密码" : "已设置访问密码（其他设备需重新登录）");
 
 	return (
-		<section className="sp-section">
-			<h4>访问密码</h4>
+		<>
 			<div className="field-hint">
 				{required
 					? "已开启：所有设备访问本站都需输入密码。修改或关闭需先验证当前密码。"
@@ -639,7 +638,7 @@ function AccessSection({ toast }: { toast: (level: "info" | "warning" | "error",
 					</div>
 				</>
 			)}
-		</section>
+		</>
 	);
 }
 
@@ -659,6 +658,59 @@ function readWindowSetting(key: string, fallback: number, min: number, max: numb
 	return fallback;
 }
 
+/**
+ * 设置分区收放头：标题行可点击展开/收起，状态记 localStorage（刷新恢复）。
+ * 与表格卡同款视觉（tbl-card-fold 箭头旋转）。
+ */
+function CollapsibleSection({
+	title,
+	storageKey,
+	defaultOpen,
+	children,
+}: {
+	title: string;
+	storageKey: string;
+	defaultOpen: boolean;
+	children: React.ReactNode;
+}) {
+	const [open, setOpen] = useState(() => {
+		try {
+			const s = localStorage.getItem(storageKey);
+			if (s === "1") return true;
+			if (s === "0") return false;
+		} catch {
+			/* localStorage 不可用 */
+		}
+		return defaultOpen;
+	});
+	const toggle = () => {
+		setOpen((v) => {
+			const nv = !v;
+			try {
+				localStorage.setItem(storageKey, nv ? "1" : "0");
+			} catch {
+				/* 忽略写入失败 */
+			}
+			return nv;
+		});
+	};
+	return (
+		<section className="sp-section">
+			<div
+				className={`sp-section-head sp-collapsible-head ${open ? "" : "folded"}`}
+				onClick={toggle}
+				title={open ? "点击收起" : "点击展开"}
+			>
+				<h4>{title}</h4>
+				<span className="tbl-card-fold" aria-hidden="true">
+					<IconChevronDown size={14} />
+				</span>
+			</div>
+			{open && children}
+		</section>
+	);
+}
+
 /** 主聊天窗口（两层缓冲）：纯本机显示设置，变更即时生效，不写服务端配置 */
 function ChatWindowSection() {
 	const [n, setN] = useState(() => readWindowSetting("liyuan.chat.windowRounds", 5, 1, 50));
@@ -674,8 +726,7 @@ function ChatWindowSection() {
 		return val;
 	};
 	return (
-		<section className="sp-section">
-			<h4>主聊天窗口</h4>
+		<>
 			<div className="field-hint">
 				超长会话只渲染最新一段回合，上下滚动时窗口跟随平移，避免整页消息堆在 DOM 里。改动即时生效。
 			</div>
@@ -699,7 +750,7 @@ function ChatWindowSection() {
 					onChange={(e) => setM(apply("liyuan.chat.bufferRounds", Number(e.target.value), 0, 50))}
 				/>
 			</Field>
-		</section>
+		</>
 	);
 }
 
@@ -762,21 +813,25 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	return (
 		<div className="panel-body panel-body-sticky">
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
-			<section className="sp-section">
-				<h4>外观</h4>
+			<CollapsibleSection title="外观" storageKey="liyuan.settings.open.appearance" defaultOpen>
 				<div className="toggle-row">
 					<span>黑夜模式</span>
 					<Toggle checked={dark} onChange={onTheme} />
 				</div>
 				<div className="field-hint">白昼 / 黑夜立刻切换，偏好记在本机浏览器，与会话配置无关。</div>
-			</section>
-			<ChatWindowSection />
-			<AccessSection toast={toast} />
-			<MemorySection toast={toast} />
+			</CollapsibleSection>
+			<CollapsibleSection title="主聊天窗口" storageKey="liyuan.settings.open.chatWindow" defaultOpen>
+				<ChatWindowSection />
+			</CollapsibleSection>
+			<CollapsibleSection title="访问密码" storageKey="liyuan.settings.open.access" defaultOpen>
+				<AccessSection toast={toast} />
+			</CollapsibleSection>
+			<CollapsibleSection title="向量记忆" storageKey="liyuan.settings.open.memory" defaultOpen={false}>
+				<MemorySection toast={toast} />
+			</CollapsibleSection>
 			{data && (
 				<>
-					<section className="sp-section">
-						<h4>世界书</h4>
+					<CollapsibleSection title="世界书" storageKey="liyuan.settings.open.lorebook" defaultOpen>
 						<SliderField
 							label="关键词扫描深度"
 							hint="被动触发回看最近几条消息"
@@ -799,10 +854,9 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 								touch();
 							}}
 						/>
-					</section>
+					</CollapsibleSection>
 
-					<section className="sp-section">
-						<h4>上下文压缩</h4>
+					<CollapsibleSection title="上下文压缩" storageKey="liyuan.settings.open.compact" defaultOpen>
 						<SliderField
 							label="固定楼层压缩周期"
 							hint="每 N 个剧情轮把早期正文压成接力摘要（原文归档进剧情库可召回）；0 = 仅在上下文吃紧时被动压缩"
@@ -814,10 +868,9 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 								touch();
 							}}
 						/>
-					</section>
+					</CollapsibleSection>
 
-					<section className="sp-section">
-						<h4>agent 行为</h4>
+					<CollapsibleSection title="agent 行为" storageKey="liyuan.settings.open.agentBehavior" defaultOpen>
 						<div className="toggle-row">
 							<span>后端操控（bash / 文件等通用工具）</span>
 							<Toggle
@@ -844,10 +897,9 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 						<div className="field-hint">
 							开=询问档：剧情相关（含「我该怎么办」）一律戏内，用选择卡共创；关=静默档自行推进。戏外只办系统事，不处理剧情。
 						</div>
-					</section>
+					</CollapsibleSection>
 
-					<section className="sp-section">
-						<h4>旁挂模型</h4>
+					<CollapsibleSection title="旁挂模型" storageKey="liyuan.settings.open.sideModel" defaultOpen>
 						<div className="field-row">
 							<span className="field-label">旁路模型</span>
 							<select
@@ -887,7 +939,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 						<div className="field-hint">
 							除每轮剧情场记外，所有旁路调用（回填/建账/摘要/规划）的 systemPrompt 最前都会带上这段文本。由你主动配置，谨慎使用。
 						</div>
-					</section>
+					</CollapsibleSection>
 
 					<div className="sticky-save">
 						<button className="drawer-btn save-btn" disabled={busy || !dirty} onClick={save}>

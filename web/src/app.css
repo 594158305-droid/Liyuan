@@ -7875,6 +7875,27 @@ label.drawer-btn {
 	margin: 0;
 }
 
+/* 设置面板分区收放头：整行可点，箭头复用表格卡折叠样式（folded 旋转 -90°） */
+.sp-collapsible-head {
+	cursor: pointer;
+	user-select: none;
+	padding: 3px 0;
+	margin-bottom: 8px;
+	border-bottom: 1px solid var(--hairline);
+}
+.sp-collapsible-head h4 {
+	border-bottom: none;
+	padding-bottom: 0;
+	margin-bottom: 0;
+}
+.sp-collapsible-head:hover h4 {
+	color: var(--accent-strong);
+}
+.sp-collapsible-head .tbl-card-fold {
+	width: 18px;
+	height: 18px;
+}
+
 
 /* 标题行动作按钮紧凑化（避免 drawer-btn 的 8px 上下 padding 撑高标题行）。
    inline-flex：svg display:block 全局规则下图标仍与文字并排（同 .act）。 */

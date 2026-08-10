@@ -33,6 +33,7 @@ npm run pack:release:windows|linux|macos   # 单平台发布包
 - CI：`.github/workflows/ci.yml`——`npm test` 跑 ubuntu/windows/macos（node 22）；`smoke-web` 跑 ubuntu/macos；`start.sh`/`start.command` 在 macos 校验可执行与 LF。`web/` 是独立 package（有自己的 `web/package-lock.json`），CI 里 `npm --prefix web ci` 单独装前端依赖。
 - `TESTING.md` 是内测说明（反馈模板、已知边界）。
 - 服务无鉴权、默认绑 0.0.0.0：只准局域网/本机使用，禁止裸暴露公网。VPS 部署见 `deploy/`（install.sh / README.md）。
+- **开发测试必须换非默认端口**（如 `PORT=7621`）：7620 可能是正在运行的实例（用户/部署），占了它会打断别人；起服务一律 `PORT=7621`（或其它非 7620 端口）。
 
 ### Windows 下启动服务验证的正确姿势（血泪教训，别再踩）
 
