@@ -701,6 +701,20 @@ export function foldTurnNarratives(msgs: WireMsg[]): WireMsg[] {
 		if (m.channel === "narrative" || m.channel === "backstage") {
 			if (turnRoleIdx >= 0 && turnChannel === m.channel) {
 				const prev = out[turnRoleIdx];
+				// rp-edited-reply 是「版本覆盖」而非追加段：改后全文替换同轮前一叙事段，
+				// 不能拼接——否则原文+覆盖同时显示（正文重复，如图片嵌入 AB 间变 ABCAIBC）。
+				// 原文仍保留在会话树分支（可回滚），只是显示层以覆盖为准。
+				if (m.edited) {
+					const merged: WireMsg = {
+						...prev,
+						text: m.text,
+						...(m.raw ? { raw: m.raw } : {}),
+						edited: true,
+					};
+					delete merged.unfinished;
+					out[turnRoleIdx] = merged;
+					continue;
+				}
 				const thinking = join(prev.thinking, m.thinking);
 				const unfinished = prev.unfinished === true || m.unfinished === true;
 				const edited = prev.edited === true || m.edited === true;

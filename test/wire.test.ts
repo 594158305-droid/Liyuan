@@ -190,6 +190,50 @@ test("foldTurnNarratives：同一用户输入下多段 narrative 并成一泡", 
 	assert.equal(folded[4]?.text, "新轮正文");
 });
 
+test("foldTurnNarratives：rp-edited-reply（edited 段）覆盖同轮前一叙事段而非拼接——防正文重复", () => {
+	// 图片嵌入通道：分支里原文（ABC）与覆盖（AIBC）同在，折叠必须「覆盖」不能「拼接」，
+	// 否则前端看到 ABCAIBC（原文+改后全文拼接 = 正文重复）
+	const folded = foldTurnNarratives([
+		{ channel: "user", name: "旅人", text: "开始" },
+		{ channel: "narrative", name: "青梧", text: "ABC", thinking: "想1" },
+		{ channel: "narrative", name: "青梧", text: "A[image:slot-1]BC", edited: true },
+		{ channel: "user", name: "旅人", text: "下一轮" },
+	]);
+	assert.deepEqual(
+		folded.map((m) => m.channel),
+		["user", "narrative", "user"],
+	);
+	assert.equal(folded[1]?.text, "A[image:slot-1]BC");
+	assert.equal(folded[1]?.thinking, "想1"); // 原文思维链保留
+	assert.equal(folded[1]?.edited, true);
+});
+
+test("foldTurnNarratives：连续多条 edited 覆盖只保留最新", () => {
+	const folded = foldTurnNarratives([
+		{ channel: "user", name: "旅人", text: "开始" },
+		{ channel: "narrative", name: "青梧", text: "ABC" },
+		{ channel: "narrative", name: "青梧", text: "A[image:s1]BC", edited: true },
+		{ channel: "narrative", name: "青梧", text: "A[image:s1][image:s2]BC", edited: true },
+	]);
+	assert.equal(folded.length, 2);
+	assert.equal(folded[1]?.text, "A[image:s1][image:s2]BC");
+});
+
+test("toWireHistory：图片嵌入（原文 + rp-edited-reply 覆盖）输出单条叙事，正文不重复", () => {
+	const history = [
+		{ role: "user", content: "开始" },
+		{ role: "assistant", content: "ABC" },
+		{ role: "custom", customType: "rp-edited-reply", display: true, content: "A[image:slot-1]BC" },
+	];
+	const wired = toWireHistory(history, names);
+	assert.deepEqual(
+		wired.map((m) => m.channel),
+		["user", "narrative"],
+	);
+	assert.equal(wired[1]?.text, "A[image:slot-1]BC");
+	assert.equal(wired[1]?.edited, true);
+});
+
 test("show_image 工具结果 → image 通道；其他/出错的工具结果跳过", () => {
 	const ok = {
 		role: "toolResult",
