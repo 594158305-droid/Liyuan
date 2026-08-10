@@ -6,8 +6,10 @@ import { LoginGate } from "./LoginGate.tsx";
 import "./app.css";
 import { installParentTavernShim } from "./tavernShim.ts";
 import { initTheme } from "./theme.ts";
+import { initUiCustom } from "./ui-custom.ts";
 
 initTheme();
+initUiCustom();
 // 三档程序卡：父页 TavernHelper / TheaterAPI / 事件总线（iframe 经 parent 访问）
 installParentTavernShim();
 

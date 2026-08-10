@@ -9,6 +9,17 @@ import { api, apiGet, apiPut, type ModelsResponse, type RpConfigView } from "../
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
 import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { IconChevronDown } from "./icons.tsx";
+import {
+	applyUiCustom,
+	getUiCustom,
+	UI_CHAT_W_MAX,
+	UI_CHAT_W_MIN,
+	UI_CHAT_W_STEP,
+	UI_DEFAULTS,
+	UI_FONT_MAX,
+	UI_FONT_MIN,
+	UI_FONT_STEP,
+} from "../ui-custom.ts";
 
 type MemoryStoreStats = {
 	id: string;
@@ -658,6 +669,56 @@ function readWindowSetting(key: string, fallback: number, min: number, max: numb
 	return fallback;
 }
 
+/** 自定义 UI（页面宽度 + 字体比例）：纯本机显示设置，变更即时生效，不写服务端配置 */
+function UiCustomSection() {
+	const [chatW, setChatW] = useState(() => getUiCustom().chatW);
+	const [fontScale, setFontScale] = useState(() => getUiCustom().fontScale);
+	const apply = (next: { chatW?: number; fontScale?: number }) => {
+		const ui = {
+			chatW: next.chatW ?? chatW,
+			fontScale: next.fontScale ?? fontScale,
+		};
+		applyUiCustom(ui);
+		if (next.chatW !== undefined) setChatW(ui.chatW);
+		if (next.fontScale !== undefined) setFontScale(ui.fontScale);
+	};
+	return (
+		<>
+			<div className="field-hint">
+				页面宽度即聊天列宽度（屏幕两侧留白随之变化）；字体比例用整体缩放（间距/图标一起变，浏览器式缩放）。改动即时生效，仅本机浏览器记住。
+			</div>
+			<SliderField
+				label="页面宽度"
+				hint={`聊天列视觉宽度（${UI_CHAT_W_MIN}–${UI_CHAT_W_MAX}px，默认 ${UI_DEFAULTS.chatW}）`}
+				value={chatW}
+				min={UI_CHAT_W_MIN}
+				max={UI_CHAT_W_MAX}
+				step={UI_CHAT_W_STEP}
+				onChange={(v) => apply({ chatW: v })}
+			/>
+			<SliderField
+				label="字体比例"
+				hint={`全局缩放（${UI_FONT_MIN}%–${UI_FONT_MAX}%，默认 ${UI_DEFAULTS.fontScale}%）`}
+				value={fontScale}
+				min={UI_FONT_MIN}
+				max={UI_FONT_MAX}
+				step={UI_FONT_STEP}
+				onChange={(v) => apply({ fontScale: v })}
+			/>
+			<div className="access-actions">
+				<button
+					type="button"
+					className="drawer-btn"
+					disabled={chatW === UI_DEFAULTS.chatW && fontScale === UI_DEFAULTS.fontScale}
+					onClick={() => apply({ chatW: UI_DEFAULTS.chatW, fontScale: UI_DEFAULTS.fontScale })}
+				>
+					恢复默认
+				</button>
+			</div>
+		</>
+	);
+}
+
 /**
  * 设置分区收放头：标题行可点击展开/收起，状态记 localStorage（刷新恢复）。
  * 与表格卡同款视觉（tbl-card-fold 箭头旋转）。
@@ -819,6 +880,9 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 					<Toggle checked={dark} onChange={onTheme} />
 				</div>
 				<div className="field-hint">白昼 / 黑夜立刻切换，偏好记在本机浏览器，与会话配置无关。</div>
+			</CollapsibleSection>
+			<CollapsibleSection title="界面自定义" storageKey="liyuan.settings.open.uiCustom" defaultOpen={false}>
+				<UiCustomSection />
 			</CollapsibleSection>
 			<CollapsibleSection title="主聊天窗口" storageKey="liyuan.settings.open.chatWindow" defaultOpen>
 				<ChatWindowSection />
