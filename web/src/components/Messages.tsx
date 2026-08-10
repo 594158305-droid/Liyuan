@@ -830,19 +830,25 @@ export function Bubble({
 					)}
 					{editing && <span className="chip chip-edit">编辑中</span>}
 					{floor !== undefined && <span className="floor">#{floor}</span>}
-					{collapsedUser && (
-						<button
-							type="button"
-							className="msg-head-expand"
-							onClick={onToggleCollapsed}
-							title="展开本条消息"
-							aria-label="展开本条消息"
-						>
-							<IconChevronDown size={14} />
-						</button>
-					)}
-				</div>
-			)}
+						{collapsedUser && (
+							<button
+								type="button"
+								className="msg-head-expand"
+								onClick={onToggleCollapsed}
+								title="展开本条消息"
+								aria-label="展开本条消息"
+							>
+								<IconChevronDown size={14} />
+							</button>
+						)}
+					</div>
+				)}
+				{/* 收起态正文首行摘要：单行省略，保住信息预览（不整段丢内容） */}
+				{collapsedUser && body.trim() && (
+					<div className="msg-collapsed-preview" title={body.trim()}>
+						{firstLine(body)}
+					</div>
+				)}
 			{/* 有时间线时思考内联在时间线里（按发生顺序）；旧消息才走顶部固定块 */}
 			{!timeline && msg.thinking && !editing && !collapsedUser && (
 				<ThinkingBlock text={msg.thinking} defaultOpen={msg.unfinished === true} />

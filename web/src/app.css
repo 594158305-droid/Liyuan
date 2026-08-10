@@ -1013,12 +1013,25 @@ textarea.field-input {
 	user-select: none;
 }
 
-/* 用户消息收起态：只露楼层头，紧凑一栏 */
+/* 用户消息收起态：只露楼层头 + 正文首行摘要，紧凑一栏 */
 .msg-collapsed {
 	padding: 8px 18px 8px 16px;
 }
 .msg-collapsed .msg-head {
 	margin-bottom: 0;
+}
+
+/* 收起态正文首行摘要：单行省略，保住信息预览（不整段丢内容） */
+.msg-collapsed-preview {
+	font-size: 12.5px;
+	line-height: 1.5;
+	color: var(--text-faint);
+	margin-top: 4px;
+	padding-left: 42px; /* 与楼层头内名字对齐（头像 32 + 间距 10） */
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	user-select: none;
 }
 
 /* 收起态楼层头末尾的展开钮：与 floor 同排、hover 浮现 */
