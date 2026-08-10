@@ -358,12 +358,12 @@ export function GallerySection() {
 			flash(`已保存 ${target.length} 张`);
 		});
 
-	/** 删除全部（不传 slotIds = 全部）；后端同时从正文剥离占位符 */
+	/** 删除全部（不传 slotIds = 全部）；正文占位符由后端后台异步剥离 */
 	const deleteAllSlots = () =>
 		run(async () => {
-			const r = await apiPost<{ ok: boolean; removedFiles: number; stripped: number }>("/api/draw/slots/delete-all", {});
+			const r = await apiPost<{ ok: boolean; removedFiles: number }>("/api/draw/slots/delete-all", {});
 			slots.reload();
-			flash(`已删除 ${r.removedFiles} 张，正文剥离 ${r.stripped} 处`);
+			flash(`已删除 ${r.removedFiles} 张（正文占位符后台清理中）`);
 		});
 
 	/** 清理过期：POST /api/draw/slots/cleanup（按当前输入天数），完成后重拉 */

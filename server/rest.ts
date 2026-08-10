@@ -4781,18 +4781,41 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				sendJson(res, 200, { ok: true, saved: r.saved, skipped: r.skipped });
 				return true;
 			}
+			/**
+			 * 后台异步剥离正文占位符（2026-08-11 用户裁决「方案 1」）：删除接口立即返回，
+			 * 剥离（含等场记归位 / 分支提交正文）不阻塞用户；失败或 agent 持续回复中放弃，
+			 * 残留占位符不影响显示（映射已删，前端不渲染）。
+			 */
+			function stripPlaceholdersInBackground(host: RestHost, slotIds: string[]): void {
+				if (!host.stripStoryPlaceholders || slotIds.length === 0) return;
+				void (async () => {
+					try {
+						// 等 agent 不在流式回复：剥离要分支提交正文，不能在回复进行中动树
+						for (let waited = 0; host.isStreaming() && waited < 60_000; waited += 2000) {
+							await new Promise((r) => setTimeout(r, 2000));
+						}
+						if (host.isStreaming()) {
+							console.warn("[draw-slot] 后台剥离占位符放弃：agent 持续回复中（残留占位符不影响显示）");
+							return;
+						}
+						const r = await host.stripStoryPlaceholders(slotIds);
+						if (r.errors?.length) {
+							console.warn(`[draw-slot] 后台剥离占位符部分失败：${r.errors.join("；")}`);
+						}
+					} catch (e) {
+						console.warn(`[draw-slot] 后台剥离占位符失败：${e instanceof Error ? e.message : String(e)}`);
+					}
+				})();
+			}
+
 			case "DELETE /api/draw/slots": {
 				if (refuseWhileStreaming()) return true;
 				const slotId = (query.get("slotId") ?? "").trim();
 				if (!slotId) throw new Error("缺少 slotId");
 				const removedFiles = deleteSlot(host.cwd, slotId);
-				// 剥离正文占位符（删除后不留 [图片已清理] 失效标记；宿主可选实现，未实现则 stripped=0）
-				let stripped = 0;
-				if (host.stripStoryPlaceholders) {
-					const r = await host.stripStoryPlaceholders([slotId]);
-					stripped = r.stripped;
-				}
-				sendJson(res, 200, { ok: true, removedFiles, stripped });
+				// 剥离正文占位符改为后台异步（删除立即返回；占位符残留不影响显示）
+				stripPlaceholdersInBackground(host, [slotId]);
+				sendJson(res, 200, { ok: true, removedFiles, stripped: 0 });
 				return true;
 			}
 			case "DELETE /api/draw/slots/version": {
@@ -4805,12 +4828,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (!Number.isInteger(rawIdx)) throw new Error("缺少 versionIndex");
 				const r = deleteVersion(host.cwd, slotId, rawIdx);
 				if (!r.ok) throw new Error(r.error);
-				let stripped = 0;
-				if (r.versionsLeft === 0 && host.stripStoryPlaceholders) {
-					const sr = await host.stripStoryPlaceholders([slotId]);
-					stripped = sr.stripped;
+				// 版本删完 → slot 一并删除；正文占位符剥离改后台异步（删除立即返回）
+				if (r.versionsLeft === 0) {
+					stripPlaceholdersInBackground(host, [slotId]);
 				}
-				sendJson(res, 200, { ok: true, versionsLeft: r.versionsLeft, removedFiles: r.removedFiles, stripped });
+				sendJson(res, 200, { ok: true, versionsLeft: r.versionsLeft, removedFiles: r.removedFiles, stripped: 0 });
 				return true;
 			}
 			case "POST /api/draw/slots/cleanup": {
@@ -4914,13 +4936,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					removed = deleteAllSlots(host.cwd);
 					removedFiles = removed;
 				}
-				// 剥离正文占位符（只清这次删除的 slotIds；宿主可选实现，未实现则 stripped=0）
-				let stripped = 0;
-				if (host.stripStoryPlaceholders && targets.length > 0) {
-					const r = await host.stripStoryPlaceholders(targets);
-					stripped = r.stripped;
-				}
-				sendJson(res, 200, { ok: true, removed, removedFiles, stripped });
+				// 剥离正文占位符改为后台异步（删除立即返回；占位符残留不影响显示）
+				if (targets.length > 0) stripPlaceholdersInBackground(host, targets);
+				sendJson(res, 200, { ok: true, removed, removedFiles, stripped: 0 });
 				return true;
 			}
 
