@@ -566,15 +566,18 @@ export function extractDraftRules(blockContents: string[], statusBarFormats?: st
 	for (const text of blockContents) {
 		if (!text) continue;
 
-		// 字数区间：限定在明确谈正文字数的块里（含 摘要 的 200-300 等不取）
-		if (!rules.wordRange && /(正文|response_length|字数限制|字数设定|word_count)/.test(text)) {
+		// 字数：限定在明确谈正文字数的块里（含 摘要 的 200-300 等不取）。
+		// 支持三种句式：区间（1000–18000 字）、大于…小于…、「上限/不超过/至多 N 字」（只设上限，下限 0——
+		// 8/11 用户裁决：下限会变成模型的达标线，去下限留上限引导「摸不清意图就尽量多写」）。
+		if (!rules.wordRange && /(正文|response_length|字数限制|字数设定|word_count|篇幅)/.test(text)) {
 			const m =
-				/(\d{2,4})\s*(?:[-–—~～]|到|至)\s*(\d{2,4})\s*字/.exec(text) ??
-				/[大]于\s*(\d{2,4})\D{0,14}?[小]于\s*(\d{2,4})/.exec(text);
+				/(\d{2,5})\s*(?:[-–—~～]|到|至)\s*(\d{2,5})\s*字/.exec(text) ??
+				/[大]于\s*(\d{2,5})\D{0,14}?[小]于\s*(\d{2,5})/.exec(text) ??
+				/(?:上限|不超过|至多)\s*(\d{2,5})\s*字/.exec(text);
 			if (m) {
-				const min = Number(m[1]);
-				const max = Number(m[2]);
-				if (Number.isFinite(min) && Number.isFinite(max) && min < max && min >= 50) {
+				const min = m[2] === undefined ? 0 : Number(m[1]);
+				const max = Number(m[2] ?? m[1]);
+				if (Number.isFinite(min) && Number.isFinite(max) && min < max && max >= 50) {
 					rules.wordRange = { min, max };
 				}
 			}

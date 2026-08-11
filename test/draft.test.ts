@@ -459,6 +459,22 @@ test("extractDraftRules：拆层 F 类补全——含「破折号」/「半角�
 	assert.equal(rules2.banHalfWidth, false);
 });
 
+test("extractDraftRules：5 位数字字数区间可提取（8/11「动态字数长 1000–18000」场景）", () => {
+	const rules = extractDraftRules(["正文约 1000–18000 字（下限防偷懒，上限防失控）"]);
+	assert.deepEqual(rules.wordRange, { min: 1000, max: 18000 }, "18000 五位数也应提取");
+});
+
+test("extractDraftRules：上限句（去下限）——「上限/不超过/至多 N 字」→ {min:0, max:N}（8/11 用户裁决）", () => {
+	const rules = extractDraftRules(["篇幅：没有下限，写得越长越好；上限 18000 字（防失控）。"]);
+	assert.deepEqual(rules.wordRange, { min: 0, max: 18000 }, "上限句只设上限，下限为 0（下限 note 永不触发）");
+	const rules2 = extractDraftRules(["正文不超过 3000 字。"]);
+	assert.deepEqual(rules2.wordRange, { min: 0, max: 3000 }, "「不超过」句式同样识别");
+	// 下限 0 时 checkDraft 不报「低于下限」
+	const r = checkDraft("短", rules);
+	assert.ok(!r.violations.some((v) => v.includes("下限")), "下限 0 永不触发下限提示");
+	assert.ok(!r.notes.some((n) => n.includes("下限")), "下限 0 不进 notes");
+});
+
 test("checkDraft：破折号与半角符号纯符号判违规，全角/弯引号不误伤（8/11）", () => {
 	const rules = { ...emptyDraftRules(), banDash: true, banHalfWidth: true };
 
