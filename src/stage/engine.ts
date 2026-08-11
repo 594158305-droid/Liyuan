@@ -65,7 +65,10 @@ import {
 import { runScribeTurn, STATE_ENTRY_TYPE } from "./scribe-run.ts";
 import {
 	MAX_ROUNDS,
+	runSoundFxTool,
 	runStageTool,
+	soundFxToolNames,
+	soundFxTools,
 	stageTools,
 	writeTools,
 	writingGuideTool,
@@ -187,6 +190,8 @@ export interface StageEvents {
 	onNotify?: (level: "info" | "warning" | "error", text: string) => void;
 	/** 过程条短句（验收/修订进度；kind:"note" 形态，无需工具名） */
 	onActivity?: (detail: string) => void;
+	/** LLM 主动播放音效（play_sound 工具）：宿主负责校验白名单并广播 play_sound 帧 */
+	onPlaySound?: (sound: string, volume?: number) => void;
 }
 
 export interface StageEngineDeps {
@@ -645,6 +650,8 @@ export class StageEngine {
 		// 媒体交付（8/06 重接）：tts 另需服务端环境，未就绪不上清单
 		const mediaOpts = { tts: this.#deps.ttsAvailable?.() === true };
 		const mediaTools = this.#deps.media ? mediaStageTools(config.language, mediaOpts) : [];
+		// 播放音效（8/12）：不依赖宿主环境，恒上清单
+		const soundTools = soundFxTools();
 		// 助手委托（8/06 重接）：runner 未注册时不上清单
 		const assistantTool = assistantStageTool();
 		// P7：ask 工具依赖宿主注入 askUser（选择卡通道）；未注入则从清单剔除
@@ -656,6 +663,7 @@ export class StageEngine {
 				: []),
 			...writeTools(config.language).filter((t) => t.name !== "ask" || askEnabled),
 			...mediaTools,
+			...soundTools,
 			...(assistantTool ? [assistantTool] : []),
 			...mcpTools,
 		];
@@ -1086,6 +1094,8 @@ export class StageEngine {
 		const MEDIA_TOOLS = this.#deps.media
 			? mediaStageToolNames({ tts: this.#deps.ttsAvailable?.() === true })
 			: new Set<string>();
+		// 播放音效（8/12）：走实时事件（onPlaySound → play_sound 帧），不落树
+		const SOUND_TOOLS = soundFxToolNames();
 		const convo = [...o.messages];
 		let last: AssistantMsgLike = o.first;
 		let text = "";
@@ -1425,7 +1435,13 @@ export class StageEngine {
 										text: `未知工具「${name}」。`,
 										isError: true,
 									})
-					: READ_TOOLS.has(name)
+								: SOUND_TOOLS.has(name)
+									? runSoundFxTool(
+											(sound, volume) => ev.onPlaySound?.(sound, volume),
+											name,
+											call.arguments ?? {},
+										)
+						: READ_TOOLS.has(name)
 						? await this.#runReadTool(o, readDeps, name, call.arguments ?? {})
 						: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
 					// 主聊天跟踪：工具执行结果（含耗时）+ 写侧草稿动作（交稿全文与验收）

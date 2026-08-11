@@ -299,6 +299,55 @@ export interface ToolRunResult {
 	activity?: string;
 }
 
+/** play_sound 工具可播音效（与 server 广播白名单同源；名单外一律忽略） */
+export const SOUND_FX_NAMES = ["notice", "complete", "alert", "positive", "negative"] as const;
+export type SoundFxName = (typeof SOUND_FX_NAMES)[number];
+export const isSoundFxName = (s: string): s is SoundFxName =>
+	(SOUND_FX_NAMES as readonly string[]).includes(s);
+
+/** 播放音效工具（M-E 8/12）：提醒用户一声，不产生正文、不打断演出。清单恒定。 */
+export function soundFxTools(): StageTool[] {
+	return [
+		{
+			name: "play_sound",
+			description:
+				`播放一声提示音提醒用户（不产生剧情正文，也不打断演出）。` +
+				`音效语义：notice=一般提醒 / complete=完成 / alert=需要用户注意的警报 / positive=好消息 / negative=坏消息。`,
+			parameters: {
+				type: "object",
+				properties: {
+					sound: { type: "string", enum: [...SOUND_FX_NAMES], description: "音效名" },
+					volume: { type: "number", description: "音量 0~1，缺省 0.6" },
+				},
+				required: ["sound"],
+			},
+		},
+	];
+}
+
+export function soundFxToolNames(): Set<string> {
+	return new Set(soundFxTools().map((t) => t.name));
+}
+
+/**
+ * 执行 play_sound。playSound 回调由宿主注入（广播 play_sound 帧）；未知音效名/参数缺失
+ * 返回可读文本（不抛，不打断本拍）。
+ */
+export function runSoundFxTool(
+	playSound: (sound: string, volume?: number) => void,
+	name: string,
+	args: Record<string, unknown>,
+): ToolRunResult {
+	if (name !== "play_sound") return { text: `未知工具「${name}」。`, isError: true };
+	const sound = typeof args.sound === "string" ? args.sound.trim() : "";
+	if (!isSoundFxName(sound)) {
+		return { text: `未知音效「${sound || "（空）"}」——可选：${SOUND_FX_NAMES.join(" / ")}。`, isError: true };
+	}
+	const vol = typeof args.volume === "number" && Number.isFinite(args.volume) ? Math.min(1, Math.max(0, args.volume)) : undefined;
+	playSound(sound, vol);
+	return { text: `已播放音效 ${sound}。`, activity: `播放音效 ${sound}` };
+}
+
 /**
  * 执行一次工具调用。未知工具名/参数缺失都返回可读文本（不抛，不打断本拍）。
  * language 供统一工具层装配上下文（M-D1）；省略时按中文。

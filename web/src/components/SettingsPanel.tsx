@@ -16,6 +16,7 @@ import {
 	type TraceFileInfo,
 } from "../api.ts";
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
+import { readSoundSettings, saveSoundSettings, type SoundSettings } from "../sounds.ts";
 import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { IconChevronDown } from "./icons.tsx";
 import {
@@ -860,6 +861,8 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	const [askMode, setAskMode] = useState(false);
 	const [dirty, setDirty] = useState(false);
 	const [dark, setDark] = useState(() => getTheme() === "dark");
+	// 音效提醒（2026-08-12）：本机偏好（localStorage），播放端惰性读取 → 改动即时生效
+	const [sound, setSound] = useState<SoundSettings>(() => readSoundSettings());
 	// 旁挂模型 + 破甲（2026-08-10）：sideModelKey = "provider/id" 或 ""（跟随剧情模型）
 	const [sideModelKey, setSideModelKey] = useState("");
 	const [sideJailbreak, setSideJailbreak] = useState("");
@@ -913,6 +916,13 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 		toast("info", on ? "已切换到黑夜模式" : "已切换到白昼模式");
 	};
 
+	const updateSound = (patch: Partial<SoundSettings>) =>
+		setSound((s) => {
+			const next = { ...s, ...patch };
+			saveSoundSettings(next);
+			return next;
+		});
+
 	const save = () =>
 		run(async () => {
 			// 只改本面板可见项；不碰 lorebook / importStripTags（由别处或默认处理）
@@ -941,8 +951,36 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 					<Toggle checked={dark} onChange={onTheme} />
 				</div>
 				<div className="field-hint">白昼 / 黑夜立刻切换，偏好记在本机浏览器，与会话配置无关。</div>
-			</CollapsibleSection>
-			<CollapsibleSection title="界面自定义" storageKey="liyuan.settings.open.uiCustom" defaultOpen={false}>
+				</CollapsibleSection>
+				<CollapsibleSection title="音效提醒" storageKey="liyuan.settings.open.sound" defaultOpen={false}>
+					<div className="toggle-row">
+						<span>音效提醒</span>
+						<Toggle checked={sound.enabled} onChange={(v) => updateSound({ enabled: v })} />
+					</div>
+					<div className="field-hint">回答完成 / 出现需要你定夺的选择卡 / LLM 主动播放时响提示音，偏好记在本机浏览器，与会话配置无关。</div>
+					<div className="toggle-row">
+						<span>主聊天完成</span>
+						<Toggle checked={sound.mainChat} disabled={!sound.enabled} onChange={(v) => updateSound({ mainChat: v })} />
+					</div>
+					<div className="toggle-row">
+						<span>助手完成</span>
+						<Toggle checked={sound.assistant} disabled={!sound.enabled} onChange={(v) => updateSound({ assistant: v })} />
+					</div>
+					<div className="toggle-row">
+						<span>需要你定夺（ask）</span>
+						<Toggle checked={sound.ask} disabled={!sound.enabled} onChange={(v) => updateSound({ ask: v })} />
+					</div>
+					<div className="toggle-row">
+						<span>LLM 主动播放</span>
+						<Toggle checked={sound.agent} disabled={!sound.enabled} onChange={(v) => updateSound({ agent: v })} />
+					</div>
+					<div className="toggle-row">
+						<span>仅窗口不可见时提醒</span>
+						<Toggle checked={sound.backgroundOnly} disabled={!sound.enabled} onChange={(v) => updateSound({ backgroundOnly: v })} />
+					</div>
+					<div className="field-hint">开着时只在窗口隐藏 / 最小化时响（前台看着不打扰），关着则总是提醒。</div>
+				</CollapsibleSection>
+				<CollapsibleSection title="界面自定义" storageKey="liyuan.settings.open.uiCustom" defaultOpen={false}>
 				<UiCustomSection />
 			</CollapsibleSection>
 			<CollapsibleSection title="主聊天窗口" storageKey="liyuan.settings.open.chatWindow" defaultOpen>

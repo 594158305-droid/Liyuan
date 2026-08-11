@@ -45,6 +45,7 @@ import { scriptRuntimes } from "./jsrunner/runtime.ts";
 import { LedgerScriptViews } from "./jsrunner/ui/LedgerScriptViews.tsx";
 import { ModalPanel } from "./jsrunner/ui/ModalPanel.tsx";
 import { registerTavernChatBridge } from "./tavernShim.ts";
+import { playChime, playFx } from "./sounds.ts";
 import { getUiCustom } from "./ui-custom.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
 import {
@@ -915,6 +916,8 @@ export default function App() {
 						setBusy(false);
 						setThinkingLive(false);
 						setToolNote(null);
+						// 正常完成播完成音；用户主动中止（abort）不算完成
+						if (!wasAborting) playChime("main");
 						// 本轮 agent 可能写了技能/知识库/世界书等资产：通知 watchAgent 面板重拉
 						setAgentTick((t) => t + 1);
 						// 中断/异常遗留的半截正文/思维链：并入本轮同一角色泡（不新开泡）
@@ -1000,10 +1003,16 @@ export default function App() {
 				case "sessions":
 					setSessions(frame.list);
 					break;
-				case "choice":
-					// 新的决策询问：弹出 live 选择卡（会话被切换时由 hello 分支清空）
-					setActiveChoice({ id: frame.id, question: frame.question, options: frame.options, placeholder: frame.placeholder });
-					break;
+					case "choice":
+						// 新的决策询问：弹出 live 选择卡（会话被切换时由 hello 分支清空）
+						setActiveChoice({ id: frame.id, question: frame.question, options: frame.options, placeholder: frame.placeholder });
+						// 出现 ask（需要你定夺）：提醒音
+						playChime("ask");
+						break;
+					case "play_sound":
+						// LLM 主动播放音效（play_sound 工具）：按名合成提示音，未知音效内部忽略
+						playFx(frame.sound, frame.volume);
+						break;
 				case "choice_resolved":
 					// 该询问已决（本端/他端应答或超时）：收起 live 卡；留痕由工具结果重放消息承载
 					setActiveChoice((c) => (c && c.id === frame.id ? null : c));
@@ -1065,6 +1074,8 @@ export default function App() {
 						setAsstBusy(false);
 						setAsstThinkingLive(false);
 						setAsstToolNote(null);
+						// 正常完成播完成音；用户主动中止不算完成
+						if (!wasAborting) playChime("assistant");
 						// 中断遗留的半截回复/思维链：并入消息列表（不丢字）
 						const text = asstStreamRef.current;
 						const thinking = asstStreamThinkingRef.current.trim();

@@ -146,6 +146,7 @@ const RP_TOOLS = [
 	"codex_write",
 	"show_image",
 	"show_audio",
+	"play_sound",
 	"show_video",
 	"show_html",
 	"tts",
@@ -211,6 +212,15 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	const notify = (ctx: { ui: { notify: (msg: string, level: string) => void } }, msg: string, level = "info") => {
 		try {
 			ctx.ui.notify(msg, level);
+		} catch {
+			// print/rpc 模式无 UI 时静默
+		}
+	};
+
+	/** 播放音效（play_sound 工具）：ctx.ui 的 pi 类型未含此方法，收缩类型 + 可选调用；Web 宿主有实现，print/rpc 静默 */
+	const playSound = (ctx: { ui: { playSound?: (sound: string, volume?: number) => void } }, sound: string, volume?: number) => {
+		try {
+			ctx.ui.playSound?.(sound, volume);
 		} catch {
 			// print/rpc 模式无 UI 时静默
 		}
@@ -1349,6 +1359,28 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 					content: [{ type: "text", text: "音频已在对话中展示给用户（可播放）。" }],
 					details: { rpAudio: { src, ...(params.caption ? { caption: params.caption } : {}) } },
 				};
+			},
+		});
+
+		// 播放音效（不产生正文）：提醒用户一声，前端按名合成提示音
+		pi.registerTool({
+			name: "play_sound",
+			label: "播放音效",
+			description:
+				"Play a short notification chime (does not produce narrative text). Use to get the user's attention: notice = general reminder, complete = task finished, alert = user attention needed, positive = good news, negative = bad news.",
+			parameters: Type.Object({
+				sound: Type.Union([
+					Type.Literal("notice"),
+					Type.Literal("complete"),
+					Type.Literal("alert"),
+					Type.Literal("positive"),
+					Type.Literal("negative"),
+				]),
+				volume: Type.Optional(Type.Number({ description: "Volume 0-1, default 0.6" })),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				playSound(ctx, params.sound, params.volume);
+				return { content: [{ type: "text", text: `已播放音效 ${params.sound}。` }] };
 			},
 		});
 

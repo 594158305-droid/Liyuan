@@ -306,6 +306,8 @@ export type ServerFrame =
 	| { type: "ext_gen"; reqId: string; kind: "error"; error: string }
 	/** 脚本运行时扩展事件桥（JS Runner）：pi 事件 → ST 风格事件名，args 直通前端脚本总线 */
 	| { type: "ext_event"; name: string; args: unknown[] }
+	/** LLM 主动播放音效（play_sound 工具）：前端按名合成提示音（不产生正文，不入消息流） */
+	| { type: "play_sound"; sound: string; volume?: number }
 	| { type: "error"; text: string };
 
 /** 助手会话列表条目（绑定角色卡，与剧情会话列表同构裁剪） */
