@@ -18,6 +18,11 @@ export interface SkillMeta {
 	file: string;
 	/** Agent Skills 标准语义：true 时对模型隐身（不进索引），仅 /skill:name 显式触发 */
 	disableModelInvocation?: boolean;
+	/**
+	 * 演出主题（写作指南类）：true 时经 writing_guide 工具按主题读取（主演侧）。
+	 * 与助手侧 read 通道互不干扰——索引仍全量可见。
+	 */
+	stageTopic?: boolean;
 }
 
 export interface SkillInput {
@@ -46,15 +51,18 @@ export function parseSkillHead(text: string): {
 	name?: string;
 	description?: string;
 	disableModelInvocation?: boolean;
+	stageTopic?: boolean;
 } {
 	const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
 	if (!m) return {};
-	const out: { name?: string; description?: string; disableModelInvocation?: boolean } = {};
+	const out: { name?: string; description?: string; disableModelInvocation?: boolean; stageTopic?: boolean } = {};
 	for (const line of m[1].split(/\r?\n/)) {
 		const kv = /^(name|description):\s*(.*)$/.exec(line.trim());
 		if (kv) out[kv[1] as "name" | "description"] = kv[2].trim();
 		const dmi = /^disable-model-invocation:\s*(.*)$/.exec(line.trim());
 		if (dmi) out.disableModelInvocation = dmi[1].trim() === "true";
+		const st = /^stage-topic:\s*(.*)$/.exec(line.trim());
+		if (st) out.stageTopic = st[1].trim() === "true";
 	}
 	return out;
 }
@@ -73,6 +81,7 @@ export function listSkills(cwd: string): SkillMeta[] {
 				description: head.description || "",
 				file: `${DIRS.skills}/${f}`,
 				...(head.disableModelInvocation ? { disableModelInvocation: true } : {}),
+				...(head.stageTopic ? { stageTopic: true } : {}),
 			});
 		} catch {
 			// 单个文件损坏不影响其余技能
@@ -101,4 +110,18 @@ export function formatSkillIndex(skills: SkillMeta[]): string {
 	const visible = skills.filter((s) => !s.disableModelInvocation);
 	if (visible.length === 0) return "（技能库目前是空的。）";
 	return visible.map((s) => `- ${s.name} — ${s.description || "（无描述）"}（${s.file}）`).join("\n");
+}
+
+/**
+ * 演出主题清单（供主演侧 writing_guide 工具的 topic）。
+ * 只收 stage-topic 标记且未隐身（disableModelInvocation）的技能；
+ * topic 用**文件名 slug**（与 skillSlug 落盘一致），模型按此调 writing_guide。
+ */
+export function listStageTopics(cwd: string): Array<{ topic: string; description: string }> {
+	return listSkills(cwd)
+		.filter((s) => s.stageTopic && !s.disableModelInvocation)
+		.map((s) => ({
+			topic: s.file.split("/").pop()!.replace(/\.md$/, ""),
+			description: s.description,
+		}));
 }

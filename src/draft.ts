@@ -418,6 +418,10 @@ export interface DraftRules {
 	metaphorRule: boolean;
 	/** 预设禁「不是…是…」先否后肯句式 */
 	banNegPos: boolean;
+	/** 禁破折号（—— 与 —，DeepSeek 固化禁词——纯符号可判，代码级执行） */
+	banDash: boolean;
+	/** 禁半角括号/英文引号（( ) " '——正文一律全角/中文弯引号，纯符号可判） */
+	banHalfWidth: boolean;
 	/** 必须出现的模块标签（每个都要在，如 w2g / draft_notes） */
 	requiredTags: string[];
 	/** 状态栏标签组（任一命中即可，如 StatusBlock / state1） */
@@ -425,7 +429,15 @@ export interface DraftRules {
 }
 
 export function emptyDraftRules(): DraftRules {
-	return { bannedWords: [], metaphorRule: false, banNegPos: false, requiredTags: [], statusBarTagGroup: [] };
+	return {
+		bannedWords: [],
+		metaphorRule: false,
+		banNegPos: false,
+		banDash: false,
+		banHalfWidth: false,
+		requiredTags: [],
+		statusBarTagGroup: [],
+	};
 }
 
 /** 规则是否空到不值得跑核验 */
@@ -435,6 +447,8 @@ export function rulesAreEmpty(r: DraftRules): boolean {
 		r.bannedWords.length === 0 &&
 		!r.metaphorRule &&
 		!r.banNegPos &&
+		!r.banDash &&
+		!r.banHalfWidth &&
 		r.requiredTags.length === 0 &&
 		r.statusBarTagGroup.length === 0
 	);
@@ -583,6 +597,13 @@ export function extractDraftRules(blockContents: string[], statusBarFormats?: st
 		if (!rules.banNegPos && /(不是[…….]{1,3}是|先否定[再后]?肯定)/.test(text)) {
 			rules.banNegPos = true;
 		}
+		// 纯符号机械纪律（8/11 拆层 F 类补全）：块内关键词点亮，符号本身无语境判断
+		if (!rules.banDash && /破折号/.test(text)) {
+			rules.banDash = true;
+		}
+		if (!rules.banHalfWidth && /(半角|英文引号|英文直引号)/.test(text)) {
+			rules.banHalfWidth = true;
+		}
 
 		// M-C 拆层后不再提取「选择框/draft_notes」类格式栈 requiredTags——预设的输出模块
 		// （w2g/catsay/draft_notes/摘要）已由 agent 工具流与账本渲染承接（PLAN-RP-AGENT-EXEC §4）：
@@ -680,6 +701,28 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 		}
 	}
 	if (bannedHits > 5) violations.push(`（禁词共 ${bannedHits} 处，以上仅列前 5）`);
+
+	// 破折号（——/—）：DeepSeek 固化禁词，纯符号检查，无语境判断（8/11 拆层 F 类补全）
+	if (rules.banDash) {
+		const dashRe = /—+/g;
+		let dashHits = 0;
+		for (let dm = dashRe.exec(body); dm; dm = dashRe.exec(body)) {
+			dashHits++;
+			if (dashHits <= 5) violations.push(`破折号「${dm[0]}」：${ctxQuote(body, dm.index, dm[0].length)}`);
+		}
+		if (dashHits > 5) violations.push(`（破折号共 ${dashHits} 处，以上仅列前 5）`);
+	}
+
+	// 半角括号/英文引号（( ) " '）：正文一律全角（）与中文弯引号，纯符号检查
+	if (rules.banHalfWidth) {
+		const hwRe = /[()"']/g;
+		let hwHits = 0;
+		for (let hm = hwRe.exec(body); hm; hm = hwRe.exec(body)) {
+			hwHits++;
+			if (hwHits <= 5) violations.push(`半角符号「${hm[0]}」：${ctxQuote(body, hm.index, 1)}`);
+		}
+		if (hwHits > 5) violations.push(`（半角符号共 ${hwHits} 处，以上仅列前 5）`);
+	}
 
 	// 正文不是文档（机械格式纪律，无条件判）：行首 markdown 标题符号是结构标记不是
 	// 叙事语言——模型偶发拿 ##/### 给拟声词放大字号（8/09 实弹「### *啪……啪……*」），

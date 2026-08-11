@@ -12,7 +12,7 @@
  */
 
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { applyProjectedSamplers } from "../samplers.ts";
 import { extractDraftRules } from "../draft.ts";
@@ -26,15 +26,16 @@ import {
 import { appendCodexEntry, createCodex, deleteCodexEntry, listCodexes, loadCodexEntries } from "../codex.ts";
 import { formatPanelIndex, formatPanelSnapshot, loadPanels } from "../panels.ts";
 import { dir } from "../paths.ts";
+import { listStageTopics, skillsDir } from "../skills.ts";
 import {
 	lookupBlockRule,
 	reportItemFor,
 	splitBlockContent,
 	type AssemblyReportItem,
 } from "../preset-split.ts";
-import { formatRosterIndex, formatState, formatTableIndex, saveState } from "../state.ts";
+import { formatRosterIndex, formatState, formatTableIndex, loadState, saveState, stateHasTableData } from "../state.ts";
 import { isBackstageText } from "../stance.ts";
-import type { LorebookEntry } from "../types.ts";
+import type { LorebookEntry, WorldState } from "../types.ts";
 import {
 	buildStageInjection,
 	buildStageSystemPrompt,
@@ -340,7 +341,7 @@ function roundCardFor(
 			`\u2460 回看：读一遍刚写下的段落，接住它的气口。\n` +
 			`\u2461 构思剧情走向：发挥自己职业作家的水平，思考这一段剧情往哪走、人物此刻的状态与下一步的抉择。\n` +
 			`\u2462 全力构思文笔：倾尽所有的去构思这一段怎么写得精彩——镜头、动作、感官细节、神态情绪、节奏、点睛。力求为用户提供最好的体验。\n` +
-			`\u2463 按需调写作方法论：写作上拿不准就调 \`writing_guide\` 读对应主题（general/nsfw），读完照着写。\n` +
+			`\u2463 按需调写作方法论：按预设「写作·技能触发表」查本拍场景该读的主题，调 \`writing_guide\` 读对应主题，读完照着写。\n` +
 			`\u2464 重新评估：剧情到岔路就用 \`ask\` 问用户；路标不成立就重拟 \`beat_plan\`；戏到停点就收笔——收笔前先确认自然下文是否涉及 ${userName} 的行动或选择，涉及就先 \`ask\`，再 \`draft_seal\`（清单没勾完也没关系）。\n` +
 			`思考全程用中文。正文只在稿纸上写——思考里想戏与文笔，落笔交给 \`draft_append\`。`
 		);
@@ -515,7 +516,7 @@ export class StageEngine {
 
 		// 上下文 = f(分支)
 		const branch = sm.getBranch() as BranchEntryLike[];
-		const state = stateFromBranch(branch);
+		const state = this.#effectiveState(branch);
 		const { history, lastUserText, lastNarrativeText, summary } = rebuildHistory(branch);
 		if (!history.some((m) => m.role === "user")) {
 			ev.onNotify?.("error", "没有可开演的用户输入。");
@@ -582,7 +583,10 @@ export class StageEngine {
 		// M-A 工具组 + M-C writing_guide（skill 包非空才挂——不凭空点名）。
 		// 回合工作区 = 正文工件的落点；纪律规则在此提取一次，draft_check 全程复用。
 		// 读侧依赖先建：统一层按注入情况决定哪些世界书工具上清单（M-D2）。
-		const skillTopics = [...materials.skillPacks.keys()];
+		// M-C 扩展：主题 = 预设 skillPacks 键 + .liyuan-skills 演出主题（stage-topic 标记）——
+		// 写作指南以 Markdown 笔记形态住在技能库，主演经 writing_guide 按需读（getSkill fallback）。
+		const stageTopicList = listStageTopics(cwd);
+		const skillTopics = [...materials.skillPacks.keys(), ...stageTopicList.map((t) => t.topic)];
 		const readDeps = this.#toolDeps(lastUserText);
 		// MCP 外设（8/06 重接）：hub 里本会话已连接的工具并入清单。
 		// 空数组＝没启用/没连上，与「未注入 mcp 依赖」同效——都不上清单。
@@ -596,7 +600,9 @@ export class StageEngine {
 		const askEnabled = !!this.#deps.askUser;
 		const tools = [
 			...stageTools(config.language, readDeps),
-			...(skillTopics.length > 0 ? [writingGuideTool(config.language, skillTopics)] : []),
+			...(skillTopics.length > 0
+				? [writingGuideTool(config.language, [...materials.skillPacks.keys(), ...stageTopicList])]
+				: []),
 			...writeTools(config.language).filter((t) => t.name !== "ask" || askEnabled),
 			...mediaTools,
 			...(assistantTool ? [assistantTool] : []),
@@ -928,7 +934,7 @@ export class StageEngine {
 				},
 				{
 					branch,
-					state: stateFromBranch(branch),
+					state: this.#effectiveState(branch),
 					language: config.language,
 					userName: config.userName,
 					charName: card.name,
@@ -944,6 +950,23 @@ export class StageEngine {
 			console.error(`[stage-compact] 压缩异常：${msg}`);
 			return { kind: "failed", error: msg };
 		}
+	}
+
+	/**
+	 * 装配用账本：焦点分支有 rp-state 快照（且带表格行数据）用链上的——保持 rewind/fork 分支语义；
+	 * 无快照或快照只有空表结构（物化骨架/空账本）时回落磁盘账本（.liyuan-state/<sessionId>.json，
+	 * 分支无关的最新账本）。2026-08-11 兜底：编辑回复/导航/回退后焦点分支可能不带有效快照，
+	 * 裸装配会读到空账本，场记以空为 base 记账会把表格数据整体顶掉。
+	 */
+	#effectiveState(branch: BranchEntryLike[]): WorldState {
+		const state = stateFromBranch(branch);
+		if (stateHasTableData(state)) return state;
+		const stateFile = this.#deps.getStateFile?.(this.#deps.getSessionManager().getSessionId());
+		if (stateFile) {
+			const disk = loadState(stateFile);
+			if (stateHasTableData(disk)) return disk;
+		}
+		return state;
 	}
 
 	/**
@@ -1607,9 +1630,20 @@ export class StageEngine {
 							this.#deps.select!(title, options, { ...(opts ?? {}), signal: opts?.signal ?? this.#abort?.signal }),
 					}
 				: {}),
-			getState: () => stateFromBranch(sm.getBranch() as BranchEntryLike[]),
+			getState: () => this.#effectiveState(sm.getBranch() as BranchEntryLike[]),
 			formatState,
-			getSkill: (topic) => loadStageMaterials(cwd).skillPacks.get(topic),
+			getSkill: (topic) => {
+				// 1) 预设 skillPacks（拆层产物）
+				const pack = loadStageMaterials(cwd).skillPacks.get(topic);
+				if (pack) return pack;
+				// 2) 演出主题 fallback：读 .liyuan-skills/<topic>.md（仅限技能库内文件名，防路径穿越）
+				if (!/^[A-Za-z0-9\u4e00-\u9fa5-]+$/.test(topic)) return undefined;
+				try {
+					return readFileSync(join(skillsDir(cwd), `${topic}.md`), "utf8");
+				} catch {
+					return undefined;
+				}
+			},
 		};
 	}
 

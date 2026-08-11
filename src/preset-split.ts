@@ -282,7 +282,36 @@ const XIAJIN: PresetSplitTable = {
 	],
 };
 
-export const BUILTIN_SPLIT_TABLES: PresetSplitTable[] = [TGBREAK, SHUANGREN, XIAJIN];
+/**
+ * 梦鲸思客 V5（Liyuan 重组版，2026-08-11）迷你表：只登记三个固定纪律块；
+ * 其余开关组沿用四类兜底分类器（与 V4 时代行为一致，行为不回归）。
+ * 写作指南（演出主题）不住预设——住 .liyuan-skills，经 writing_guide 通道按需读。
+ */
+const DREAMWHALE: PresetSplitTable = {
+	key: "dreamwhale-v5",
+	fingerprints: ["写作·常开纪律", "写作·审查纪律", "写作·禁词表", "写作·技能触发表"],
+	blocks: [
+		{ name: "写作·常开纪律", nature: "B", fate: "resident", section: "B", note: "每拍照此执行的文风与写法（主权/人称/信息差/禁霸总）" },
+		{ name: "写作·审查纪律", nature: "C", fate: "resident", section: "C", note: "写时注意的行为边界（人设铁律/防恶堕/权力角色/判断型机械注意）" },
+		{
+			name: "写作·技能触发表",
+			nature: "C",
+			fate: "resident",
+			section: "C",
+			note: "场景→writing_guide 主题的权威映射（8/11 触发机制修复：模型每拍查表决定读哪个主题）",
+		},
+		{
+			name: "写作·禁词表",
+			nature: "F",
+			fate: "rules-only",
+			note: "引号词与破折号/半角关键词→extractDraftRules 程序化验收；原文不进上下文",
+		},
+	],
+	vars: [],
+	supplements: [],
+};
+
+export const BUILTIN_SPLIT_TABLES: PresetSplitTable[] = [TGBREAK, SHUANGREN, XIAJIN, DREAMWHALE];
 
 // ---------------- 匹配与分流 ----------------
 

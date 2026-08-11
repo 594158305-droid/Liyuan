@@ -60,7 +60,7 @@ import {
 	resolveConfigPath,
 	takeAgentMergeLog,
 } from "../src/paths.ts";
-import { applyPatch, applyTableOperation, loadState, saveState } from "../src/state.ts";
+import { applyPatch, applyTableOperation, loadState, saveState, stateHasTableData } from "../src/state.ts";
 import { loadTemplate, materializeTemplate } from "../src/templates.ts";
 import { runTableBackfill } from "../src/table-backfill.ts";
 import { parseStChat, cleanChat, DEFAULT_STRIP_TAGS } from "../src/chatlog.ts";
@@ -372,7 +372,9 @@ const currentState = (): WorldState => {
 	try {
 		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
 		if (branch.some((e) => e.type === "custom" && e.customType === "rp-state")) {
-			return stateFromBranch(branch);
+			const s = stateFromBranch(branch);
+			// 链上快照只有空表结构（物化骨架/空账本）不算有效——回落磁盘，与装配 #effectiveState 同判据（2026-08-11）
+			if (stateHasTableData(s)) return s;
 		}
 	} catch {
 		// 树不可读（极早期生命周期）→ 磁盘缓存

@@ -446,3 +446,38 @@ test("formatDraftReport：指路 draft_edit 定点改，不再说「重交全文
 	assert.match(txt, /核验通过/, "字数只提示 → 短稿仍通过核验（8/09）");
 	assert.ok(txt.includes("下限"), "字数提示仍在报告里");
 });
+
+test("extractDraftRules：拆层 F 类补全——含「破折号」/「半角」关键词的块点亮机械规则（8/11）", () => {
+	const rules = extractDraftRules([
+		"## 写作·禁词表\n禁止使用破折号；禁止半角括号与英文引号。",
+	]);
+	assert.equal(rules.banDash, true, "含「破折号」关键词 → banDash");
+	assert.equal(rules.banHalfWidth, true, "含「半角」关键词 → banHalfWidth");
+	// 不相关的块不误点亮
+	const rules2 = extractDraftRules(["## 文风\n句子要简洁有力，用行动推动剧情。"]);
+	assert.equal(rules2.banDash, false);
+	assert.equal(rules2.banHalfWidth, false);
+});
+
+test("checkDraft：破折号与半角符号纯符号判违规，全角/弯引号不误伤（8/11）", () => {
+	const rules = { ...emptyDraftRules(), banDash: true, banHalfWidth: true };
+
+	// 违规：双破折号、单破折号、半角括号、英文直引号/单引号
+	const bad = '他顿了顿——像是要说什么，然后转身："我没事。"(他说)\'真的\'。她抬手——又放下。';
+	const r1 = checkDraft(bad, rules);
+	assert.equal(r1.pass, false);
+	assert.ok(r1.violations.some((v) => v.includes("破折号「——」")), "双破折号报违规");
+	assert.ok(r1.violations.some((v) => v.includes("半角符号「\"」")), "英文直引号报违规");
+	assert.ok(r1.violations.some((v) => v.includes("半角符号「(」")), "半角括号报违规");
+	assert.ok(r1.violations.some((v) => v.includes("半角符号「'」")), "英文单引号报违规");
+	assert.ok(r1.violations.filter((v) => v.includes("破折号")).length >= 2, "单破折号（—）也计入");
+
+	// 合规：全角括号、中文弯引号、无破折号
+	const good = "他顿了顿，像是要说什么，然后转身：“我没事。”（他说）她抬手，又放下。";
+	const r2 = checkDraft(good, rules);
+	assert.equal(r2.pass, true, `不应有违规：${r2.violations.join("；")}`);
+
+	// 规则未点亮时不查（向后兼容：旧预设无此规则）
+	const r3 = checkDraft(bad, emptyDraftRules());
+	assert.ok(!r3.violations.some((v) => v.includes("破折号")), "未点亮 banDash 不报");
+});

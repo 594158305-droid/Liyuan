@@ -77,20 +77,34 @@ export function stageTools(language: string, deps?: StageToolDeps): StageTool[] 
 	];
 }
 
+/** 写作方法论主题：topic 名 + 一句话描述（进工具描述帮模型选主题）；纯字符串向后兼容（preset skillPacks 键） */
+export type WritingTopicArg = string | { topic: string; description?: string };
+
 /**
  * 写作方法论工具（M-C，PLAN-RP-AGENT-EXEC §4 D-C2）：预设的 D/E 类内容按需读取。
  * 关键性质：工具结果**不落历史**（rebuildHistory 只留定稿正文）——方法论只活在当拍，
  * 谢幕即蒸发＝skill 的「按需加载、用完即走」。topics 为空时不要注册本工具（不凭空点名）。
+ * M-C 扩展（8/11）：主题除 preset skillPacks 键外，还可来自 .liyuan-skills 演出主题
+ * （stage-topic 标记的写作指南）——内容以 Markdown 笔记形态住在技能库，同一工具通道读取。
  */
-export function writingGuideTool(language: string, topics: string[]): StageTool {
+export function writingGuideTool(language: string, topics: WritingTopicArg[]): StageTool {
+	const topicNames = topics.map((t) => (typeof t === "string" ? t : t.topic));
+	const topicLine = topics
+		.map((t) => {
+			const name = typeof t === "string" ? t : t.topic;
+			const desc = typeof t === "string" ? undefined : t.description;
+			return desc ? `${name}（${desc}）` : name;
+		})
+		.join("、");
 	return {
 		name: "writing_guide",
 		description:
-			`读取本预设附带的写作方法论（${language}）。可用主题：${topics.join(" / ")}。` +
-			`演到相关段落时读对应主题一次，照着写即可——这是**参考不是验收清单**，机械纪律由剧场在交稿时程序化把关。`,
+			`读取本预设附带的写作方法论（${language}）。可用主题：${topicLine}。` +
+			`演到相关段落时读对应主题一次，照着写即可——这是**参考不是验收清单**，机械纪律由剧场在交稿时程序化把关。` +
+			`NSFW 场景先读 nsfw-core 判定场景与配套，再按其指引读 nsfw-realism 与文风层（nsfw-moe / nsfw-beastly 二选一）。`,
 		parameters: {
 			type: "object",
-			properties: { topic: { type: "string", enum: topics, description: "要读取的方法论主题" } },
+			properties: { topic: { type: "string", enum: topicNames, description: "要读取的方法论主题" } },
 			required: ["topic"],
 		},
 	};

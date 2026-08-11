@@ -180,3 +180,31 @@ M-C 顺手核实：random 应**会话内钉死**（seed 固定），既保留防
 - **D-C4 保持**（破限=A 类常驻原文，逐块表已显式标 A，不依赖分类器兜底）。
 - 改造点新增：句级拆分器（规则/杂质分离）、拆层表数据结构与内置表、sov 降档开关、
   random 钉死核实；「摘底脚本」升级为「内置拆层表校验脚本」。
+
+## 6. DREAMWHALE（梦鲸思客 V5-Liyuan，2026-08-11）
+
+第四张内置拆层表（`src/preset-split.ts`），对应重写后的预设 `assets/presets/梦鲸思客V5-Liyuan.json`（V4-0802 全块保留 + 三个固定纪律块）。
+
+**背景**：原 dream-whale 写作体系（约 385KB 的 .liyuan-skills 笔记）对主演不可达（主演无技能索引、无 read 工具）。V5 按「最适合梨园架构」重组为三层：
+
+- **每拍必守纪律 → 预设常驻**：`写作·常开纪律`（→B 常驻，主权/人称/信息差/禁霸总，630 字）+ `写作·审查纪律`（→C 常驻，人设铁律/防恶堕/权力角色规范/判断型机械注意，663 字）。
+- **机械纪律 → 代码**：`写作·禁词表`（→F rules-only，44 个引号词 + 破折号/半角关键词；`extractDraftRules` 自动解析，原文不进上下文；破折号与半角符号检查为 draft.ts 8/11 新增）。
+- **按需方法论/场景专题 → 演出主题技能**：写作指南以 Markdown 笔记形态住在 `.liyuan-skills/`（frontmatter 加 `stage-topic: true`），经 `writing_guide` 工具按主题读取——`skillTopics` = 预设 skillPacks 键 + `listStageTopics(cwd)`（engine.ts:585）；`getSkill` 回调 topic 未命中 preset 时 fallback 读 `.liyuan-skills/<topic>.md`（engine.ts:1629，仅限技能库内文件名，防路径穿越）。
+
+**表结构**（迷你表，只登记固定块；开关组沿用四类兜底分类器，行为与 V4 时代一致）：
+
+```ts
+const DREAMWHALE: PresetSplitTable = {
+	key: "dreamwhale-v5",
+	fingerprints: ["写作·常开纪律", "写作·审查纪律", "写作·禁词表"],
+	blocks: [
+		{ name: "写作·常开纪律", nature: "B", fate: "resident", section: "B" },
+		{ name: "写作·审查纪律", nature: "C", fate: "resident", section: "C" },
+		{ name: "写作·禁词表", nature: "F", fate: "rules-only" },
+	],
+	vars: [],
+	supplements: [],
+};
+```
+
+**实测**（8/11）：装配报告 `splitTable: dreamwhale-v5`、resident B=2246/C=663、禁词表仅规则提取；送模工具 40 个含 `writing_guide`（12 个演出主题）；新会话剧情端到端产出正常。

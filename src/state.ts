@@ -22,6 +22,15 @@ export function defaultState(): WorldState {
 	};
 }
 
+/**
+ * 账本是否有可用的表格行数据。空结构（无表、或 19 张空表如手动物化后的骨架）不算有效账本——
+ * 装配与前端显示统一以此判据决定「链上快照可用 / 回落磁盘账本」（2026-08-11 兜底）。
+ */
+export function stateHasTableData(state: WorldState): boolean {
+	const t = state.tables ?? {};
+	return Object.values(t).some((v) => (v?.rows?.length ?? 0) > 0);
+}
+
 export function loadState(file: string): WorldState {
 	try {
 		const raw = readJsonFile(file) as Partial<WorldState>;
