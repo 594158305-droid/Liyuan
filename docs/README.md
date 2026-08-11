@@ -3,11 +3,11 @@
 > 整理：2026-08-10 · 核对基线：git HEAD `0856703`（master）
 > 原则：**只索引与标注，不改写、不删减任何文档内容**——历史文档即使过时也原地保留，状态与出处都在本索引中如实标注。
 
-本索引是 docs/ 的入口：35 份文档全量分类（§1）、散落各文档的待办与遗留事项汇总（§2）、文档与代码的对应关系（§3）、文档中与当前代码不一致的过时标注（§4）、引用关系与命名注意（§5）。
+本索引是 docs/ 的入口：36 份文档全量分类（§1）、散落各文档的待办与遗留事项汇总（§2）、文档与代码的对应关系（§3）、文档中与当前代码不一致的过时标注（§4）、引用关系与命名注意（§5）。
 
 ---
 
-## §1 文档分类总表（35 份）
+## §1 文档分类总表（36 份）
 
 ### 一、长期有效规范（6 份）
 
@@ -20,12 +20,13 @@
 | [DEV-extend.md](DEV-extend.md) | 187 | 开发者扩展技术路径（REST/MCP/技能/程序卡，纯配置→扩展文件→改源码分级） |
 | [jsrunner-port.md](jsrunner-port.md) | 306 | JS Runner（TavernHelper）移植文档（M5 兼容性审计基线 + G1–G12 缺口全表）⚠ 部分内容与代码不符，见 §4 |
 
-### 二、功能设计（6 份，均已实现并与代码吻合）
+### 二、功能设计（7 份，均已实现并与代码吻合）
 
 | 文档 | 行数 | 一句话主题 |
 |---|---|---|
 | [DESIGN-draw.md](DESIGN-draw.md) | 474 | 生图系统分层设计（底座 + 四插件），一期二期实施完成，§8 实施对账 |
 | [DESIGN-websearch.md](DESIGN-websearch.md) | 201 | 内置网络搜索 MCP（SearXNG 默认 / tavily 可插拔），已实现（2026-08-10） |
+| [DESIGN-debug-trace.md](DESIGN-debug-trace.md) | 53 | 主聊天跟踪（开发者模式）：JSONL 全过程记录（提示词/思考/工具/草稿/旁路/定稿）、REST 列表下载、事件 schema（2026-08-11） |
 | [DESIGN-story-edit.md](DESIGN-story-edit.md) | 126 | story_edit 助手改稿工具：红线改写、rp-edited 分支、改稿后重记账、UI 标记 |
 | [DESIGN-custom-agents.md](DESIGN-custom-agents.md) | 124 | 自定义 agent：createAgentHost 工厂、桥权限模型、wire agentId（§8 P0–P5 未标完成，实际已实现） |
 | [DESIGN-jsrunner-ledger.md](DESIGN-jsrunner-ledger.md) | 656 | JS Runner 账本 UI 的 D3 设计：需求裁决 R1–R5、协议规格、P0–P4、§11 断链表（6 项全标断） |
@@ -183,6 +184,7 @@
 | jsrunner-port.md | `web/src/jsrunner/`（runtime/helper/context/bridge/bus/log/plan/frame/ui 13 模块）、`src/extdata.ts`、`server/script-events.ts`（⚠ 未接线） |
 | DESIGN-draw.md | `src/draw/`（config/novelai/sd-webui/comfyui/params/queue/errors/service）、`src/draw-plugins/`（draw-role/draw-pipeline/draw-slot/draw-edit）、`server/assistant.ts:349-350,782,877`（draw_generate/enhance）、`server/rest.ts:4688-4931`（slot REST 全套）、`src/stage/assemble.ts:55,60`（stripDrawPlaceholders）、`[image:slotId]` 占位符 `src/draw-plugins/draw-slot/index.ts:21` |
 | DESIGN-websearch.md | `server/mcp/websearch-server.mjs`（searxng/tavily 双后端）、`src/mcp.ts:280-339`（BUILTIN_WEBSEARCH_ID、env 键、默认 enabled:false）、`scripts/drive-websearch.mjs` |
+| DESIGN-debug-trace.md | `src/stage/trace.ts`（TraceRecorder）、`src/stage/engine.ts`（#turn/#agentLoop/#sideText 采集）、`server/main.ts`（recorder 注入）、`server/rest.ts`（/api/trace/list + /api/trace/download）、`web/src/api.ts`（getTraceFiles/downloadTraceFile）、`web/src/components/SettingsPanel.tsx`（开发者模式分区）、`test/trace.test.ts` |
 | DESIGN-story-edit.md | `server/main.ts:2199-2252`（StoryBridge.storyEdit：rp-edited-reply 分支）、`server/assistant.ts:557-590`（story_edit 工具，confirm 门禁）、`server/wire.ts:632-640`（rp-edited-reply→edited:true）、`src/stage/compact.ts:75-90`（branchHistory 压缩）、`web/src/components/Messages.tsx:817-818`（「已改写」徽标）、`src/story-sync.ts`、`src/extdata.ts` |
 | DESIGN-custom-agents.md | `server/assistant.ts:1467`（createAgentHost）、`src/assistant-gateway.ts:49-110`（runner 网关注册表）、`server/rest.ts:499,727-760,875`（agents 配置/权限/可编辑）、`server/wire.ts:292,347-353`（assistant_* 帧 agentId）、`liyuan.config.json` agents 段（示例：director） |
 | DESIGN-jsrunner-ledger.md / -ui.md | `src/state.ts:34`（saveState，账本落 `.liyuan-state/<sessionId>.json`）、`.liyuan/extensions/roleplay.ts:393-395,1720`、`web/src/jsrunner/ledger.ts:138-162`（面板 registry）、`web/src/components/StatusStrip.tsx:320`、`RosterPanel.tsx:89`、`web/src/App.tsx:1979,2151`（区域扩展）、`ui/JsRunnerPanel.tsx`（zip 导入导出）、`runtime.ts:229,312-318`（sandbox 加固）、`test/jsrunner-baseline.test.ts` |

@@ -5,7 +5,16 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { api, apiGet, apiPut, type ModelsResponse, type RpConfigView } from "../api.ts";
+import {
+	api,
+	apiGet,
+	apiPut,
+	downloadTraceFile,
+	getTraceFiles,
+	type ModelsResponse,
+	type RpConfigView,
+	type TraceFileInfo,
+} from "../api.ts";
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
 import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { IconChevronDown } from "./icons.tsx";
@@ -834,6 +843,10 @@ function ChatWindowSection() {
 	);
 }
 
+/** 跟踪文件大小显示（开发者模式文件列表用） */
+const fmtSize = (n: number): string =>
+	n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+
 export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
 	// 旁挂模型下拉的数据源（与连接面板同款：/api/models）
@@ -850,6 +863,10 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	// 旁挂模型 + 破甲（2026-08-10）：sideModelKey = "provider/id" 或 ""（跟随剧情模型）
 	const [sideModelKey, setSideModelKey] = useState("");
 	const [sideJailbreak, setSideJailbreak] = useState("");
+	// 开发者模式 + 主聊天跟踪（2026-08-11）：全局配置（liyuan.config.json），保存后生效
+	const [developerMode, setDeveloperMode] = useState(false);
+	const [chatTrace, setChatTrace] = useState(false);
+	const [traceFiles, setTraceFiles] = useState<TraceFileInfo[] | null>(null);
 
 	useEffect(() => {
 		if (data) {
@@ -860,9 +877,32 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 			setAskMode(data.config.creationMode === "ask");
 			setSideModelKey(data.config.sideModel?.provider && data.config.sideModel.id ? `${data.config.sideModel.provider}/${data.config.sideModel.id}` : "");
 			setSideJailbreak(data.config.sideJailbreak ?? "");
+			setDeveloperMode(data.config.developerMode === true);
+			setChatTrace(data.config.chatTrace === true);
 			setDirty(false);
 		}
 	}, [data]);
+
+	// 主聊天跟踪开启时自动拉取跟踪文件列表（关掉则清空）
+	useEffect(() => {
+		if (developerMode && chatTrace) {
+			let alive = true;
+			getTraceFiles()
+				.then((files) => alive && setTraceFiles(files))
+				.catch(() => alive && setTraceFiles([]));
+			return () => {
+				alive = false;
+			};
+		}
+		setTraceFiles(null);
+	}, [developerMode, chatTrace]);
+
+	const reloadTrace = () => {
+		setTraceFiles(null);
+		getTraceFiles()
+			.then(setTraceFiles)
+			.catch(() => setTraceFiles([]));
+	};
 
 	const touch = () => setDirty(true);
 
@@ -886,6 +926,8 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 				creationMode: askMode ? "ask" : "silent",
 				sideModel: sm.length === 2 && sm[0] && sm[1] ? { provider: sm[0], id: sm[1] } : null,
 				sideJailbreak: sideJailbreak.trim(),
+				developerMode,
+				chatTrace,
 			});
 			reload();
 		}, "已保存并重载会话");
@@ -1024,6 +1066,77 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 						<div className="field-hint">
 							除每轮剧情场记外，所有旁路调用（回填/建账/摘要/规划）的 systemPrompt 最前都会带上这段文本。由你主动配置，谨慎使用。
 						</div>
+					</CollapsibleSection>
+
+					<CollapsibleSection title="开发者模式" storageKey="liyuan.settings.open.developer" defaultOpen={false}>
+						<div className="toggle-row">
+							<span>开发者模式</span>
+							<Toggle
+								checked={developerMode}
+								onChange={(v) => {
+									setDeveloperMode(v);
+									touch();
+								}}
+							/>
+						</div>
+						<div className="field-hint">打开后显示开发者选项（调试 / 分析用）。改动随本面板一起保存。</div>
+						{developerMode && (
+							<>
+								<div className="toggle-row">
+									<span>主聊天跟踪</span>
+									<Toggle
+										checked={chatTrace}
+										onChange={(v) => {
+											setChatTrace(v);
+											touch();
+										}}
+									/>
+								</div>
+								<div className="field-hint">
+									记录当前聊天全过程（送模提示词 / 思考 / 工具调用 / 草稿 / 旁路模型 / 定稿）到本机
+									.liyuan-state/trace/&lt;会话id&gt;.jsonl，每条含角色卡 / 预设 / 时间等元信息（JSONL 每事件一行）。
+									保存后下一回合生效；切换聊天自动分文件；文件较大且不自动清理。
+								</div>
+								{chatTrace && (
+									<div style={{ marginTop: 8 }}>
+										<button className="drawer-btn" onClick={reloadTrace}>
+											{traceFiles === null ? "加载跟踪文件…" : "刷新跟踪文件"}
+										</button>
+										{traceFiles !== null && traceFiles.length === 0 && (
+											<div className="field-hint" style={{ marginTop: 6 }}>
+												还没有跟踪文件——保存设置后发一条消息，这里会出现当前聊天的记录。
+											</div>
+										)}
+										{traceFiles !== null && traceFiles.length > 0 && (
+											<div style={{ marginTop: 6, fontSize: 12 }}>
+												{traceFiles.map((f) => (
+													<div
+														key={f.name}
+														className="field-row"
+														style={{ justifyContent: "space-between", gap: 8, alignItems: "center" }}
+													>
+														<span style={{ wordBreak: "break-all" }}>
+															{f.name}（{fmtSize(f.size)} · {new Date(f.mtime).toLocaleString()}）
+														</span>
+														<button
+															className="drawer-btn"
+															style={{ flexShrink: 0 }}
+															onClick={() => {
+																downloadTraceFile(f.name).catch((e) =>
+																	toast("error", e instanceof Error ? e.message : String(e)),
+																);
+															}}
+														>
+															下载
+														</button>
+													</div>
+												))}
+											</div>
+										)}
+									</div>
+								)}
+							</>
+						)}
 					</CollapsibleSection>
 
 					<div className="sticky-save">
