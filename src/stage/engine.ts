@@ -35,6 +35,7 @@ import {
 } from "../preset-split.ts";
 import { formatRosterIndex, formatState, formatTableIndex, loadState, saveState, stateHasTableData } from "../state.ts";
 import { isBackstageText } from "../stance.ts";
+import type { TraceRecorder } from "./trace.ts";
 import type { LorebookEntry, WorldState } from "../types.ts";
 import {
 	buildStageInjection,
@@ -258,6 +259,11 @@ export interface StageEngineDeps {
 	askUser?: (question: string, options: string[], signal?: AbortSignal) => Promise<string | undefined>;
 	streamFn: StageStreamFn;
 	events?: StageEvents;
+	/**
+	 * 主聊天跟踪记录器（开发者模式，2026-08-11）：注入后引擎按 config.chatTrace
+	 * 决定本回合是否记录（每拍现读，保存后下一回合生效）。未注入 = 永不记录。
+	 */
+	trace?: TraceRecorder;
 }
 
 // ---------------- 引擎 ----------------
@@ -276,6 +282,19 @@ const textOfAssistant = (m: AssistantMsgLike | null): string => {
 		.join("")
 		.trim();
 };
+
+/** 从消息 content 提取 thinking 块全文（主聊天跟踪用：每轮完整思考原文） */
+const thinkingTextOf = (m: AssistantMsgLike | null | undefined): string =>
+	(m?.content ?? [])
+		.filter((c) => c.type === "thinking")
+		.map((c) => c.thinking ?? "")
+		.join("\n");
+
+/** 模型展示名（provider/id；主聊天跟踪元信息用） */
+const modelIdOf = (m: StageModelLike): string => `${m.provider}/${m.id}`;
+
+/** 写侧草稿工具（主聊天跟踪 draft 事件：交稿全文 + 验收报告） */
+const DRAFT_TOOLS = new Set(["draft_write", "draft_append", "draft_edit", "draft_seal", "draft_check"]);
 
 /**
  * 轮次卡（P1 注入层）：按工作区状态给出「你现在在第几步」的显式信号。
@@ -338,7 +357,7 @@ function roundCardFor(
 	if (ws.appends > 0 && ws.plan.some((s) => !s.done)) {
 		return (
 			`【演段回看】已演 ${ws.appends} 段。你需要在落笔前完成这一轮的工作：\n` +
-			`\u2460 回看：读一遍刚写下的段落，接住它的气口。\n` +
+			`\u2460 回看：读一遍刚写下的段落，从上一拍结尾处直接继续，禁止重新铺陈环境——接住它的气口。\n` +
 			`\u2461 构思剧情走向：发挥自己职业作家的水平，思考这一段剧情往哪走、人物此刻的状态与下一步的抉择。\n` +
 			`\u2462 全力构思文笔：倾尽所有的去构思这一段怎么写得精彩——镜头、动作、感官细节、神态情绪、节奏、点睛。力求为用户提供最好的体验。\n` +
 			`\u2463 按需调写作方法论：按预设「写作·技能触发表」查本拍场景该读的主题，调 \`writing_guide\` 读对应主题，读完照着写。\n` +
@@ -495,6 +514,24 @@ export class StageEngine {
 
 		// 素材现读：改卡/改预设/挂书即时生效
 		const materials = loadStageMaterials(cwd);
+		const trace = this.#deps.trace;
+		// 主聊天跟踪（开发者模式）：每拍现读配置，保存后下一回合生效；未注入/未开启 = 零开销
+		const traceOn = !!trace && materials.config.chatTrace === true;
+		const sessionId = sm.getSessionId();
+		const turnT0 = Date.now();
+		// 本拍收尾统一写 turn_end（闭包晚绑：entryId/finalText/final 在落树后才定）
+		const endTrace = (aborted: boolean, error?: string) => {
+			if (!traceOn) return;
+			trace!.record(sessionId, {
+				kind: "turn_end",
+				aborted,
+				...(error ? { error } : {}),
+				...(entryId !== undefined ? { entryId } : {}),
+				...(finalText ? { finalText } : {}),
+				elapsedMs: Date.now() - turnT0,
+				...(final?.usage ? { usage: final.usage } : {}),
+			});
+		};
 		const { config, card } = materials;
 		if (materials.macroWarnings.length > 0) {
 			const key = materials.macroWarnings.join(",");
@@ -508,6 +545,20 @@ export class StageEngine {
 		if (!model) {
 			ev.onNotify?.("error", "尚未配置剧情模型——请先在「连接」面板选择模型。");
 			return { aborted: false, error: "no-model" };
+		}
+
+		// 主聊天跟踪：会话头（角色卡/预设/模型/时间等元信息，只写一次）+ 回合开始
+		if (traceOn) {
+			trace!.openSession(sessionId, {
+				sessionId,
+				cardPath: materials.config.card,
+				cardName: materials.card.name,
+				preset: materials.preset?.name ?? null,
+				model: modelIdOf(model),
+				thinkingLevel: this.#deps.getThinking?.(),
+				language: materials.config.language,
+			});
+			trace!.record(sessionId, { kind: "turn_start", userText, model: modelIdOf(model) });
 		}
 
 		if (userText !== null) {
@@ -725,6 +776,17 @@ export class StageEngine {
 			};
 		}
 
+		// 主聊天跟踪：本拍送模完整上下文（system + messages + tools 全文）
+		if (traceOn) {
+			trace!.record(sessionId, {
+				kind: "prompt",
+				systemPrompt,
+				messages,
+				tools,
+				...(thinking ? { reasoning: thinking } : {}),
+			});
+		}
+
 		const s = this.#deps.streamFn(model, { systemPrompt, messages, tools }, options);
 		let final: AssistantMsgLike | null = null;
 		let errored: string | undefined;
@@ -747,6 +809,12 @@ export class StageEngine {
 			}
 		}
 
+		// 主聊天跟踪：首轮完整思考原文（流式增量不逐条记，从最终消息块提取）
+		if (traceOn) {
+			const t = thinkingTextOf(final);
+			if (t) trace!.record(sessionId, { kind: "thinking", round: 0, text: t });
+		}
+
 		// 尾巴口径（8/09）：稿落地后的 text 通道产出。稿落地前工具轮的旁白（读题/计划）
 		// 不算——旁白曾被 mergeFinalText 当尾巴拼到正文尾部（实弹：读题文字跑进正文）。
 		let loopTail = "";
@@ -765,6 +833,7 @@ export class StageEngine {
 				language: config.language,
 				readDeps,
 				directText: text,
+				traceOn,
 			});
 			if (turn.final) final = turn.final;
 			if (turn.errored) errored = turn.errored;
@@ -829,12 +898,14 @@ export class StageEngine {
 
 		if (errored && !aborted) {
 			ev.onNotify?.("error", `生成失败：${errored}`);
+			endTrace(false, errored);
 			return { aborted: false, error: errored, entryId };
 		}
 
 		// 空手认栽（循环逼稿一次仍无产出）：明说，不再静默丢拍（实弹三拍 0 字正文的教训）
 		if (!errored && !aborted && !finalText) {
 			ev.onNotify?.("warning", "本拍模型未交出任何正文（已催稿一次仍空手）——请重试或更换模型。");
+			endTrace(false, "no-draft");
 			return { aborted: false, error: "no-draft" };
 		}
 
@@ -861,7 +932,7 @@ export class StageEngine {
 			const r = await runScribeTurn(
 				{
 					// 2048：账本+名录随剧情增长，patch 可能很长；1024 实测会截断出半截 JSON（8/03）
-					sideText: (sp, ut) => this.#sideText(model, sp, ut, { apiKey, headers }, 2048),
+					sideText: (sp, ut) => this.#sideText(model, sp, ut, { apiKey, headers }, 2048, "scribe", traceOn),
 					appendStateEntry: (s) => sm.appendCustomEntry(STATE_ENTRY_TYPE, s),
 					getLeafId: () => sm.getLeafId(),
 					stateFile: this.#deps.getStateFile?.(sm.getSessionId()),
@@ -885,6 +956,7 @@ export class StageEngine {
 		if (entryId && !aborted && finalText) {
 			await this.#compact(model, { apiKey, headers }, config.compactEveryNTurns ?? 30);
 		}
+		endTrace(aborted);
 		return { aborted, entryId };
 	}
 
@@ -919,12 +991,14 @@ export class StageEngine {
 		const ev = this.#deps.events ?? {};
 		const sm = this.#deps.getSessionManager();
 		const { config, card } = loadStageMaterials(this.#deps.cwd);
+		const trace = this.#deps.trace;
+		const traceOn = !!trace && config.chatTrace === true;
 		try {
 			const branch = sm.getBranch() as BranchEntryLike[];
 			const c = await runCompaction(
 				{
 					// 4096：摘要要装下前情/人物/伏笔/事实账五节，且要合并上一份摘要
-					sideText: (sp, ut) => this.#sideText(model, sp, ut, auth, 4096),
+					sideText: (sp, ut) => this.#sideText(model, sp, ut, auth, 4096, "compact", traceOn),
 					appendSummaryEntry: (data: RpSummaryData) => sm.appendCustomEntry(SUMMARY_ENTRY_TYPE, data),
 					getLeafId: () => sm.getLeafId(),
 					archive: this.#deps.archiveCompacted
@@ -990,9 +1064,13 @@ export class StageEngine {
 		readDeps: StageToolDeps;
 		/** 首轮直出正文（调用方已流式外发） */
 		directText: string;
+		/** 主聊天跟踪（本拍开关，调用方按 config.chatTrace 现读） */
+		traceOn: boolean;
 	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string; tailText?: string }> {
 		const ev = this.#deps.events ?? {};
 		const readDeps = o.readDeps;
+		const trace = this.#deps.trace;
+		const sessionId = this.#deps.getSessionManager().getSessionId();
 		// 走 tools.ts 派发的工具（统一层世界书族/向量库族 + 台上读侧两件）；其余归工作区执行器。
 		// 统一层含写侧（lorebook_write/toggle、memory_add/delete），但它们写的是设定集/记忆库
 		// 而不是本拍草稿，故仍走 tools.ts 而非 workspace——「读/写」在此不是路由依据，工件归属才是。
@@ -1154,6 +1232,11 @@ export class StageEngine {
 				let appendedThisRound = false;
 				for (const call of calls) {
 					const name = call.name ?? "";
+					const callT0 = Date.now();
+					// 主聊天跟踪：工具调用（含被门禁拦下的——配对 tool_result 缺失即被拦）
+					if (o.traceOn) {
+						trace?.record(sessionId, { kind: "tool_call", name, arguments: call.arguments ?? {}, round });
+					}
 					// P7：ask 工具——弹出选择卡等用户应答，答案作为新输入回喂（计划据此重拟）。
 					// 用户停止（undefined）→ 本拍收束：不再续轮，直接以现稿定稿。
 					let r: ToolRunResult | MediaStageResult;
@@ -1342,9 +1425,29 @@ export class StageEngine {
 										text: `未知工具「${name}」。`,
 										isError: true,
 									})
-								: READ_TOOLS.has(name)
-									? await this.#runReadTool(o, readDeps, name, call.arguments ?? {})
-									: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
+					: READ_TOOLS.has(name)
+						? await this.#runReadTool(o, readDeps, name, call.arguments ?? {})
+						: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
+					// 主聊天跟踪：工具执行结果（含耗时）+ 写侧草稿动作（交稿全文与验收）
+					if (o.traceOn) {
+						trace?.record(sessionId, {
+							kind: "tool_result",
+							name,
+							text: r.text,
+							isError: (r as { isError?: boolean }).isError === true,
+							elapsedMs: Date.now() - callT0,
+							round,
+						});
+						if (DRAFT_TOOLS.has(name)) {
+							trace?.record(sessionId, {
+								kind: "draft",
+								action: name,
+								args: (call.arguments ?? {}) as Record<string, unknown>,
+								ok: (r as { ok?: boolean }).ok !== false,
+								result: r.text,
+							});
+						}
+					}
 					// 媒体交付要落成 toolResult 条目（wire 只认树上的 toolResult 出媒体帧）——
 					// 台上引擎默认剥离工具轨迹，故在此单独收集，谢幕后随正文一起落树。
 					const mediaDetails = (r as MediaStageResult).details;
@@ -1458,6 +1561,11 @@ export class StageEngine {
 				} else {
 					fwd(e);
 				}
+			}
+			// 主聊天跟踪：本轮完整思考原文（round+1：0 是首轮，已在 #turn 记）
+			if (o.traceOn) {
+				const t = thinkingTextOf(final);
+				if (t) trace?.record(sessionId, { kind: "thinking", round: round + 1, text: t });
 			}
 			if (!final) return { final: last, text, tailText: tailOf() };
 			last = final;
@@ -1693,7 +1801,11 @@ export class StageEngine {
 		userText: string,
 		auth: { apiKey?: string; headers?: Record<string, string> },
 		maxTokens = 8192,
+		/** 用途（主聊天跟踪 side 事件；场记/压缩） */
+		purpose = "side",
+		traceOn = false,
 	): Promise<string | { error: string }> {
+		const t0 = Date.now();
 		const options: Record<string, unknown> = {
 			apiKey: auth.apiKey,
 			headers: auth.headers,
@@ -1716,14 +1828,46 @@ export class StageEngine {
 			for await (const e of s) {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
-					return { error: e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}` };
+					const msg = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
+					this.#sideTrace(purpose, model, systemPrompt, userText, false, msg, t0, traceOn);
+					return { error: msg };
 				}
 			}
-			if (!final) return { error: "流未产出最终消息" };
+			if (!final) {
+				this.#sideTrace(purpose, model, systemPrompt, userText, false, "流未产出最终消息", t0, traceOn);
+				return { error: "流未产出最终消息" };
+			}
 			const text = textOfAssistant(final);
+			this.#sideTrace(purpose, model, systemPrompt, userText, !!text, text || undefined, t0, traceOn);
 			return text || { error: "最终消息无文本" };
 		} catch (err) {
-			return { error: err instanceof Error ? err.message : String(err) };
+			const msg = err instanceof Error ? err.message : String(err);
+			this.#sideTrace(purpose, model, systemPrompt, userText, false, msg, t0, traceOn);
+			return { error: msg };
 		}
+	}
+
+	/** 旁路调用落 trace（side 事件：用途/提示词/结果/耗时）；开关关闭或未注入时零开销 */
+	#sideTrace(
+		purpose: string,
+		model: StageModelLike,
+		systemPrompt: string,
+		userText: string,
+		ok: boolean,
+		text: string | undefined,
+		t0: number,
+		traceOn: boolean,
+	): void {
+		if (!traceOn) return;
+		this.#deps.trace?.record(this.#deps.getSessionManager().getSessionId(), {
+			kind: "side",
+			purpose,
+			systemPrompt,
+			userText,
+			model: modelIdOf(model),
+			ok,
+			...(text ? { text } : {}),
+			elapsedMs: Date.now() - t0,
+		});
 	}
 }

@@ -288,6 +288,18 @@ export interface RpConfig {
 	 * 空 = 不注入。用户主动配置，默认保护不变。
 	 */
 	sideJailbreak?: string;
+	/**
+	 * 开发者模式（2026-08-11）：总开关，打开后在设置面板显示开发者选项。
+	 * 纯 UI/配置位，具体行为由各子选项（如 chatTrace）决定。
+	 */
+	developerMode?: boolean;
+	/**
+	 * 主聊天跟踪（2026-08-11，开发调试用）：开启后把当前聊天全过程
+	 * （送模提示词/思考/工具调用/草稿/旁路模型/定稿）按事件追加写入
+	 * `.liyuan-state/trace/<sessionId>.jsonl`（JSONL 机器格式，见 docs/DESIGN-debug-trace.md）。
+	 * 每回合现读配置，保存后下一回合生效；按会话分文件。
+	 */
+	chatTrace?: boolean;
 }
 
 export const DEFAULT_CONFIG: RpConfig = {
@@ -306,6 +318,9 @@ export const DEFAULT_CONFIG: RpConfig = {
 	tableBackfillThreshold: 6,
 	// 默认无自定义 agent（declarative，见 AgentConfig）
 	agents: [],
+	// 开发者功能默认全关（调试记录涉及完整提示词/思考，按需开启）
+	developerMode: false,
+	chatTrace: false,
 };
 
 /** 宏替换上下文 */

@@ -44,6 +44,7 @@ import { streamSimple } from "@liyuan/ai/compat";
 import { loadCardFile } from "../src/card.ts";
 import { buildGreeting } from "../src/greeting.ts";
 import { StageEngine, type AssistantMsgLike, type StageStreamFn } from "../src/stage/engine.ts";
+import { TraceRecorder } from "../src/stage/trace.ts";
 import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
 import {
 	activePanels,
@@ -3127,6 +3128,9 @@ const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
 // ---------- 台上引擎（PLAN-RP-HARNESS R1：叙事回合走自建循环，pi 只留幕后） ----------
 
+// 主聊天跟踪（开发者模式）：写 .liyuan-state/trace/<sessionId>.jsonl；引擎按 config.chatTrace 现读开关
+const traceRecorder = new TraceRecorder(join(stateDir, "trace"));
+
 const stage = new StageEngine({
 	cwd,
 	getSessionManager: () => session.sessionManager as never,
@@ -3443,6 +3447,7 @@ const stage = new StageEngine({
 				}
 			}
 		},
+		trace: traceRecorder,
 	},
 });
 

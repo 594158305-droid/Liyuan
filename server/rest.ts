@@ -113,7 +113,7 @@ import {
 	updateMemoryConfig,
 	updateStoreConfig,
 } from "../src/memory/index.ts";
-import { resolveConfigPath } from "../src/paths.ts";
+import { dir, resolveConfigPath } from "../src/paths.ts";
 import type { WorldlineView } from "../src/worldline.ts";
 import {
 	appendLorebookFileEntry,
@@ -157,6 +157,7 @@ import {
 	type McpServerConfig,
 } from "../src/mcp.ts";
 import { listSkills, saveSkill } from "../src/skills.ts";
+import { TraceRecorder } from "../src/stage/trace.ts";
 import { DEFAULT_CONFIG, type AgentBridgePermissions, type AgentConfig, type LorebookEntry, type RpConfig } from "../src/types.ts";
 import { readJsonFile } from "../src/jsonio.ts";
 import { formatBytes, listMedia, listUploads, saveUpload } from "../src/uploads.ts";
@@ -891,6 +892,8 @@ const CONFIG_EDITABLE = new Set([
 	"assistantModel",
 	"sideModel",
 	"sideJailbreak",
+	"developerMode",
+	"chatTrace",
 	"agents",
 	"plugins",
 ]);
@@ -956,6 +959,9 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 			next.sideModel = { provider: sm.provider, id: sm.id };
 		}
 	}
+	// 开发者开关：只认布尔（false 是合法值，不会被空值删除逻辑清掉）
+	next.developerMode = next.developerMode === true;
+	next.chatTrace = next.chatTrace === true;
 	// 挂载书：lorebooks 数组优先；兼容旧单本 lorebook
 	const paths = mountedLorebookPaths(next as RpConfig);
 	Object.assign(next, setMountedLorebooks(next as RpConfig, paths));
@@ -4447,6 +4453,28 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 					req.off("aborted", onAbort);
 					req.off("close", onAbort);
 				}
+				return true;
+			}
+
+			// ---- 主聊天跟踪（开发者模式）：列表 + 下载（.liyuan-state/trace/<sessionId>.jsonl） ----
+			case "GET /api/trace/list": {
+				const trace = new TraceRecorder(join(dir(host.cwd, "state"), "trace"));
+				sendJson(res, 200, { ok: true, files: trace.list() });
+				return true;
+			}
+			case "GET /api/trace/download": {
+				const name = query.get("name") ?? "";
+				// 文件名严格限定 <sessionId>.jsonl（与 TraceRecorder.fileOf 的 sanitize 白名单同源），杜绝路径穿越
+				if (!/^[A-Za-z0-9._-]+\.jsonl$/.test(name)) throw new Error("非法跟踪文件名");
+				const trace = new TraceRecorder(join(dir(host.cwd, "state"), "trace"));
+				const file = join(trace.dir, name);
+				if (!existsSync(file)) throw new Error("跟踪文件不存在");
+				const content = readFileSync(file, "utf8");
+				res.writeHead(200, {
+					"content-type": "application/x-ndjson; charset=utf-8",
+					"content-disposition": `attachment; filename="${name}"`,
+				});
+				res.end(content);
 				return true;
 			}
 

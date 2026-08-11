@@ -317,6 +317,10 @@ export interface RpConfigView {
 	sideModel?: { provider: string; id: string } | null;
 	/** 破甲提示词（可选，固定放旁路 systemPrompt 最前；空 = 不注入） */
 	sideJailbreak?: string;
+	/** 开发者模式总开关（2026-08-11）：打开后设置面板显示开发者选项 */
+	developerMode?: boolean;
+	/** 主聊天跟踪（2026-08-11）：记录聊天全过程到 .liyuan-state/trace/<sessionId>.jsonl */
+	chatTrace?: boolean;
 }
 
 export interface CardResponse {
@@ -574,6 +578,42 @@ export function downloadText(filename: string, text: string): void {
 	const a = document.createElement("a");
 	a.href = url;
 	a.download = filename;
+	a.click();
+	URL.revokeObjectURL(url);
+}
+
+// ---------- 主聊天跟踪（开发者模式）：/api/trace/list + /api/trace/download ----------
+
+export interface TraceFileInfo {
+	name: string;
+	size: number;
+	mtime: string;
+}
+
+/** 跟踪文件列表（.liyuan-state/trace/ 下所有 <sessionId>.jsonl，按 mtime 倒序） */
+export async function getTraceFiles(): Promise<TraceFileInfo[]> {
+	const d = await apiGet<{ ok: boolean; files?: TraceFileInfo[] }>("/api/trace/list", { bypassCache: true });
+	return d.files ?? [];
+}
+
+/** 下载指定跟踪文件（服务端 attachment；文件名须为 <sessionId>.jsonl 形态） */
+export async function downloadTraceFile(name: string): Promise<void> {
+	const res = await fetch(`/api/trace/download?name=${encodeURIComponent(name)}`);
+	if (!res.ok) {
+		let msg = `下载失败（HTTP ${res.status}）`;
+		try {
+			const d = (await res.json()) as { error?: string };
+			if (d.error) msg = d.error;
+		} catch {
+			// 非 JSON 错误体
+		}
+		throw new Error(msg);
+	}
+	const blob = await res.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement("a");
+	a.href = url;
+	a.download = name;
 	a.click();
 	URL.revokeObjectURL(url);
 }
