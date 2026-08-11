@@ -388,6 +388,25 @@ export function stagehandPluginToolNames(): string[] {
 	return enabledPluginToolNames();
 }
 
+/**
+ * 当前角色卡路径+名（config.card + 卡文件 name；坏卡路径回退 fallbackName）。
+ * 模块级辅助：createStagehandTools（工具面）与 createAgentHost（会话托管）各自挂薄别名，
+ * 避免工具 execute 引用对方闭包变量导致 ReferenceError（card_read/draw_generate 曾中招）。
+ */
+function currentCardOf(cwd: string, fallbackName?: string): { path: string; name: string } {
+	const config = loadConfig(cwd);
+	const path = (config.card ?? "").trim();
+	let name = fallbackName || "角色";
+	if (path) {
+		try {
+			name = loadCardFile(isAbsolute(path) ? path : join(cwd, path)).name || name;
+		} catch {
+			// 坏卡路径：仍用 fallbackName
+		}
+	}
+	return { path, name };
+}
+
 function createStagehandTools(
 	cwd: string,
 	bridge: StoryBridge,
@@ -395,6 +414,8 @@ function createStagehandTools(
 	allowTools?: string[],
 ): ToolDefinition[] {
 	const tools: ToolDefinition[] = [];
+	// 当前角色卡（本作用域内工具共用；实现见模块级 currentCardOf）
+	const currentCard = (): { path: string; name: string } => currentCardOf(cwd, bridge.cardName() || "角色");
 
 	// ---- 委托交回 / 卡住问人（先于其它工具注册，提示词与完成协议挂钩） ----
 	tools.push(
@@ -1637,19 +1658,8 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 
 	const selfInfo = () => ({ model: modelInfo(), follow: follows() });
 
-	const currentCard = (): { path: string; name: string } => {
-		const config = loadConfig(cwd);
-		const path = (config.card ?? "").trim();
-		let name = bridge.cardName() || "角色";
-		if (path) {
-			try {
-				name = loadCardFile(isAbsolute(path) ? path : join(cwd, path)).name || name;
-			} catch {
-				// 坏卡路径：仍用 bridge 名
-			}
-		}
-		return { path, name };
-	};
+	// 当前角色卡：复用模块级实现（与 createStagehandTools 工具面的 currentCard 同源）
+	const currentCard = (): { path: string; name: string } => currentCardOf(cwd, bridge.cardName() || "角色");
 
 	/** 当前助手会话绑定的剧情 sessionId（来自最后一条 rp-card） */
 	const readCurrentStoryId = (s: AgentSession): string | undefined => {
