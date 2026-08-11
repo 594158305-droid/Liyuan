@@ -44,6 +44,7 @@ import { streamSimple } from "@liyuan/ai/compat";
 import { loadCardFile } from "../src/card.ts";
 import { buildGreeting } from "../src/greeting.ts";
 import { StageEngine, type AssistantMsgLike, type StageStreamFn } from "../src/stage/engine.ts";
+import { isSoundFxName } from "../src/stage/tools.ts";
 import { TraceRecorder } from "../src/stage/trace.ts";
 import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
 import {
@@ -846,6 +847,13 @@ interface PendingChoice {
 const pendingChoices = new Map<string, PendingChoice>();
 let choiceSeq = 0;
 
+/** play_sound 帧发射（白名单 + 音量校验 + 广播）：uiContext 与台上引擎事件共用 */
+const emitPlaySound = (sound: string, volume?: number) => {
+	if (!isSoundFxName(sound)) return;
+	const vol = typeof volume === "number" && Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : undefined;
+	broadcast({ type: "play_sound", sound, ...(vol !== undefined ? { volume: vol } : {}) });
+};
+
 /** JS Runner 程序化生成（ext_generate）进行中流：reqId → AbortController（ext_abort 用） */
 const extGenerateControllers = new Map<string, AbortController>();
 
@@ -883,6 +891,10 @@ const uiContext = {
 	// 有实义的部分：通知直达 Web（审计告警零改动上屏）
 	notify(message: string, type?: "info" | "warning" | "error") {
 		broadcast({ type: "notify", level: type ?? "info", text: message });
+	},
+	// LLM 主动播放音效（play_sound 工具）：白名单校验后广播，前端按名合成提示音
+	playSound(sound: string, volume?: number) {
+		emitPlaySound(sound, volume);
 	},
 	// 决策门禁：选择卡（有选项）/ 自由输入卡（无选项）——均带自由输入框与停止按钮（前端渲染）
 	select: async (title: string, options: string[], opts?: { signal?: AbortSignal }) =>
@@ -2264,7 +2276,7 @@ const storyBridgeBase: StoryBridge = {
 	 * createSlot 登记 slot（file 指向 cache/media 相对路径）+ buildInsertPatch 生成 rp-draft-op 补丁
 	 * + 分支校验 + sendCustomMessage 写入。树上字节不改（补丁读取时生效）。
 	 */
-	async embedStoryImage({ src, anchor, scene, characters }) {
+	async embedStoryImage({ src, anchor, scene, characters, characterPrompts }) {
 		try {
 			// 1) src 解析：/cache/xxx → .liyuan-cache/xxx（相对 cwd）；/media/xxx → .liyuan-media/xxx；绝对路径原样
 			let rel: string;
@@ -2307,13 +2319,19 @@ const storyBridgeBase: StoryBridge = {
 
 			// 3) createSlot：slotId = slot-<uuid>，chatId=sessionId，messageId=条目 id，file=rel
 			//    params 存结构化分栏（LWB 编辑 TAG 数据源）：
-			//    有 characters → 经服装档案组装 characterPrompts（过滤空 tag）；无 → 仅 scene/positive
+			//    有 characterPrompts（调用方已解析，draw_generate 生图与分栏共用同一份）→ 直接用；
+			//    否则有 characters → 经服装档案组装（过滤空 tag）；无 → 仅 scene/positive
 			const slotId = `slot-${randomUUID()}`;
 			let params: Record<string, unknown> = {};
 			if (scene) {
 				params = { scene, positive: scene };
 			}
-			if (characters && characters.length > 0) {
+			if (characterPrompts && characterPrompts.length > 0) {
+				const prompts = characterPrompts
+					.map((c) => ({ name: c.name, prompt: (c.prompt ?? "").trim(), ...(c.uc ? { uc: c.uc } : {}) }))
+					.filter((c) => c.prompt);
+				if (prompts.length > 0) params.characterPrompts = prompts;
+			} else if (characters && characters.length > 0) {
 				const card = cardPath || (() => {
 					try {
 						return (JSON.parse(readFileSync(join(cwd, "liyuan.config.json"), "utf8")) as { card?: string }).card ?? "";
@@ -3277,6 +3295,8 @@ const stage = new StageEngine({
 		onStreamClear: () => broadcast({ type: "stream", state: "clear" }),
 		onNotify: (level, text) => broadcast({ type: "notify", level, text }),
 		onActivity: (detail) => broadcast({ type: "activity", activity: { kind: "note", name: "stage", detail } }),
+		// LLM 主动播放音效（play_sound 工具）：同 uiContext 白名单与音量校验
+		onPlaySound: (sound, volume) => emitPlaySound(sound, volume),
 		onTurnEnd: (info) => {
 			broadcast({ type: "agent", state: "end" });
 			// reroll/编辑输入后无产出（aborted 无落树 / error）：回退到 reroll 前的旧叶——

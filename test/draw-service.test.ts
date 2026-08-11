@@ -117,6 +117,62 @@ test("service: generateImage 落盘 + src/slotId 格式 + 风格/aspect/参数�
 	assert.equal(p.v4_prompt.caption.base_caption, "masterpiece, best quality, solo, girl");
 	assert.equal(p.negative_prompt, "bad hands, lowres");
 	assert.ok(p.seed >= 0 && p.seed <= 0xffffffff);
+	// 缺省不传 characterPrompts → 空分栏（保持原行为）
+	assert.deepEqual(p.characterPrompts, []);
+	assert.deepEqual(p.v4_prompt.caption.char_captions, []);
+});
+
+test("service: generateImage 带 characterPrompts → V4.5 请求体含角色分栏（char_captions + 参考图）", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "liyuan-svc-"));
+	setupConfig(dir);
+	const captured: { body?: any } = {};
+	const fetchImpl = fakeFetchZip(PNGBYTES, captured);
+
+	const { generateImage } = await import("../src/draw/service.ts?gen-char");
+	const r = await generateImage(dir, {
+		prompt: "solo, girl",
+		characterPrompts: [
+			{ prompt: "blonde hair, blue eyes", uc: "barefoot", center: { x: 0.5, y: 0.5 } },
+			{ prompt: "red dress", center: { x: 0.5, y: 0.5 } },
+		],
+		fetchImpl: fetchImpl as any,
+	});
+	assert.match(r.src, /^\/cache\/draw-\d+-[0-9a-f]{6}\.png$/);
+	assert.equal(r.providerId, "n1");
+	const p = captured.body.parameters;
+	// 角色分栏进 V4.5 请求：characterPrompts 数组 + v4_prompt 的 char_captions
+	assert.equal(p.characterPrompts.length, 2);
+	assert.equal(p.characterPrompts[0].prompt, "blonde hair, blue eyes");
+	assert.equal(p.characterPrompts[0].uc, "barefoot");
+	assert.equal(p.characterPrompts[0].center.x, 0.5);
+	assert.equal(p.characterPrompts[1].prompt, "red dress");
+	// 正负 caption：base_caption 仍是 scene，char_captions 按角色分栏
+	assert.equal(p.v4_prompt.caption.base_caption, "solo, girl");
+	assert.equal(p.v4_prompt.caption.char_captions[0].char_caption, "blonde hair, blue eyes");
+	assert.equal(p.v4_prompt.caption.char_captions[1].char_caption, "red dress");
+	assert.equal(p.v4_negative_prompt.caption.char_captions[0].char_caption, "barefoot");
+});
+
+test("service: generateImage 带 characterPrompts → V3 模型角色 tag 合并进 input + 负面合并", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "liyuan-svc-"));
+	setupConfig(dir, (cfg) => {
+		cfg.providers[0].model = "nai-diffusion-3-5";
+	});
+	const captured: { body?: any } = {};
+	const fetchImpl = fakeFetchZip(PNGBYTES, captured);
+
+	const { generateImage } = await import("../src/draw/service.ts?gen-char-v3");
+	await generateImage(dir, {
+		prompt: "solo, girl",
+		negativePrompt: "lowres",
+		characterPrompts: [
+			{ prompt: "blonde hair, blue eyes", uc: "barefoot", center: { x: 0.5, y: 0.5 } },
+			{ prompt: "red dress", center: { x: 0.5, y: 0.5 } },
+		],
+		fetchImpl: fetchImpl as any,
+	});
+	assert.equal(captured.body.input, "solo, girl, blonde hair, blue eyes, red dress");
+	assert.equal(captured.body.parameters.negative_prompt, "lowres, barefoot");
 });
 
 test("service: generateImage 无 provider 抛 DrawError(unknown)", async () => {

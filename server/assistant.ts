@@ -78,6 +78,8 @@ import { parseCardFromSessionHead } from "./wire.ts";
 import { loadDrawConfig } from "../src/draw/config.ts";
 import { generateImage, enhanceImage } from "../src/draw/service.ts";
 import { DrawError } from "../src/draw/errors.ts";
+import type { CharacterPrompt } from "../src/draw/novelai.ts";
+import { resolveCharacterTags } from "../src/draw-plugins/draw-role/resolver.ts";
 import { enabledPluginToolDefs, enabledPluginToolNames, initPlugins } from "../src/draw-plugins/registry.ts";
 
 /** 剧情会话桥：main.ts 提供，助手工具经此只读剧情面 / 提交白名单写操作 */
@@ -149,8 +151,16 @@ export interface StoryBridge {
 	 * Q15 裁决：draw_generate 默认嵌入；用户明确不要进正文时由工具传 embed:false 跳过。
 	 * opts.scene：结构化 tags 的 scene（助手画面描述）；opts.characters：在场角色名列表
 	 * （领域层经服装档案组装 characterPrompts 分栏；缺省无角色分栏）。
+	 * opts.characterPrompts：调用方已解析好的角色分栏（draw_generate 生图前解析一次，
+	 * 生图与 slot 分栏共用同一份，避免二次解析/不一致）；有则直接用，无则按 characters 解析。
 	 */
-	embedStoryImage?(opts: { src: string; anchor?: string; scene?: string; characters?: string[] }): Promise<{
+	embedStoryImage?(opts: {
+		src: string;
+		anchor?: string;
+		scene?: string;
+		characters?: string[];
+		characterPrompts?: Array<{ name: string; prompt: string; uc?: string }>;
+	}): Promise<{
 		ok: boolean;
 		error?: string;
 		slotId?: string;
@@ -782,7 +792,7 @@ function createStagehandTools(
 			name: "draw_generate",
 			label: "生成图片",
 			description:
-				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；**prompt 必须用英文 Danbooru tag 或英文画面描述（NovelAI 不认中文 tag，写中文会出无效图）**；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**anchor 必填**：图片默认嵌入最近一条剧情消息正文，必须给 anchor（从正文**逐字摘录** 8-15 字短原文片段，图片挂在该片段所在段落而不是消息末尾；正文内容用 story_read 读取后再摘录）；仅用户明确不要进正文时传 embed:false（此时 anchor 可不填）。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。tag 写法与构图规范见 skill novelai-draw。",
+				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；**prompt 必须用英文 Danbooru tag 或英文画面描述（NovelAI 不认中文 tag，写中文会出无效图）**；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**anchor 必填**：图片默认嵌入最近一条剧情消息正文，必须给 anchor（从正文**逐字摘录** 8-15 字短原文片段，图片挂在该片段所在段落而不是消息末尾；正文内容用 story_read 读取后再摘录）；仅用户明确不要进正文时传 embed:false（此时 anchor 可不填）。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。**生图前先 read `.liyuan-skills/moment-capture.md` 盘点视觉时刻（七类时刻 + 密度分档 + 分级证据，产出时刻清单），再按 skill novelai-draw 写图**。tag 写法与构图规范见 skill novelai-draw。",
 			parameters: Type.Object({
 				prompt: Type.String({ description: "画面描述/场景构图（**必须英文 Danbooru tag 或英文描述，NAI 不认中文 tag**；不含角色特征 tag）" }),
 				negativePrompt: Type.Optional(Type.String({ description: "整图负面 tag（英文）" })),
@@ -820,8 +830,36 @@ function createStagehandTools(
 			}),
 			async execute(_id, params) {
 				try {
+					// 角色分栏：characters 经服装档案解析**一次**，生图与 slot 分栏（编辑 TAG）共用同一份——
+					// 修复 draw_generate 不带角色特征生图（修复前 characters 只进 embedStoryImage 元数据，
+					// generateImage 收到 characterPrompts: [] → 图上没有角色特征，手动重新生成走面板 redraw 才正常）
+					let characterPrompts: CharacterPrompt[] = [];
+					let slotCharacters: Array<{ name: string; prompt: string; uc?: string }> = [];
+					if (params.characters && params.characters.length > 0) {
+						const cardPath = currentCard().path;
+						if (cardPath) {
+							try {
+								const r = resolveCharacterTags(cwd, cardPath, params.characters, bridge.worldState());
+								const kept = r.characters.filter((c) => c.tags.trim() || c.referenceImage);
+								characterPrompts = kept.map((c) => ({
+									prompt: c.tags.trim(),
+									uc: c.uc,
+									center: { x: 0.5, y: 0.5 },
+									...(c.referenceImage ? { referenceImage: c.referenceImage } : {}),
+								}));
+								slotCharacters = kept.map((c) => ({
+									name: c.name,
+									prompt: c.tags.trim(),
+									...(c.uc ? { uc: c.uc } : {}),
+								}));
+							} catch {
+								// 解析失败：不带角色分栏生图（embedStoryImage 侧仍按 characters 自行解析兜底）
+							}
+						}
+					}
 					const r = await generateImage(cwd, {
 						prompt: params.prompt,
+						characterPrompts,
 						negativePrompt: params.negativePrompt,
 						aspect: params.aspect,
 						providerId: params.provider,
@@ -840,6 +878,8 @@ function createStagehandTools(
 							src: r.src,
 							scene: params.prompt,
 							characters: params.characters,
+							// 生图已用的同一份角色分栏（避免二次解析）
+							...(slotCharacters.length > 0 ? { characterPrompts: slotCharacters } : {}),
 							// 用户指定的挂接位置（正文短原文片段；缺省=消息末尾）
 							...(params.anchor && params.anchor.trim() ? { anchor: params.anchor.trim() } : {}),
 						});

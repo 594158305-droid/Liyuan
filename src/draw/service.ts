@@ -16,12 +16,15 @@ import { DrawError } from "./errors.ts";
 import { effectiveParams, resolveAspectSize } from "./params.ts";
 import { DrawRequestQueue } from "./queue.ts";
 import { buildEnhanceBody, buildGenerateBody, sendDrawRequest } from "./novelai.ts";
+import type { CharacterPrompt } from "./novelai.ts";
 
 /** 额外覆盖参数：DrawParams 驼峰字段 + seed（seed -1 表示随机） */
 export type DrawParamsOverrides = Partial<DrawParams> & { seed?: number };
 
 export interface GenerateImageOptions {
 	prompt: string; // 已组装的画面描述/tag（不含质量前缀）
+	/** 角色分栏（CharacterPrompt[]：prompt/uc/center/参考图）——由调用方（接线层/插件）经服装档案解析后传入；缺省 []（无角色分栏） */
+	characterPrompts?: CharacterPrompt[];
 	negativePrompt?: string;
 	aspect?: "portrait" | "landscape" | "square"; // 缺省不改尺寸
 	providerId?: string; // 缺省用配置默认
@@ -147,7 +150,7 @@ export async function generateImage(cwd: string, opts: GenerateImageOptions): Pr
 
 	const body = buildGenerateBody({
 		scene: positive,
-		characterPrompts: [],
+		characterPrompts: opts.characterPrompts ?? [],
 		negativePrompt: negative,
 		params: resolved,
 		model: provider.model,
