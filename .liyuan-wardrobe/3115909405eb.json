@@ -22,7 +22,7 @@
 		},
 		{
 			"name": "凯尔",
-			"appearanceTags": "1.3::faceless::, bald",
+			"appearanceTags": "1.3::male::, muscular, tall, short dark hair, black hair",
 			"outfits": [
 				{
 					"id": "8495bcfe",
@@ -227,17 +227,7 @@
 			],
 			"type": "girl",
 			"useDanbooruTag": false,
-			"hidden": true,
 			"id": "char-1781880424903-a1r0"
-		},
-		{
-			"name": "藤田",
-			"appearanceTags": "short, black hair, round glasses",
-			"outfits": [],
-			"type": "boy",
-			"useDanbooruTag": true,
-			"hidden": true,
-			"id": "slot-1781901996934-sc1x"
 		},
 		{
 			"name": "谢菲尔德",
@@ -245,7 +235,6 @@
 			"outfits": [],
 			"type": "girl",
 			"useDanbooruTag": false,
-			"hidden": true,
 			"id": "char-1782571776248-lanv"
 		},
 		{
@@ -258,7 +247,6 @@
 			"type": "girl",
 			"danbooruTag": "rio_(blue_archive)",
 			"useDanbooruTag": false,
-			"hidden": true,
 			"id": "char-1782664242732-a11e"
 		},
 		{
@@ -279,7 +267,6 @@
 			"outfits": [],
 			"type": "girl",
 			"useDanbooruTag": false,
-			"hidden": true,
 			"id": "char-1783262541103-5kr6"
 		},
 		{
@@ -291,16 +278,14 @@
 			],
 			"type": "girl",
 			"useDanbooruTag": true,
-			"hidden": true,
 			"id": "char-1783309643427-q4gr"
 		},
 		{
 			"name": "赫斯緹雅",
-			"appearanceTags": "hestia (danmachi), heart-shaped eyes",
+			"appearanceTags": "1.3::hestia (danmachi)::, heart-shaped eyes",
 			"outfits": [],
 			"type": "girl",
 			"useDanbooruTag": false,
-			"hidden": true,
 			"id": "char-1783337793169-buxi"
 		},
 		{
@@ -323,7 +308,6 @@
 			],
 			"type": "girl",
 			"useDanbooruTag": false,
-			"hidden": true,
 			"id": "char-1783830963806-h2ze"
 		},
 		{
