@@ -1186,8 +1186,8 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "template_create",
 			label: "创建表格模板",
-			description:
-				"Save a reusable table template to .liyuan-templates/ (a global file shared by all chats and cards). A template is a named bundle of table definitions — each has columns and optional auto flag (true = the scene recorder maintains it every turn and its content is fully injected) and instructions (maintenance rules for the scribe/model). Use this to define a reusable structure once, then bind it to a card (config.cardTemplates) or apply it into the current chat with template_apply. auto tables materialized from templates are still maintained by the scribe automatically.",
+				description:
+					"Save a reusable table template to .liyuan-templates/ (a global file shared by all chats and cards). A template is a named bundle of table definitions — each has columns and optional auto flag (true = the scene recorder maintains it every turn; table content is never injected into context, query it with table_query) and instructions (maintenance rules for the scribe/model). Use this to define a reusable structure once, then bind it to a card (config.cardTemplates) or apply it into the current chat with template_apply. auto tables materialized from templates are still maintained by the scribe automatically.",
 			parameters: Type.Object({
 				name: Type.String({ description: "模板名（唯一，≤40 字；重名覆盖）" }),
 				description: Type.Optional(Type.String({ description: "模板用途说明" })),

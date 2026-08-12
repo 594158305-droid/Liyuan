@@ -74,6 +74,22 @@ export function stageTools(language: string, deps?: StageToolDeps): StageTool[] 
 			description: "读取当前世界状态账本（时间/地点/人物好感与状态/物品归属/标记/剧情线）。拿不准既定事实时调用。",
 			parameters: { type: "object", properties: {}, required: [] },
 		},
+		{
+			name: "table_query",
+			description:
+				"读取自定义表格内容（只读）：传表名返回该表行数据，filter 可按列名键值等值过滤。" +
+				"表格内容不随【世界状态】注入——涉及表内事实（角色档案/关系/物品/伏笔/约定等）拿不准时调用，" +
+				"查到的行数据按原样使用，禁止凭想象改动表内已有事实。",
+			parameters: {
+				type: "object",
+				properties: {
+					table: { type: "string", description: "要查询的表名" },
+					filter: { type: "object", description: "可选：按列名键值等值过滤，如 {\"姓名\":\"林霜\"}" },
+					limit: { type: "number", description: "可选：最多返回行数（默认 20）" },
+				},
+				required: ["table"],
+			},
+		},
 	];
 }
 
@@ -247,6 +263,8 @@ export function writeTools(language: string): StageTool[] {
 				"提交世界状态账本补丁（合并语义）：time/location 字符串整体替换；characters 按角色名合并字段" +
 				"（affinity 数值/status/notes，传 null 删除该角色）；flags 按键合并（null 删除）；" +
 				"inventory/plot_threads 传**字符串数组**整体替换（如 [\"补气丹（已服用）\"]，元素不能是对象）。" +
+				"**自定义表格不在此工具提交**：[auto] 表由场记每轮自动维护（tables 补丁落账），非 auto 表由助手手动维护；" +
+				"需要表内内容用 table_query 只读查询。" +
 				"本拍剧情改变了世界（时间流逝/移动/关系变化/" +
 				"获得失去物品/剧情推进）就在定稿前提交——你是唯一知道现场发生了什么的人，不提交账本就会漂移。",
 			parameters: {
@@ -379,5 +397,36 @@ export async function runStageTool(
 		return { text: `${deps.formatState(s)}\n\nRAW:\n${JSON.stringify(s)}`, activity: "查账本" };
 	}
 
-	return { text: `未知工具 ${name}——本拍可用：lorebook_search / memory_search / world_state_get。` };
+	if (name === "table_query") {
+		const s = deps.getState();
+		const tname = typeof args.table === "string" ? args.table.trim() : "";
+		const table = tname ? s.tables?.[tname] : undefined;
+		if (!table) {
+			const names = Object.keys(s.tables ?? {});
+			return { text: `表「${tname}」不存在${names.length ? `。现有表：${names.join("、")}` : "（账本中还没有表格）"}。` };
+		}
+		const filter =
+			args.filter && typeof args.filter === "object" && !Array.isArray(args.filter)
+				? (args.filter as Record<string, unknown>)
+				: undefined;
+		const limit =
+			typeof args.limit === "number" && Number.isFinite(args.limit) && args.limit > 0 ? Math.floor(args.limit) : 20;
+		const rows = filter
+			? table.rows.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v))
+			: table.rows;
+		if (rows.length === 0) {
+			return {
+				text: `表「${tname}」${filter ? `（filter ${JSON.stringify(filter)}）` : ""}无匹配行。`,
+				activity: `查表「${tname}」`,
+			};
+		}
+		const shown = rows.slice(0, limit);
+		const more = rows.length > shown.length ? `\n（共 ${rows.length} 行，仅列前 ${shown.length} 行）` : "";
+		return {
+			text: `表「${tname}」${filter ? `（filter ${JSON.stringify(filter)}）` : ""}${rows.length} 行：\n${JSON.stringify(shown, null, 1)}${more}`,
+			activity: `查表「${tname}」`,
+		};
+	}
+
+	return { text: `未知工具 ${name}——本拍可用：lorebook_search / memory_search / world_state_get / table_query。` };
 }

@@ -19,6 +19,12 @@ export interface ScribePromptInput {
 	/** 用户角色名 */
 	userName: string;
 	/**
+	 * 记账域分工（8/13）："full" = 全域记账（主演本拍未提交 world_state_update 时的兜底）；
+	 * "tables-only" = 只维护自定义表格（主演已提交顶层记账时，场记专职 tables 域）。
+	 * 缺省 "full"（保持旧行为）。
+	 */
+	scope?: "tables-only" | "full";
+	/**
 	 * @deprecated 已不再做先斩后奏检测；保留字段以免旧调用方报错，忽略。
 	 */
 	detectUnaskedTurn?: boolean;
@@ -34,13 +40,15 @@ export interface ScribeResult {
 }
 
 export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt: string; userText: string } {
-	const { state, userText, assistantText, charName, userName } = input;
+	const { state, userText, assistantText, charName, userName, scope = "full" } = input;
 	const knownCharacters = Object.keys(state.characters);
 	const nameGuide = knownCharacters.length
 		? `名字必须使用账本中已有的写法（当前已有：${knownCharacters.join("、")}；用户角色「${userName}」）`
 		: `用户角色写作「${userName}」`;
+	const tablesOnly = scope === "tables-only";
 
 	const systemPrompt = `你是一场角色扮演的场记。阅读【当前账本】与【本轮对话】，只做一件事：输出 JSON，更新需要记账的持久变化。
+${tablesOnly ? `\n【本轮分工】主演已通过 world_state_update 提交 time/location/characters/inventory/flags/plot_threads 顶层记账——你**只维护 tables 补丁**，patch 中不要输出任何顶层字段（顶层已由主演记账，重复提交会被忽略）。` : ""}
 
 输出唯一字段：
 "patch"：从本轮对话中提取需要记账的持久变化。字段语义：
@@ -49,7 +57,7 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 - "inventory"：字符串数组，整体替换——只在物品归属变化时给出变化后的完整清单，条目注明归属（如「黄铜怀表（${userName}持有）」）。
 - "flags"：键值对，按键合并（值为字符串）。
 - "plot_threads"：字符串数组，整体替换——新增或了结剧情线时给出完整清单。
-- "tables"：{ "<表名>": { "insert": [行对象...], "update": [{"match":{...},"changes":{...}}...], "delete": [匹配对象...] } }。仅更新 auto 标记的表（主角信息表这类每轮维护的）；静态参考表不要动。行对象只含该表已声明的列。
+- "tables"：{ "<表名>": { "insert": [行对象...], "update": [{"match":{...},"changes":{...}}...], "delete": [匹配对象...] } }。仅更新 auto 标记的表（表数量不限，以账本中实际存在的 auto 表为准）；静态参考表不要动。行对象只含该表已声明的列。
   tables 维护规则：
   - 动手前按顺序完成（在心中，不要输出）：① 在【当前账本】中找到该表的 description 并通读——它是该表最重要的规则，优先级最高，冲突时一律以它为准；② 对照该表已有行，找出本轮对话中与之相关的实体变化；③ 逐条决定 insert/update/delete。
   - 各表规则不同，按各自 description 执行即可，无需人为排序，也不要凭通用直觉臆造该表该存什么；description 要求引用其它表数据而账本未提供时，宁可不改也不臆造。
@@ -60,8 +68,14 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 
 只输出 JSON 对象，例如 {"patch":{...}} 或 {"patch":{}}。不要输出 warnings、不要输出其他文字。`;
 
+	// tables-only 域分工（8/13）：顶层已由主演提交，只注入时间/地点（纪要表时间链一致性）
+	// + 角色名册 + 表格全量（场记 update 的 match 需要现有行做唯一键）——省去顶层全量注入。
+	const ledgerView = tablesOnly
+		? { time: state.time, location: state.location, characters: knownCharacters, tables: state.tables ?? {} }
+		: state;
+
 	const user = `【当前账本】
-${JSON.stringify(state, null, 2)}
+${JSON.stringify(ledgerView, null, 2)}
 
 【本轮对话】
 ${userName}：${userText}

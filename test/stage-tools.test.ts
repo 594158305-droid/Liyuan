@@ -13,12 +13,12 @@ const makeDeps = (over: Partial<StageToolDeps> = {}): StageToolDeps => ({
 	...over,
 });
 
-test("工具清单：不注入写侧依赖时只有读侧三件；schema 合法", () => {
+test("工具清单：不注入写侧依赖时只有读侧检索工具；schema 合法", () => {
 	// deps 缺省 = 只有 searchLore 一族可用，世界书写侧/列举/启停不上清单
 	const tools = stageTools("中文", makeDeps());
 	assert.deepEqual(
 		tools.map((t) => t.name).sort(),
-		["lorebook_search", "memory_search", "world_state_get"],
+		["lorebook_search", "memory_search", "table_query", "world_state_get"],
 	);
 	for (const t of tools) {
 		assert.ok(t.description.length > 20, `${t.name} 要有像样的描述`);
@@ -37,7 +37,7 @@ test("工具清单：注入世界书写侧依赖后，写侧/列举/启停才上
 	);
 	assert.deepEqual(
 		full.map((t) => t.name).sort(),
-		["lorebook_list", "lorebook_search", "lorebook_toggle", "lorebook_write", "memory_search", "world_state_get"],
+		["lorebook_list", "lorebook_search", "lorebook_toggle", "lorebook_write", "memory_search", "table_query", "world_state_get"],
 	);
 });
 
@@ -52,7 +52,7 @@ test("工具清单：注入向量库写侧依赖后，memory_add/list/delete 才
 	);
 	assert.deepEqual(
 		full.map((t) => t.name).sort(),
-		["lorebook_search", "memory_add", "memory_delete", "memory_list", "memory_search", "world_state_get"],
+		["lorebook_search", "memory_add", "memory_delete", "memory_list", "memory_search", "table_query", "world_state_get"],
 	);
 });
 
@@ -111,6 +111,46 @@ test("world_state_get：给人读的格式 + RAW JSON（模型两种都能用）
 	assert.equal(raw.location, "溪桥");
 	assert.deepEqual(raw.inventory, ["黄铜怀表（云澜持有）"]);
 	assert.equal(r.activity, "查账本");
+});
+
+test("table_query：按表名返回行数据，filter 键值等值过滤，limit 截断", async () => {
+	const state: WorldState = {
+		...defaultState(),
+		tables: {
+			在场角色表: {
+				name: "在场角色表",
+				auto: true,
+				columns: [{ name: "姓名" }, { name: "状态" }],
+				rows: [
+					{ 姓名: "云澜", 状态: "在场" },
+					{ 姓名: "林霜", 状态: "在场" },
+					{ 姓名: "加藤惠", 状态: "离场" },
+				],
+			},
+		},
+	};
+	const deps = makeDeps({ getState: () => state });
+
+	const all = await runStageTool(deps, "table_query", { table: "在场角色表" });
+	assert.ok(all.text.includes("云澜"));
+	assert.ok(all.text.includes("加藤惠"));
+	assert.ok(all.text.includes("3 行"), "返回行数");
+
+	const filtered = await runStageTool(deps, "table_query", { table: "在场角色表", filter: { 状态: "在场" } });
+	assert.ok(filtered.text.includes("云澜"));
+	assert.ok(filtered.text.includes("林霜"));
+	assert.ok(!filtered.text.includes("加藤惠"), "filter 排除离场行");
+	assert.ok(filtered.text.includes("2 行"));
+
+	const limited = await runStageTool(deps, "table_query", { table: "在场角色表", limit: 2 });
+	assert.ok(limited.text.includes("仅列前 2 行"), "limit 提示截断");
+
+	const missing = await runStageTool(deps, "table_query", { table: "不存在表" });
+	assert.ok(missing.text.includes("不存在"), "表不存在返回可读提示");
+	assert.ok(missing.text.includes("在场角色表"), "列出可用表名");
+
+	const empty = await runStageTool(deps, "table_query", { table: "在场角色表", filter: { 姓名: "路人甲" } });
+	assert.ok(empty.text.includes("无匹配行"));
 });
 
 test("工具容错：检索抛错/缺参/未知工具都返回可读文本，不抛不中断本拍", async () => {

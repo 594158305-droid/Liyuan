@@ -918,44 +918,58 @@ export class StageEngine {
 		}
 
 		// M-A：#revise 旁路停用（职责由 draft_check 报告 → 模型自改取代；draft_edit 随 M-B）。
-		// 记账：world_state_update 干跑验证过的 patch 在此统一落账——
-		// 落树刚完成、叶即本拍新条目，无叶漂移窗口；模型是记账主体，harness 只执行。
-		if (entryId && !aborted && ws.patches.length > 0) {
-			const nextState = projectedState(ws, state);
-			sm.appendCustomEntry(STATE_ENTRY_TYPE, nextState);
-			const stateFile = this.#deps.getStateFile?.(sm.getSessionId());
-			if (stateFile) {
-				try {
-					saveState(stateFile, nextState);
-				} catch {
-					// 缓存写失败不影响树上快照（账本权威在树，磁盘只是缓存）
+		// 记账（8/13 域分工）：主演 world_state_update 干跑验证过的 patch（顶层域）与
+		// 场记补丁（tables 域，或主演未提交时的全域兜底）合并后一次落树——先投影主演 patch
+		// 作场记 base，场记在其上应用补丁；落树刚完成、叶即本拍新条目，无叶漂移窗口。
+		// 注意：主演落账随场记一起延后到旁路调用结束；若场记窗口内用户 swipe/rewind，
+		// 叶守卫丢弃整拍记账——账本 = f(分支)（R4），新分支自会从它自己的最近快照重建，
+		// 顶层滞后由下拍主演照常提交自愈。
+		if (entryId && !aborted) {
+			let finalState: WorldState | null = null;
+			let note: string | null = null;
+			if (finalText) {
+				const r = await runScribeTurn(
+					{
+						// 4096：tables-only 时输出全为表格 JSON（19 表每轮维护），2048 实测可能截断出半截 JSON（8/03）
+						sideText: (sp, ut) => this.#sideText(model, sp, ut, { apiKey, headers }, 4096, "scribe", traceOn),
+						getLeafId: () => sm.getLeafId(),
+						onActivity: (d) => ev.onActivity?.(d),
+					},
+					{
+						state,
+						baseState: ws.patches.length > 0 ? projectedState(ws, state) : state,
+						scope: ws.patches.length > 0 ? "tables-only" : "full",
+						userText: lastUserText,
+						assistantText: finalText,
+						charName: materials.card.name,
+						userName: materials.config.userName,
+					},
+				);
+				if (r.kind === "applied") {
+					finalState = r.state;
+					note =
+						ws.patches.length > 0
+							? `记账 ${ws.patches.length} 笔（主演）+ tables ${r.applied.length} 项（场记）`
+							: `记账 ${r.applied.length} 项（场记）`;
+				} else if (r.kind === "failed") {
+					console.error(`[stage-scribe] 记账跳过：${r.error}`);
 				}
+				// r.kind === "stale"：场记窗口内切换了分支 → 整拍记账丢弃（含主演 patch）
 			}
-			ev.onActivity?.(`记账 ${ws.patches.length} 笔（模型提交）`);
-			sm.flush();
-		}
-
-		// 场记兜底（D5）：模型本拍没调 world_state_update 才旁路补账，M-B 视实弹数据决定退役。
-		if (entryId && !aborted && finalText && ws.patches.length === 0) {
-			const r = await runScribeTurn(
-				{
-					// 2048：账本+名录随剧情增长，patch 可能很长；1024 实测会截断出半截 JSON（8/03）
-					sideText: (sp, ut) => this.#sideText(model, sp, ut, { apiKey, headers }, 2048, "scribe", traceOn),
-					appendStateEntry: (s) => sm.appendCustomEntry(STATE_ENTRY_TYPE, s),
-					getLeafId: () => sm.getLeafId(),
-					stateFile: this.#deps.getStateFile?.(sm.getSessionId()),
-					onActivity: (d) => ev.onActivity?.(d),
-				},
-				{
-					state,
-					userText: lastUserText,
-					assistantText: finalText,
-					charName: materials.card.name,
-					userName: materials.config.userName,
-				},
-			);
-			if (r.kind === "failed") console.error(`[stage-scribe] 记账跳过：${r.error}`);
-			sm.flush();
+			if (!finalState && ws.patches.length > 0) finalState = projectedState(ws, state);
+			if (finalState) {
+				sm.appendCustomEntry(STATE_ENTRY_TYPE, finalState);
+				const stateFile = this.#deps.getStateFile?.(sm.getSessionId());
+				if (stateFile) {
+					try {
+						saveState(stateFile, finalState);
+					} catch {
+						// 缓存写失败不影响树上快照（账本权威在树，磁盘只是缓存）
+					}
+				}
+				ev.onActivity?.(note ?? `记账 ${ws.patches.length} 笔（模型提交）`);
+				sm.flush();
+			}
 		}
 
 		// M4 长局压缩：攒够拍数就把早期剧情摘要成 rp-summary（装配时回读为【前情提要】）。
@@ -1085,6 +1099,7 @@ export class StageEngine {
 		const READ_TOOLS = new Set([
 			...unifiedStageToolNames(readDeps),
 			"world_state_get",
+			"table_query",
 			"writing_guide",
 		]);
 		// MCP 外设（8/06 重接）：只认**本会话已连接**的限定名——不能只看 mcp__ 前缀，

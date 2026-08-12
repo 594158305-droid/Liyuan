@@ -344,7 +344,7 @@ function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green
 
 /**
  * 执行一次写侧工具调用。未知工具/参数缺失都返回可读文本（不抛，不打断本拍）。
- * 读侧三件（lorebook/memory/world_state_get）仍走 tools.ts runStageTool。
+ * 读侧（lorebook / memory / world_state_get / table_query）仍走 tools.ts runStageTool。
  */
 export function runWriteTool(
 	ws: TurnWorkspace,

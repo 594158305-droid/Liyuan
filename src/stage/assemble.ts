@@ -6,8 +6,9 @@
  * - 历史 = f(分支)：往拍只留定稿正文（补丁已套、工具痕迹不存在），过程不进历史
  * - 世界状态 = f(分支)：从 rp-state 快照重建（R4）
  *
- * M3 起台上有三件只读检索工具（lorebook_search / memory_search / world_state_get），
- * 提示词在此声明用法纪律；写入类工具仍然没有（记账归场记独占，R8）。
+ * M3 起台上有只读检索工具（lorebook_search / memory_search / world_state_get / table_query），
+ * 提示词在此声明用法纪律；写入类工具只有 world_state_update（主演顶层记账），
+ * 自定义表格归场记每轮维护（8/13 域分工：主演提交顶层、场记专职 tables）。
  * 本模块纯函数、零 pi 依赖、可单测。
  */
 

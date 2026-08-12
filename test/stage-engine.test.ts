@@ -465,6 +465,8 @@ test("引擎工具：查设定 → 结果回喂 → 续演正文；工具装配�
 			"lorebook_search",
 			"lorebook_write",
 			"memory_search",
+			"play_sound",
+			"table_query",
 			"world_state_get",
 			"world_state_update",
 		]);
@@ -730,8 +732,74 @@ test("引擎循环：world_state_update 记账——模型提交 patch，账本�
 		const state = stateFromBranch(sm.getBranch() as BranchEntryLike[]);
 		assert.equal(state.time, "戌时");
 		assert.equal(state.location, "溪桥");
-		assert.equal(reg.getPendingResponseCount(), 0, "两发用尽——场记旁路没有发出（D5 兜底只在无 patch 时）");
+		assert.equal(reg.getPendingResponseCount(), 0, "两发用尽——无 auto 表时场记 tables-only 不发（省一次调用）");
 		assert.ok(activities.some((a) => a.includes("记账")), "记账过程条");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎记账（8/13 域分工）：主演顶层 patch + 场记 tables 补丁合并一次落账", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		// 磁盘账本预置一张 auto 表（真实会话由模板物化，测试直接写）——
+		// #effectiveState 分支无 rp-state 快照时回落磁盘账本，主演据此开演
+		const stateDir = join(cwd, ".liyuan-state");
+		mkdirSync(stateDir, { recursive: true });
+		const stateFile = join(stateDir, `${sm.getSessionId()}.json`);
+		writeFileSync(
+			stateFile,
+			JSON.stringify({
+				time: "午后",
+				location: "山门",
+				characters: {},
+				inventory: [],
+				flags: {},
+				plot_threads: [],
+				tables: {
+					在场角色表: { name: "在场角色表", auto: true, columns: [{ name: "姓名" }], rows: [{ 姓名: "云澜" }] },
+				},
+			}),
+		);
+		reg.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall("world_state_update", { patch: { time: "戌时", location: "溪桥" } }),
+					fauxToolCall("draft_write", { content: "暮色四合，两人到了溪桥。" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(""), // 收笔
+			// 主演已提交顶层 → 场记仍发 tables-only 补丁（8/13 域分工，不再被 patches>0 跳过）
+			fauxAssistantMessage(
+				JSON.stringify({ patch: { tables: { 在场角色表: { insert: [{ 姓名: "沈舟" }] } } } }),
+			),
+		]);
+		const engine = new StageEngine({
+			cwd,
+			getSessionManager: () => sm as never,
+			getModel: () => reg.getModel("faux-rp") as never,
+			getAuth: async () => ({}),
+			streamFn: streamSimple as unknown as StageStreamFn,
+			getStateFile: (sid) => (sid === sm.getSessionId() ? stateFile : undefined),
+		});
+		await engine.performTurn("往溪桥去。");
+
+		const state = stateFromBranch(sm.getBranch() as BranchEntryLike[]);
+		assert.equal(state.time, "戌时", "主演顶层 patch 落账");
+		assert.equal(state.location, "溪桥");
+		assert.deepEqual(
+			state.tables["在场角色表"].rows,
+			[{ 姓名: "云澜" }, { 姓名: "沈舟" }],
+			"场记 tables 补丁叠加在主演投影后账本上",
+		);
+		const rpStates = (sm.getBranch() as BranchEntryLike[]).filter(
+			(e) => e.type === "custom" && e.customType === "rp-state",
+		);
+		assert.equal(rpStates.length, 1, "主演 + 场记合并为一次 rp-state 落账（每拍一个快照）");
+		assert.equal(reg.getPendingResponseCount(), 0, "三发用尽：工具轮、收笔、场记 tables-only");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

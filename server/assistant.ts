@@ -975,8 +975,8 @@ function createStagehandTools(
 		defineTool({
 			name: "table_create",
 			label: "创建自定义表",
-			description:
-				"创建一张自定义表格（存于世界状态账本，随世界线/回档一致回退）。columns 至少 1 列，列名自动去重；type 可选 text/integer/number/boolean（advisory，仅做宽松转换）。auto:true 的表由场记每轮自动维护并全量注入上下文（只放主角信息这类每轮都要维护的表）；auto 缺省 false = 静态参考表，场记不会改动它，需要手动维护。建表前先与用户确认。",
+				description:
+					"创建一张自定义表格（存于世界状态账本，随世界线/回档一致回退）。columns 至少 1 列，列名自动去重；type 可选 text/integer/number/boolean（advisory，仅做宽松转换）。auto:true 的表由场记每轮自动维护（内容不注入上下文，需用时 table_query 现查）；auto 缺省 false = 静态参考表，场记不会改动它，需要手动维护。建表前先与用户确认。",
 			parameters: Type.Object({
 				name: Type.String({ description: "表名（同世界线内唯一，不可重复建名）" }),
 				columns: Type.Array(
