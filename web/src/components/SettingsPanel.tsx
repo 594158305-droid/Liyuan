@@ -17,6 +17,7 @@ import {
 } from "../api.ts";
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
 import { readSoundSettings, saveSoundSettings, type SoundSettings } from "../sounds.ts";
+import { readImageAsCompressedDataUrl } from "../bg-theme.ts";
 import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { IconChevronDown } from "./icons.tsx";
 import {
@@ -29,6 +30,10 @@ import {
 	UI_FONT_MAX,
 	UI_FONT_MIN,
 	UI_FONT_STEP,
+	UI_GLASS_MAX,
+	UI_GLASS_MIN,
+	UI_GLASS_STEP,
+	type UiCustom,
 } from "../ui-custom.ts";
 
 type MemoryStoreStats = {
@@ -682,47 +687,168 @@ function readWindowSetting(key: string, fallback: number, min: number, max: numb
 	return fallback;
 }
 
-/** 自定义 UI（页面宽度 + 字体比例 + 默认收起用户消息）：纯本机显示设置，变更即时生效，不写服务端配置 */
-function UiCustomSection() {
+/**
+ * 自定义 UI（页面宽度 + 字体比例 + 玻璃透明度 + 背景图 + 自动配色 + 默认收起用户消息）：
+ * 纯本机显示设置，变更即时生效，不写服务端配置
+ */
+function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const [chatW, setChatW] = useState(() => getUiCustom().chatW);
 	const [fontScale, setFontScale] = useState(() => getUiCustom().fontScale);
+	const [glass, setGlass] = useState(() => getUiCustom().glass);
+	const [bgImage, setBgImage] = useState(() => getUiCustom().bgImage);
+	const [bgAutoTheme, setBgAutoTheme] = useState(() => getUiCustom().bgAutoTheme);
 	const [collapseUser, setCollapseUser] = useState(() => getUiCustom().collapseUser);
-	const apply = (next: { chatW?: number; fontScale?: number; collapseUser?: boolean }) => {
+	// 背景图 URL 输入框值：dataURL（本地文件压缩产物）太长不显示，留空
+	const [bgUrl, setBgUrl] = useState(() => {
+		const b = getUiCustom().bgImage;
+		return b.startsWith("data:") ? "" : b;
+	});
+	const apply = (next: Partial<UiCustom>) => {
 		const ui = {
 			chatW: next.chatW ?? chatW,
 			fontScale: next.fontScale ?? fontScale,
 			collapseUser: next.collapseUser ?? collapseUser,
+			glass: next.glass ?? glass,
+			bgImage: next.bgImage ?? bgImage,
+			bgAutoTheme: next.bgAutoTheme ?? bgAutoTheme,
 		};
 		applyUiCustom(ui);
 		if (next.chatW !== undefined) setChatW(ui.chatW);
 		if (next.fontScale !== undefined) setFontScale(ui.fontScale);
+		if (next.glass !== undefined) setGlass(ui.glass);
+		if (next.bgImage !== undefined) setBgImage(ui.bgImage);
+		if (next.bgAutoTheme !== undefined) setBgAutoTheme(ui.bgAutoTheme);
 		if (next.collapseUser !== undefined) setCollapseUser(ui.collapseUser);
 		// 聊天页监听后重读默认收起状态，即时生效
 		window.dispatchEvent(new Event(UI_CUSTOM_SETTINGS_EVENT));
 	};
+	// URL 输入防抖提交（停止键入 400ms 后生效；Enter/失焦立即提交）
+	const bgDebounceRef = useRef(0);
+	const commitBgUrl = (v: string) => {
+		window.clearTimeout(bgDebounceRef.current);
+		bgDebounceRef.current = window.setTimeout(() => apply({ bgImage: v.trim() }), 400);
+	};
+	useEffect(() => () => window.clearTimeout(bgDebounceRef.current), []);
+	const fileRef = useRef<HTMLInputElement>(null);
+	const onPickFile = async (f: File | undefined) => {
+		if (!f) return;
+		try {
+			const dataUrl = await readImageAsCompressedDataUrl(f);
+			setBgUrl("");
+			apply({ bgImage: dataUrl });
+		} catch (e) {
+			toast("error", e instanceof Error ? e.message : String(e));
+		}
+	};
+	const atDefaults =
+		chatW === UI_DEFAULTS.chatW &&
+		fontScale === UI_DEFAULTS.fontScale &&
+		glass === UI_DEFAULTS.glass &&
+		bgImage === UI_DEFAULTS.bgImage &&
+		bgAutoTheme === UI_DEFAULTS.bgAutoTheme &&
+		collapseUser === UI_DEFAULTS.collapseUser;
 	return (
 		<>
 			<div className="field-hint">
 				页面宽度即聊天列宽度（屏幕两侧留白随之变化）；字体比例用整体缩放（间距/图标一起变，浏览器式缩放）。改动即时生效，仅本机浏览器记住。
 			</div>
+			<div className="ui-custom-grid">
+				<SliderField
+					label="页面宽度"
+					hint={`聊天列视觉宽度（${UI_CHAT_W_MIN}–${UI_CHAT_W_MAX}px，默认 ${UI_DEFAULTS.chatW}）`}
+					value={chatW}
+					min={UI_CHAT_W_MIN}
+					max={UI_CHAT_W_MAX}
+					step={UI_CHAT_W_STEP}
+					onChange={(v) => apply({ chatW: v })}
+				/>
+				<SliderField
+					label="字体比例"
+					hint={`全局缩放（${UI_FONT_MIN}%–${UI_FONT_MAX}%，默认 ${UI_DEFAULTS.fontScale}%）`}
+					value={fontScale}
+					min={UI_FONT_MIN}
+					max={UI_FONT_MAX}
+					step={UI_FONT_STEP}
+					onChange={(v) => apply({ fontScale: v })}
+				/>
+			</div>
 			<SliderField
-				label="页面宽度"
-				hint={`聊天列视觉宽度（${UI_CHAT_W_MIN}–${UI_CHAT_W_MAX}px，默认 ${UI_DEFAULTS.chatW}）`}
-				value={chatW}
-				min={UI_CHAT_W_MIN}
-				max={UI_CHAT_W_MAX}
-				step={UI_CHAT_W_STEP}
-				onChange={(v) => apply({ chatW: v })}
+				label="玻璃透明度"
+				hint={`主聊天玻璃效果（${UI_GLASS_MIN}–${UI_GLASS_MAX}%，默认 ${UI_DEFAULTS.glass}%=关闭；配合背景图效果最佳）`}
+				value={glass}
+				min={UI_GLASS_MIN}
+				max={UI_GLASS_MAX}
+				step={UI_GLASS_STEP}
+				onChange={(v) => apply({ glass: v })}
 			/>
-			<SliderField
-				label="字体比例"
-				hint={`全局缩放（${UI_FONT_MIN}%–${UI_FONT_MAX}%，默认 ${UI_DEFAULTS.fontScale}%）`}
-				value={fontScale}
-				min={UI_FONT_MIN}
-				max={UI_FONT_MAX}
-				step={UI_FONT_STEP}
-				onChange={(v) => apply({ fontScale: v })}
-			/>
+			<div className="field">
+				<span className="field-label">背景图</span>
+				<div className="bg-image-row">
+					<input
+						className="panel-search"
+						type="text"
+						placeholder="粘贴图片 URL，或选择本地图片"
+						value={bgUrl}
+						onChange={(e) => {
+							setBgUrl(e.target.value);
+							commitBgUrl(e.target.value);
+						}}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") {
+								window.clearTimeout(bgDebounceRef.current);
+								apply({ bgImage: e.currentTarget.value.trim() });
+							}
+							if (e.key === "Escape" && bgUrl) {
+								window.clearTimeout(bgDebounceRef.current);
+								setBgUrl(bgImage.startsWith("data:") ? "" : bgImage);
+							}
+						}}
+						onBlur={() => {
+							window.clearTimeout(bgDebounceRef.current);
+							apply({ bgImage: bgUrl.trim() });
+						}}
+					/>
+					<button type="button" className="drawer-btn" onClick={() => fileRef.current?.click()}>
+						选择本地图片
+					</button>
+					<input
+						ref={fileRef}
+						type="file"
+						accept="image/*"
+						style={{ display: "none" }}
+						onChange={(e) => {
+							onPickFile(e.target.files?.[0]);
+							e.target.value = "";
+						}}
+					/>
+				</div>
+				{bgImage ? (
+					<div className="bg-image-preview">
+						<img src={bgImage} alt="背景图预览" />
+						<button
+							type="button"
+							className="drawer-btn"
+							onClick={() => {
+								setBgUrl("");
+								apply({ bgImage: "" });
+							}}
+						>
+							移除背景图
+						</button>
+					</div>
+				) : null}
+			</div>
+			<div className="toggle-row">
+				<span>自动按背景图配色</span>
+				<Toggle
+					checked={bgAutoTheme}
+					onChange={(v) => apply({ bgAutoTheme: v })}
+					title="按背景图主色自动生成界面底色/表面色与文字颜色（朱砂品牌色不变）；关闭后回到当前主题色"
+				/>
+			</div>
+			<div className="field-hint">
+				开启后按背景图主色取样渲染界面颜色（底色/面板/分割线/文字随图明暗自动切换黑白系）。远程图可能受 CORS 限制无法取色，此时仅显示背景图。
+			</div>
 			<div className="toggle-row">
 				<span>默认收起用户消息</span>
 				<Toggle
@@ -738,8 +864,11 @@ function UiCustomSection() {
 				<button
 					type="button"
 					className="drawer-btn"
-					disabled={chatW === UI_DEFAULTS.chatW && fontScale === UI_DEFAULTS.fontScale && collapseUser === UI_DEFAULTS.collapseUser}
-					onClick={() => apply({ chatW: UI_DEFAULTS.chatW, fontScale: UI_DEFAULTS.fontScale, collapseUser: UI_DEFAULTS.collapseUser })}
+					disabled={atDefaults}
+					onClick={() => {
+						setBgUrl("");
+						apply({ ...UI_DEFAULTS });
+					}}
 				>
 					恢复默认
 				</button>
@@ -981,7 +1110,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 					<div className="field-hint">开着时只在窗口隐藏 / 最小化时响（前台看着不打扰），关着则总是提醒。</div>
 				</CollapsibleSection>
 				<CollapsibleSection title="界面自定义" storageKey="liyuan.settings.open.uiCustom" defaultOpen={false}>
-				<UiCustomSection />
+				<UiCustomSection toast={toast} />
 			</CollapsibleSection>
 			<CollapsibleSection title="主聊天窗口" storageKey="liyuan.settings.open.chatWindow" defaultOpen>
 				<ChatWindowSection />

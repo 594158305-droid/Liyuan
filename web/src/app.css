@@ -190,12 +190,14 @@ html {
 }
 
 body {
-	/* 宣纸底：暖径向光 + 极淡颗粒感 */
-	background:
+	/* 宣纸底：暖径向光 + 极淡颗粒感；自定义背景图（--bg-image）叠在最上层，cover 铺满 */
+	background-image:
+		var(--bg-image, none),
 		radial-gradient(1200px 600px at 50% -10%, var(--bg-glow) 0%, transparent 55%),
 		radial-gradient(800px 400px at 100% 100%, rgb(188 65 35 / 3%) 0%, transparent 50%),
-		radial-gradient(700px 360px at 0% 80%, rgb(188 65 35 / 2.5%) 0%, transparent 45%),
-		var(--bg);
+		radial-gradient(700px 360px at 0% 80%, rgb(188 65 35 / 2.5%) 0%, transparent 45%);
+	background-color: var(--bg);
+	background-size: cover, auto, auto, auto;
 	color: var(--text);
 	font-family: var(--font);
 	-webkit-font-smoothing: antialiased;
@@ -870,6 +872,11 @@ textarea.field-input {
 	overflow-y: auto;
 	padding: 22px 16px 28px;
 	overscroll-behavior: contain;
+	/* 主聊天玻璃：透明度由 --glass-opacity 驱动（0% 时全透明、blur 为 0，退化为无玻璃现状）；
+	   配合背景图时模糊透出图面，背景为纯色时仅显半透明 surface */
+	background: color-mix(in srgb, var(--surface) var(--glass-opacity, 0%), transparent);
+	backdrop-filter: blur(calc(var(--glass-opacity, 0%) * 0.14px)) saturate(1.15);
+	-webkit-backdrop-filter: blur(calc(var(--glass-opacity, 0%) * 0.14px)) saturate(1.15);
 }
 
 .flow {
@@ -3406,6 +3413,58 @@ input.panel-search.num {
 }
 .slider-row .panel-search.num {
 	margin-bottom: 0;
+}
+
+/* 界面自定义：页面宽度与字体比例并排（窄列下滑条+数字框收紧） */
+.ui-custom-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 0 14px;
+	align-items: start;
+}
+.ui-custom-grid .slider-row {
+	gap: 6px;
+}
+.ui-custom-grid .slider-row .panel-search.num {
+	width: 56px;
+	padding: 4px 6px;
+}
+.ui-custom-grid .field {
+	margin: 10px 0 4px;
+}
+
+/* 背景图设置：URL 输入 + 本地文件按钮同行，缩略图预览 */
+.bg-image-row {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	margin: 4px 0;
+}
+.bg-image-row .panel-search {
+	flex: 1;
+	margin-bottom: 0;
+}
+.bg-image-row .drawer-btn {
+	flex: none;
+	white-space: nowrap;
+	padding: 7px 10px;
+}
+.bg-image-preview {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 8px 0 2px;
+}
+.bg-image-preview img {
+	width: 64px;
+	height: 40px;
+	object-fit: cover;
+	border-radius: var(--radius-s);
+	border: 1px solid var(--hairline);
+	background: var(--surface-dim);
+}
+.bg-image-preview .field-hint {
+	margin: 0;
 }
 
 @keyframes blink {
