@@ -131,3 +131,60 @@ test("resolveEmbedTarget：无任何 assistant 条目 → 报错", () => {
 	assert.ok(!r.ok);
 	assert.equal(!r.ok && r.error, "暂无剧情消息可嵌入");
 });
+
+// ---------- 4. 改稿楼层（rp-edited-reply）与轮校验（2026-08-12 二次修复） ----------
+
+// 典型「改稿分支」：user → 原文回复（旁支）→ 改稿覆盖（当前分支叙事）
+const editItems = [
+	{ id: "aaa00001", text: "用户指令楼一：清点收获。", roundId: "u01" },
+	{ id: "aaa00002", text: "星辉历332年5月6日，午后。凯尔走进经理室。", roundId: "u02" },
+	{ id: "aaa00003", text: "星辉历332年5月6日，午后。凯尔走进经理室。（改稿版：凯尔先生）", roundId: "u02" },
+];
+// 当前分支只含改稿覆盖（aaa00003），原文 aaa00002 在旁支
+const editBranch = ["aaa00001", "aaa00003"];
+
+test("resolveEmbedTarget：默认目标 = 分支最后一个叙事条目（改稿 rp-edited-reply 也算）", () => {
+	// 无 anchor → 默认目标应是改稿（aaa00003），而不是跳过它回跳更早楼层
+	const r = resolveEmbedTarget(editItems, editBranch, undefined);
+	assert.ok(r.ok);
+	assert.equal(r.ok && r.entryId, "aaa00003");
+});
+
+test("resolveEmbedTarget：anchor 命中改稿默认目标 → 用改稿", () => {
+	const r = resolveEmbedTarget(editItems, editBranch, "凯尔走进经理室。（改稿版");
+	assert.ok(r.ok);
+	assert.equal(r.ok && r.entryId, "aaa00003");
+});
+
+test("resolveEmbedTarget：anchor 命中同轮原文（旁支）→ 不在当前分支报错", () => {
+	// aaa00002 与默认目标 aaa00003 同轮（u02），但 aaa00002 在旁支且内容与改稿无公共子串
+	const items = [
+		{ id: "aaa00001", text: "用户指令楼一：清点收获。", roundId: "u01" },
+		{ id: "aaa00002", text: "窗外飘着细雨，檐角的铜铃轻响。", roundId: "u02" },
+		{ id: "aaa00003", text: "桌上摆着宾客登记簿，窗台上绿萝垂着枝条。", roundId: "u02" },
+	];
+	const branch = ["aaa00001", "aaa00003"];
+	const r = resolveEmbedTarget(items, branch, "窗外飘着细雨，檐角的铜铃轻响。");
+	assert.ok(!r.ok);
+	assert.ok(!r.ok && r.error.includes("不在当前分支"));
+});
+
+test("resolveEmbedTarget：anchor 命中其他轮楼层 → 报错（单楼层出图约束）", () => {
+	// aaa00001 在分支上但属 u01 轮 ≠ 默认目标 u02 轮 → 报错
+	const r = resolveEmbedTarget(editItems, editBranch, "用户指令楼一：清点收获。");
+	assert.ok(!r.ok);
+	assert.ok(!r.ok && r.error.includes("其他楼层"));
+});
+
+test("resolveEmbedTarget：anchor 命中同轮历史回复（同轮且在分支）→ 允许", () => {
+	// 构造同轮多回复：u02 轮有两条回复都在分支上
+	const multi = [
+		{ id: "aaa00001", text: "指令楼。", roundId: "u01" },
+		{ id: "aaa00002", text: "凯尔走进经理室。", roundId: "u02" },
+		{ id: "aaa00003", text: "凯尔推开门，屋里点着灯。", roundId: "u02" },
+	];
+	const branch = ["aaa00001", "aaa00002", "aaa00003"];
+	const r = resolveEmbedTarget(multi, branch, "凯尔推开门");
+	assert.ok(r.ok);
+	assert.equal(r.ok && r.entryId, "aaa00003");
+});

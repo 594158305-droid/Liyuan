@@ -1124,26 +1124,38 @@ type RoleEditTarget =
 /**
  * 分支目标定位（scriptEditMessage / storyEdit 共用）：
  * 二选一定位目标回复的「前驱」entry id。
- * - lastRoleIndex：从分支末尾倒数第 N 条「角色消息」（assistant），0=最后一条；
+ * - lastRoleIndex：从分支末尾倒数第 N 条「叙事条目」（assistant 回复 / rp-edited-reply 改稿），0=最后一条；
  * - branchIndex：分支数组下标（原语义）。
  * 前驱 = 目标条目的上一条 entry；目标即分支首（无前驱）时钉到分支根自身（目标回复移出当前分支）。
  */
 const resolveRoleEditTarget = (
-	branch: Array<{ id: string; type?: unknown; message?: { role?: unknown } }>,
+	branch: Array<{
+		id: string;
+		type?: unknown;
+		customType?: string;
+		message?: { role?: unknown };
+	}>,
 	input: { lastRoleIndex?: number; branchIndex?: number },
 ): RoleEditTarget => {
 	if (input.lastRoleIndex !== undefined) {
-		// lastRoleIndex 定位：收集分支中全部「角色消息」条目下标，从末尾往前取第 N+1 个
+		// lastRoleIndex 定位：收集分支中全部「叙事条目」下标（assistant 回复 + rp-edited-reply
+		// 改稿——2026-08-12 二次修复：此前只收 message/assistant，改稿楼层被跳过 →
+		// 目标回跳更早楼层，story_edit 改错楼层），从末尾往前取第 N+1 个
 		if (!Number.isInteger(input.lastRoleIndex) || input.lastRoleIndex < 0) {
 			return { ok: false, error: "lastRoleIndex 必须是非负整数" };
 		}
-			const roleIdx: number[] = [];
-			branch.forEach((e, i) => {
-				if (e.type !== "message") return;
+		const roleIdx: number[] = [];
+		branch.forEach((e, i) => {
+			if (e.type === "message") {
 				const role = e.message?.role;
-				// 2026-08-12 修复：只收 assistant——custom 角色消息（rp-edited-reply 转义等）不该被当改稿目标
+				// 只收 assistant——custom 角色消息（rp-edited-reply 转义等）不该被当改稿目标
 				if (role === "assistant") roleIdx.push(i);
-			});
+				return;
+			}
+			if (e.type === "custom_message" && e.customType === "rp-edited-reply") {
+				roleIdx.push(i);
+			}
+		});
 		const target = roleIdx[roleIdx.length - 1 - input.lastRoleIndex];
 		if (target === undefined) {
 			return { ok: false, error: `lastRoleIndex 超出角色消息范围（0..${Math.max(0, roleIdx.length - 1)}）` };
@@ -2242,11 +2254,33 @@ const storyBridgeBase: StoryBridge = {
 				id: string;
 				parentId?: string | null;
 				type?: unknown;
+				customType?: string;
 				message?: { role?: unknown; content?: unknown };
 			}>;
 			// 2. 提交前找到目标：与 scriptEditMessage 的 targetId 解析（sm.getBranch + getBranch 语义）
 			const resolved = resolveRoleEditTarget(branch, { lastRoleIndex });
 			if (!resolved.ok) return { ok: false, error: resolved.error };
+			// 2b. 「仅修改最新层」校验（2026-08-12 用户决策）：story_edit 只允许改最新叙事轮——
+			//     目标必须是分支最后一个叙事条目（assistant 回复或 rp-edited-reply 改稿）；
+			//     否则目标回跳会改错楼层（历史事故：改稿/配图嵌到告别回复楼层）
+			if (lastRoleIndex !== 0) {
+				return { ok: false, error: "story_edit 仅支持修改最新层（lastRoleIndex=0）；历史楼层修改请先导航回该楼层" };
+			}
+			let lastNarrativeIdx = -1;
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e.type === "message" && e.message?.role === "assistant") {
+					lastNarrativeIdx = i;
+					break;
+				}
+				if (e.type === "custom_message" && e.customType === "rp-edited-reply") {
+					lastNarrativeIdx = i;
+					break;
+				}
+			}
+			if (resolved.targetIdx !== lastNarrativeIdx) {
+				return { ok: false, error: "story_edit 目标不在最新层，已放弃（仅支持修改最新层；目标回跳说明当前叙事结构异常，请先确认楼层）" };
+			}
 			// 3. sm.branch 直钉（绝不用 session.navigateTree——它对 user/assistant 目标有副作用语义，
 			//    实测导致分支回退到开场白、改写丢失）；append-only：原回复保留在树里
 			const beforeLeaf = session.sessionManager.getLeafId();
@@ -2320,16 +2354,39 @@ const storyBridgeBase: StoryBridge = {
 				content?: unknown;
 			}>;
 			const branchIds = branch.map((e) => e.id ?? "");
-			const embedItems = (session.sessionManager.getEntries() as Array<{
+			const allEntries = session.sessionManager.getEntries() as Array<{
 				id: string;
+				parentId?: string | null;
 				type?: string;
+				customType?: string;
 				message?: { role?: string; content?: unknown };
-			}>)
-				.filter((e) => e.type === "message" && e.message?.role === "assistant")
+				content?: unknown;
+			}>;
+			// 叙事条目 = assistant 回复 + rp-edited-reply 改稿覆盖（改稿也是最新叙事；
+			// 2026-08-12 二次修复：原只认 message/assistant，改稿楼层被跳过 → 目标回跳、图嵌错）
+			const entryById = new Map(allEntries.map((e) => [e.id, e]));
+			const roundOf = (id: string): string => {
+				let cur = entryById.get(id);
+				while (cur) {
+					if (cur.type === "message" && cur.message?.role === "user") return cur.id;
+					cur = cur.parentId ? entryById.get(cur.parentId) : null;
+				}
+				return "";
+			};
+			const embedItems = allEntries
+				.filter(
+					(e) =>
+						(e.type === "message" && e.message?.role === "assistant") ||
+						(e.type === "custom_message" && e.customType === "rp-edited-reply"),
+				)
 				.map((e) => ({
 					id: e.id,
-					// 当前显示全文优先（含 rp-edited-reply 覆盖的占位符/改稿内容），否则原始 content
-					text: currentDisplayTextOf(branch, e.id) || extractEntryText(e.message?.content),
+					// 当前显示全文优先（含覆盖的占位符/改稿内容），否则原始 content
+					text:
+						e.type === "custom_message"
+							? extractEntryText(e.content)
+							: currentDisplayTextOf(branch, e.id) || extractEntryText(e.message?.content),
+					roundId: roundOf(e.id),
 				}));
 			const resolved = resolveEmbedTarget(embedItems, branchIds, anchor);
 			if (!resolved.ok) return { ok: false, error: resolved.error };

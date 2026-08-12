@@ -230,6 +230,8 @@ export function buildStoryFloors(messages: unknown[], view: "display" | "raw" = 
 	const out: StoryFloor[] = [];
 	let floor = 0;
 	let inBackstage = false;
+	/** 最近一个用户楼层在 out 中的下标（rp-edited-reply 替换同轮回复用） */
+	let lastUserOutIdx = -1;
 	for (const m of messages) {
 		if (!m || typeof m !== "object") continue;
 		const msg = m as MsgLike;
@@ -238,6 +240,7 @@ export function buildStoryFloors(messages: unknown[], view: "display" | "raw" = 
 			inBackstage = isBackstageText(text);
 			if (inBackstage || !text) continue;
 			out.push({ floor: ++floor, kind: "用户", text });
+			lastUserOutIdx = out.length - 1;
 			continue;
 		}
 		if (msg.role === "assistant") {
@@ -263,6 +266,27 @@ export function buildStoryFloors(messages: unknown[], view: "display" | "raw" = 
 			const shown = view === "raw" ? text : displayAssistantText(text);
 			if (!shown) continue;
 			out.push({ floor: ++floor, kind: "开场白", text: shown });
+			continue;
+		}
+		if (msg.role === "custom" && msg.customType === "rp-edited-reply") {
+			if (inBackstage || !text) continue;
+			const shown = view === "raw" ? text : displayAssistantText(text) || text;
+			if (!shown) continue;
+			// 改稿覆盖：替换同轮（最近用户楼之后）最后一个「回复」楼层——与前端 foldTurnNarratives
+			// 同语义（2026-08-12 修复：此前 rp-edited-reply 不显示，助手看不到改稿后的最新叙事 → 配图摘错楼层）
+			let replaced = -1;
+			for (let i = out.length - 1; i > lastUserOutIdx; i--) {
+				if (out[i].kind === "回复") {
+					replaced = i;
+					break;
+				}
+			}
+			if (replaced >= 0) {
+				out[replaced] = { floor: out[replaced].floor, kind: "回复", text: shown };
+			} else {
+				out.push({ floor: ++floor, kind: "回复", text: shown });
+			}
+			continue;
 		}
 	}
 	return out;

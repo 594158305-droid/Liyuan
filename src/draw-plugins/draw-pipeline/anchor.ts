@@ -76,24 +76,34 @@ export type EmbedTargetResult =
 	| { ok: true; entryId: string; matched: "default" | "anchor" }
 	| { ok: false; error: string };
 
+/** 嵌入目标候选条目（roundId = 所属 user 指令轮，用于轮校验） */
+export interface EmbedItem {
+	id: string;
+	text: string;
+	/** 所属 user 指令轮的 entry id（无 user 祖先时缺省） */
+	roundId?: string;
+}
+
 /**
  * 嵌入目标条目解析（embedStoryImage 目标加固，2026-08-12）：
- * - 默认目标 = branchIds 中最后一条 assistant 条目（items 按时间序，取最后命中分支的）；
+ * - 默认目标 = branchIds 中最后一个「叙事条目」——含 assistant 回复与 rp-edited-reply
+ *   改稿覆盖（改稿楼层也是最新叙事；历史缺陷：只认 message/assistant，改稿被跳过
+ *   → 目标跳回更早楼层，配图嵌错）；
  * - anchor 非空且默认目标文本未命中 → 全树搜索含 anchor 的条目（跨分支/历史楼层）；
- * - 命中条目不在当前分支 → 报错（叶指针漂移/用户已回退，不静默嵌错——历史 bug：
- *   叶漂移后 8 张图全嵌进错误楼层，根因即 anchor 只定插入位、不参与选目标）；
+ * - 命中条目不在当前分支 → 报错（叶指针漂移/用户已回退，不静默嵌错）；
+ * - 命中条目与默认目标不同轮（anchor 摘录自其他楼层）→ 报错（单楼层出图约束）；
  * - anchor 全树无命中 → 报错。
- * items：全部 assistant 条目（id + 提取后的显示文本，时间序）；branchIds：当前分支条目 id 序列。
+ * items：全部叙事条目（assistant message + rp-edited-reply，时间序）；branchIds：当前分支条目 id 序列。
  * 纯函数零依赖，可单测。
  */
 export function resolveEmbedTarget(
-	items: Array<{ id: string; text: string }>,
+	items: EmbedItem[],
 	branchIds: string[],
 	anchor: string | undefined,
 ): EmbedTargetResult {
 	const anchorTrim = (anchor ?? "").trim();
-	// 默认目标：branchIds 中最后出现的 assistant 条目
-	let defaultEntry: { id: string; text: string } | null = null;
+	// 默认目标：branchIds 中最后出现的叙事条目（含 rp-edited-reply 改稿）
+	let defaultEntry: EmbedItem | null = null;
 	for (const it of items) {
 		if (branchIds.includes(it.id)) defaultEntry = it;
 	}
@@ -112,6 +122,20 @@ export function resolveEmbedTarget(
 		return {
 			ok: false,
 			error: `目标楼层不在当前分支（anchor 命中 ${found.entryId.slice(0, 8)}…，已离开当前叙事），嵌入放弃——请先回到该分支再重试`,
+		};
+	}
+	// 轮校验（2026-08-12 二次修复）：anchor 命中其他指令轮 = 摘录自非目标楼层
+	// （历史案例：改稿楼层被跳过导致默认目标回跳，助手从旧楼层摘 anchor → 图全嵌错）
+	const foundEntry = items.find((it) => it.id === found.entryId);
+	if (
+		found.entryId !== defaultEntry.id &&
+		defaultEntry.roundId &&
+		foundEntry?.roundId &&
+		foundEntry.roundId !== defaultEntry.roundId
+	) {
+		return {
+			ok: false,
+			error: "anchor 摘录自其他楼层（非最新叙事轮），本次配图仅支持最新楼层——请确认配图目标楼层或先回到该楼层再重试",
 		};
 	}
 	return { ok: true, entryId: found.entryId, matched: "anchor" };

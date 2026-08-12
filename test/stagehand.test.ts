@@ -147,3 +147,42 @@ test("story_command 白名单包含核心剧情命令", () => {
 		assert.ok((STORY_COMMANDS as readonly string[]).includes(c));
 	}
 });
+
+test("楼层视图：rp-edited-reply 改稿替换同轮回复（2026-08-12 修复）", () => {
+	const msgs = [
+		{ role: "user", content: "给最新层配图前先看正文" },
+		{ role: "assistant", content: "星辉历332年5月6日，午后。凯尔走进经理室。（原文）" },
+		{ role: "custom", customType: "rp-edited-reply", content: "星辉历332年5月6日，午后。凯尔走进经理室。（改稿版）" },
+		{ role: "user", content: "第二天呢？" },
+		{ role: "assistant", content: "翌日晴。" },
+	];
+	const floors = buildStoryFloors(msgs);
+	assert.deepEqual(
+		floors.map((f) => [f.floor, f.kind]),
+		[
+			[1, "用户"],
+			[2, "回复"],
+			[3, "用户"],
+			[4, "回复"],
+		],
+	);
+	// 改稿覆盖同轮回复：楼层 2 显示改稿版而非原文
+	assert.ok(floors[1].text.includes("改稿版"));
+	assert.ok(!floors[1].text.includes("原文）"));
+});
+
+test("楼层视图：rp-edited-reply 无同轮回复时追加为回复楼层", () => {
+	const msgs = [
+		{ role: "user", content: "指令" },
+		{ role: "custom", customType: "rp-edited-reply", content: "直接改稿的回复" },
+	];
+	const floors = buildStoryFloors(msgs);
+	assert.deepEqual(
+		floors.map((f) => [f.floor, f.kind]),
+		[
+			[1, "用户"],
+			[2, "回复"],
+		],
+	);
+	assert.ok(floors[1].text.includes("直接改稿的回复"));
+});
