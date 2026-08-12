@@ -289,10 +289,11 @@ const XIAJIN: PresetSplitTable = {
  */
 const DREAMWHALE: PresetSplitTable = {
 	key: "dreamwhale-v5",
-	fingerprints: ["写作·常开纪律", "写作·审查纪律", "写作·禁词表", "写作·技能触发表"],
+	fingerprints: ["写作·常开纪律", "写作·审查纪律", "写作·禁词表", "写作·技能触发表", "写作·目标"],
 	blocks: [
-		{ name: "写作·常开纪律", nature: "B", fate: "resident", section: "B", note: "每拍照此执行的文风与写法（主权/人称/信息差/禁霸总）" },
-		{ name: "写作·审查纪律", nature: "C", fate: "resident", section: "C", note: "写时注意的行为边界（人设铁律/防恶堕/权力角色/判断型机械注意）" },
+		{ name: "写作·常开纪律", nature: "B", fate: "resident", section: "B", note: "每拍照此执行的文风与写法（主权/人称/信息差/禁霸总/篇幅/开头承接）" },
+		{ name: "写作·审查纪律", nature: "C", fate: "resident", section: "C", note: "写时注意的行为边界（人设铁律/防恶堕/权力角色/判断型机械注意/声音反馈）" },
+		{ name: "写作·目标", nature: "C", fate: "resident", section: "C", note: "liyuan-Custom 预设的写作目标声明（色情后宫/感情渐进/口味上限/长篇维护）" },
 		{
 			name: "写作·技能触发表",
 			nature: "C",
@@ -311,7 +312,30 @@ const DREAMWHALE: PresetSplitTable = {
 	supplements: [],
 };
 
-export const BUILTIN_SPLIT_TABLES: PresetSplitTable[] = [TGBREAK, SHUANGREN, XIAJIN, DREAMWHALE];
+/**
+ * liyuan-Custom（纯写作目标版，2026-08-13 全新起草）精简表：无梦鲸思客开关组/变量系统，
+ * 9 块全静态。身份契约 A；文风/禁词 B；边界/目标/触发表/协议/记账 C。
+ * 禁词只留 DeepSeek 分档（8/13 用户裁决：不要通用禁词表，有 ds 的就行）。
+ */
+const LIYUAN_CUSTOM: PresetSplitTable = {
+	key: "liyuan-custom",
+	fingerprints: ["身份契约", "模型禁词·DeepSeek", "写作·技能触发表", "写作·目标"],
+	blocks: [
+		{ name: "身份契约", nature: "A", fate: "resident", section: "A", note: "主笔身份/上帝视角/中文第三人称" },
+		{ name: "写作·常开纪律", nature: "B", fate: "resident", section: "B", note: "大纲模式契约+主权/信息差/篇幅/承接/文风自由+防复读" },
+		{ name: "写作·审查纪律", nature: "C", fate: "resident", section: "C", note: "人设铁律/防恶堕/权力角色/声音反馈/空壳确认/推演≠交付" },
+		{ name: "写作·目标", nature: "C", fate: "resident", section: "C", note: "色情后宫/感情渐进/口味上限/长篇维护/八股压制" },
+		{ name: "写作·技能触发表", nature: "C", fate: "resident", section: "C", note: "场景→writing_guide 主题权威映射" },
+		{ name: "模型禁词·DeepSeek", nature: "B", fate: "resident", section: "B", note: "DeepSeek 系八股分档（硬禁/软禁）+破折号/半角/不是…是 触发——模型可见控制频率，机械验收兜底" },
+		{ name: "NSFW-协议注入", nature: "C", fate: "resident", section: "C", note: "常驻生理红线+场景分层+词汇轮换（细节走技能）" },
+		{ name: "状态栏·记账纪律", nature: "C", fate: "resident", section: "C", note: "账本+19 表维护纪律" },
+		{ name: "状态栏·玩法检索与发卡", nature: "C", fate: "resident", section: "C", note: "NSFW 玩法 lorebook 检索+ask 发卡" },
+	],
+	vars: [],
+	supplements: [],
+};
+
+export const BUILTIN_SPLIT_TABLES: PresetSplitTable[] = [LIYUAN_CUSTOM, TGBREAK, SHUANGREN, XIAJIN, DREAMWHALE];
 
 // ---------------- 匹配与分流 ----------------
 

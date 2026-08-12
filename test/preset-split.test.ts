@@ -18,7 +18,7 @@ test("findSplitTable：指纹 ≥2 命中认表；不足/未知返回 null", () 
 });
 
 test("splitBlockContent：整块 fate——resident/skill/rules-only/drop 各就位", () => {
-	const table = BUILTIN_SPLIT_TABLES[0]; // tgbreak
+	const table = BUILTIN_SPLIT_TABLES[1]; // tgbreak（0=liyuan-custom）
 	const style = splitBlockContent(lookupBlockRule(table, "👻TG推荐文风"), "👻TG推荐文风", "白描为主。");
 	assert.deepEqual(style.resident, [{ section: "B", text: "白描为主。" }]);
 
@@ -33,7 +33,7 @@ test("splitBlockContent：整块 fate——resident/skill/rules-only/drop 各就
 });
 
 test("splitBlockContent：segments 分段拆——同一块拆向多个去向，剩余走块级 fate", () => {
-	const table = BUILTIN_SPLIT_TABLES[2]; // xiajin
+	const table = BUILTIN_SPLIT_TABLES[3]; // xiajin（0=liyuan-custom,1=tgbreak,2=shuangren）
 	const rule = lookupBlockRule(table, "色情描写/防重复");
 	const content = [
 		"<色情描写规则>肉体美学……</色情描写规则>",
@@ -52,7 +52,7 @@ test("splitBlockContent：segments 分段拆——同一块拆向多个去向，
 });
 
 test("splitBlockContent：stripLines 句级摘杂质（活人感 random 运算壳）", () => {
-	const table = BUILTIN_SPLIT_TABLES[0];
+	const table = BUILTIN_SPLIT_TABLES[1]; // tgbreak
 	const rule = lookupBlockRule(table, "💞活人感（测试版）");
 	const content = ["人是复杂、不完美的。", "```x1= 2; if( x1 === 1) {衍生性格}else {跳过}```", "结合以上，推断真实反应。"].join("\n");
 	const p = splitBlockContent(rule, "💞活人感（测试版）", content);
@@ -95,7 +95,7 @@ test("stripFormatStackLines：只摘明确输出指令句式，宁漏勿误", ()
 });
 
 test("reportItemFor：去向可读（多去向拼接/仅规则/退场/兜底标注）", () => {
-	const table = BUILTIN_SPLIT_TABLES[0];
+	const table = BUILTIN_SPLIT_TABLES[1]; // tgbreak
 	const drop = reportItemFor(
 		splitBlockContent(lookupBlockRule(table, "检查格式"), "检查格式", "x"),
 		"检查格式",

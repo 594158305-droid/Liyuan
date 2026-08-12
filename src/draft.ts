@@ -410,10 +410,12 @@ export function searchDraft(text: string, query: string, limit = 8): { hits: str
 // ---------------- 程序化验收（lint for prose） ----------------
 
 export interface DraftRules {
-	/** 正文字数区间（不含标签模块） */
+	/** 正文字数区间（不含标签模块）；min=0 表示无下限（上限句），只提示上限 */
 	wordRange?: { min: number; max: number };
-	/** 禁词表（预设「禁用词汇/黑名单」块里提取） */
+	/** 硬禁词（预设「禁词表/禁用词」块引号词；搜到即报） */
 	bannedWords: string[];
+	/** 软禁词（高频复读压制：全文出现 ≥threshold 次才报，单次容忍；8/11 分档） */
+	softBannedWords: Array<{ word: string; threshold: number }>;
 	/** 预设有比喻频率约束 */
 	metaphorRule: boolean;
 	/** 预设禁「不是…是…」先否后肯句式 */
@@ -431,6 +433,7 @@ export interface DraftRules {
 export function emptyDraftRules(): DraftRules {
 	return {
 		bannedWords: [],
+		softBannedWords: [],
 		metaphorRule: false,
 		banNegPos: false,
 		banDash: false,
@@ -445,6 +448,7 @@ export function rulesAreEmpty(r: DraftRules): boolean {
 	return (
 		!r.wordRange &&
 		r.bannedWords.length === 0 &&
+		r.softBannedWords.length === 0 &&
 		!r.metaphorRule &&
 		!r.banNegPos &&
 		!r.banDash &&
@@ -583,14 +587,30 @@ export function extractDraftRules(blockContents: string[], statusBarFormats?: st
 			}
 		}
 
-		// 禁词表：只认明确的禁词块，块内取引号词
+		// 禁词表：只认明确的禁词块，块内取引号词。
+		// 8/11 分档：【硬禁】节 → bannedWords（搜到即报）；【软禁】节 → softBannedWords（≥阈值才报，
+		// 高频复读压制，单次容忍）。无分档标记的块整体按硬禁（向后兼容）。
 		if (/(禁用词|词汇黑名单|厌恶的词汇|禁词表)/.test(text)) {
-			for (const qm of text.matchAll(/[“”"「]([^“”"」\n]{1,10})[“”"」]/g)) {
+			const hasSections = /【硬禁】|【软禁】/.test(text);
+			const hardText = hasSections ? (/【硬禁】([\s\S]*?)(?=【软禁】|$)/.exec(text)?.[1] ?? "") : text;
+			const softText = hasSections ? (/【软禁】([\s\S]*?)$/.exec(text)?.[1] ?? "") : "";
+			const thresholdMatch = /软禁阈值[:：]?\s*(\d+)/.exec(text);
+			const softThreshold = thresholdMatch ? Math.max(2, Number(thresholdMatch[1])) : 3;
+			const collectWords = (src: string, target: string[]): void => {
+				for (const qm of src.matchAll(/[“”"「]([^“”"」\n]{1,10})[“”"」]/g)) {
+					const w = qm[1].trim();
+					if (!w || w.length > 10) continue;
+					if (/[{}$]/.test(w)) continue; // 宏残留
+					if (/[…]/.test(w)) continue; // 句式示意（如 不是…是…），非字面词
+					if (!target.includes(w)) target.push(w);
+				}
+			};
+			collectWords(hardText, rules.bannedWords);
+			// 软禁词去重后带阈值写入（collectWords 的 target 语义不适合带阈值，单独处理）
+			for (const qm of softText.matchAll(/[“”"「]([^“”"」\n]{1,10})[“”"」]/g)) {
 				const w = qm[1].trim();
-				if (!w || w.length > 10) continue;
-				if (/[{}$]/.test(w)) continue; // 宏残留
-				if (/[…]/.test(w)) continue; // 句式示意（如 不是…是…），非字面词
-				if (!rules.bannedWords.includes(w)) rules.bannedWords.push(w);
+				if (!w || w.length > 10 || /[{}$]/.test(w) || /[…]/.test(w)) continue;
+				if (!rules.softBannedWords.some((s) => s.word === w)) rules.softBannedWords.push({ word: w, threshold: softThreshold });
 			}
 		}
 
@@ -704,6 +724,19 @@ export function checkDraft(turnText: string, rules: DraftRules): DraftReport {
 		}
 	}
 	if (bannedHits > 5) violations.push(`（禁词共 ${bannedHits} 处，以上仅列前 5）`);
+
+	// 软禁词（8/11 分档）：高频复读压制——全文出现 ≥threshold 次才报，单次容忍。
+	// 目标：压制「下意识/仿佛/气音」这类单次自然、多次腻的高频复读词。
+	for (const { word, threshold } of rules.softBannedWords) {
+		let count = 0;
+		for (let idx = body.indexOf(word); idx !== -1; idx = body.indexOf(word, idx + word.length)) count++;
+		if (count >= threshold) {
+			const first = body.indexOf(word);
+			violations.push(
+				`高频词「${word}」出现 ${count} 次（软禁阈值 ${threshold}，单次可容忍）：${ctxQuote(body, first, word.length)}——高频复读，换说法或改句式`,
+			);
+		}
+	}
 
 	// 破折号（——/—）：DeepSeek 固化禁词，纯符号检查，无语境判断（8/11 拆层 F 类补全）
 	if (rules.banDash) {

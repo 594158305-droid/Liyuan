@@ -475,6 +475,37 @@ test("extractDraftRules：上限句（去下限）——「上限/不超过/至�
 	assert.ok(!r.notes.some((n) => n.includes("下限")), "下限 0 不进 notes");
 });
 
+test("extractDraftRules：禁词硬软分档——【硬禁】进 bannedWords、【软禁】带阈值进 softBannedWords（8/11）", () => {
+	const rules = extractDraftRules([
+		"## 禁词表（DeepSeek 系）\n【硬禁】出现即违规：\n\"眼中闪过一丝\" \"声音碎了\"\n【软禁】高频复读才报（软禁阈值：2）：\n\"下意识\" \"仿佛\"",
+	]);
+	assert.deepEqual(rules.bannedWords, ["眼中闪过一丝", "声音碎了"], "硬禁节进 bannedWords");
+	assert.deepEqual(rules.softBannedWords, [
+		{ word: "下意识", threshold: 2 },
+		{ word: "仿佛", threshold: 2 },
+	], "软禁节带阈值进 softBannedWords（阈值从块内解析）");
+	// 无分档标记的块整体按硬禁（向后兼容）
+	const legacy = extractDraftRules(['## 禁词表\n"像是" "一秒"']);
+	assert.deepEqual(legacy.bannedWords, ["像是", "一秒"]);
+	assert.deepEqual(legacy.softBannedWords, [], "无【软禁】标记不产生软禁词");
+});
+
+test("checkDraft：软禁高频才报——1-2 次容忍、≥阈值报；硬禁出现即报（8/11）", () => {
+	const rules = extractDraftRules([
+		'## 禁词表\n【硬禁】\n"声音碎了"\n【软禁】（软禁阈值：3）\n"下意识" "仿佛"',
+	]);
+	// 软禁词 1-2 次：容忍
+	const once = checkDraft("她下意识地往后退了一步，仿佛要躲开什么。", rules);
+	assert.equal(once.pass, true, `软禁单次应容忍：${once.violations.join("；")}`);
+	assert.ok(!once.violations.some((v) => v.includes("高频词")), "软禁单次不报");
+	// 软禁词 ≥3 次：报
+	const many = checkDraft("她下意识攥紧衣角，下意识看向门口，又下意识松了手。", rules);
+	assert.ok(many.violations.some((v) => v.includes("高频词「下意识」出现 3 次")), "软禁 ≥3 次报违规");
+	// 硬禁出现即报
+	const hard = checkDraft("她的声音碎了，尾音散在风里。", rules);
+	assert.ok(hard.violations.some((v) => v.includes("禁词「声音碎了」")), "硬禁搜到即报");
+});
+
 test("checkDraft：破折号与半角符号纯符号判违规，全角/弯引号不误伤（8/11）", () => {
 	const rules = { ...emptyDraftRules(), banDash: true, banHalfWidth: true };
 
