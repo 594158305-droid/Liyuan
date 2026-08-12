@@ -79,7 +79,9 @@ export function applyUiCustom(ui: UiCustom): void {
 	html.style.setProperty("--chat-w", zoom === 1 ? `${ui.chatW}px` : `calc(${ui.chatW}px / ${zoom})`);
 	html.style.zoom = String(zoom);
 	// 主聊天玻璃：0% 时 color-mix 全透明、blur 为 0，退化为现状
+	// （--glass-blur 存 px 数值：CSS calc 不支持「百分比 × 长度」乘法，不能在样式里算）
 	html.style.setProperty("--glass-opacity", `${ui.glass}%`);
+	html.style.setProperty("--glass-blur", `${(ui.glass / 100) * 14}px`);
 	// 背景图：url() 内引号/反斜杠转义（dataURL 与含特殊字符的 URL 均安全）
 	if (ui.bgImage) {
 		html.style.setProperty(

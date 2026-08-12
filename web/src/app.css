@@ -110,10 +110,6 @@ html[data-theme="dark"] .msg-char {
 	background: color-mix(in srgb, var(--surface) 92%, var(--accent-wash));
 }
 
-html[data-theme="dark"] .composer {
-	background: linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg) 92%, #000) 30%, var(--bg) 100%);
-}
-
 html[data-theme="dark"] .topbar {
 	background: color-mix(in srgb, var(--surface) 78%, transparent);
 	box-shadow: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 4px 20px rgb(0 0 0 / 35%);
@@ -877,8 +873,8 @@ textarea.field-input {
 	/* 主聊天玻璃：透明度由 --glass-opacity 驱动（0% 时全透明、blur 为 0，退化为无玻璃现状）；
 	   配合背景图时模糊透出图面，背景为纯色时仅显半透明 surface */
 	background: color-mix(in srgb, var(--surface) var(--glass-opacity, 0%), transparent);
-	backdrop-filter: blur(calc(var(--glass-opacity, 0%) * 0.14px)) saturate(1.15);
-	-webkit-backdrop-filter: blur(calc(var(--glass-opacity, 0%) * 0.14px)) saturate(1.15);
+	backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
+	-webkit-backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
 }
 
 .flow {
@@ -2089,7 +2085,16 @@ html[data-theme="dark"] .msg-md-code {
 
 /* ── 输入区:浮起的圆角输入卡 ── */
 .composer {
-	background: linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg) 88%, #fff) 28%, var(--bg) 100%);
+	/* 底部渐入玻璃色而非实色 --bg：玻璃/背景图开启时与 .list 半透明面无缝衔接（不割裂）；
+	   0% 时全透明透出 body 底色（等效原实色渐变），且背景图在输入区底部不再被实色遮住 */
+	background: linear-gradient(
+		180deg,
+		transparent 0%,
+		color-mix(in srgb, var(--surface) calc(var(--glass-opacity, 0%) * 0.66), transparent) 30%,
+		color-mix(in srgb, var(--surface) var(--glass-opacity, 0%), transparent) 100%
+	);
+	backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
+	-webkit-backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
 	flex: none;
 	padding: 8px 16px 12px;
 	padding-bottom: calc(12px + env(safe-area-inset-bottom));
