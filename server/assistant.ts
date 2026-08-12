@@ -813,7 +813,7 @@ function createStagehandTools(
 			name: "draw_generate",
 			label: "生成图片",
 			description:
-				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；**prompt 必须用英文 Danbooru tag 或英文画面描述（NovelAI 不认中文 tag，写中文会出无效图）**；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**anchor 必填**：图片默认嵌入最近一条剧情消息正文，必须给 anchor（从正文**逐字摘录** 8-15 字短原文片段，图片挂在该片段所在段落而不是消息末尾；正文内容用 story_read 读取后再摘录）；仅用户明确不要进正文时传 embed:false（此时 anchor 可不填）。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。**生图前先 read `.liyuan-skills/moment-capture.md` 盘点视觉时刻（七类时刻 + 密度分档 + 分级证据，产出时刻清单），再按 skill novelai-draw 写图**。tag 写法与构图规范见 skill novelai-draw。",
+				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；**prompt 必须用英文 Danbooru tag 或英文画面描述（NovelAI 不认中文 tag，写中文会出无效图）**；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**anchor 必填**：图片默认嵌入最近一条剧情消息正文，必须给 anchor（**本次配图仅针对用户指定的单楼层**——缺省 = 最近一条剧情回复；从**该楼层正文**逐字摘录 8-15 字短原文片段，图片挂在该片段所在段落而不是消息末尾；正文内容用 story_read 读取后再摘录）；仅用户明确不要进正文时传 embed:false（此时 anchor 可不填）。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。**生图前先 read `.liyuan-skills/moment-capture.md` 盘点视觉时刻（七类时刻 + 密度分档 + 分级证据，产出时刻清单），再按 skill novelai-draw 写图**。tag 写法与构图规范见 skill novelai-draw。",
 			parameters: Type.Object({
 				prompt: Type.String({ description: "画面描述/场景构图（**必须英文 Danbooru tag 或英文描述，NAI 不认中文 tag**；不含角色特征 tag）" }),
 				negativePrompt: Type.Optional(Type.String({ description: "整图负面 tag（英文）" })),

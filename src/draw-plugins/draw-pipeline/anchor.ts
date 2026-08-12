@@ -18,6 +18,105 @@ function fuzzyNorm(s: string): string {
 	return s.replace(/[\s，。！？；：、,.!?;:""''「」『』（）()—–\-…]/g, "").toLowerCase();
 }
 
+/**
+ * 判定 anchor 是否命中某段正文（四层策略，与 buildInsertPatch 同款）：
+ * ① 全文精确 → ② 最长子串 → ③ 尾部 10 字符 → ④ 去标点模糊。
+ * 返回命中层级；未命中返回 null。纯函数零依赖。
+ */
+export function matchAnchor(
+	text: string,
+	anchor: string,
+): "exact" | "substring" | "tail" | "fuzzy" | null {
+	const anchorTrim = (anchor ?? "").trim();
+	if (!text || !anchorTrim) return null;
+	// ① 全文精确匹配
+	if (text.indexOf(anchorTrim) !== -1) return "exact";
+	// ② 最长子串匹配
+	if (longestSubstring(text, anchorTrim)) return "substring";
+	// ③ 尾部 10 字符
+	const tail = anchorTrim.slice(-10);
+	if (tail.length >= 3 && text.indexOf(tail) !== -1) return "tail";
+	// ④ 去标点模糊：归一后匹配 anchor 的连续片段（正文确实包含该文字，仅标点/空白差异）
+	const normText = fuzzyNorm(text);
+	const normAnchor = fuzzyNorm(anchorTrim);
+	if (normAnchor.length >= 3) {
+		for (let len = normAnchor.length; len >= 3; len--) {
+			for (let start = 0; start + len <= normAnchor.length; start++) {
+				const sub2 = normAnchor.slice(start, start + len);
+				if (normText.indexOf(sub2) !== -1) return "fuzzy";
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * 全树搜索含 anchor 的条目（embedStoryImage 目标加固用，2026-08-12）：
+ * 遍历全部 message 条目（不只当前分支），按 matchAnchor 四层策略找 anchor 命中的条目。
+ * 多条命中取「最后出现的」（entries 按时间序 → 最近的叙事楼层）。
+ * 返回 { entryId, matched }；未命中返回 null。纯函数零依赖。
+ */
+export function findEntryByAnchor(
+	entries: Array<{ id: string; text: string }>,
+	anchor: string,
+): { entryId: string; matched: "exact" | "substring" | "tail" | "fuzzy" } | null {
+	const anchorTrim = (anchor ?? "").trim();
+	if (!anchorTrim) return null;
+	let best: { entryId: string; matched: "exact" | "substring" | "tail" | "fuzzy" } | null = null;
+	for (const e of entries) {
+		if (!e.text) continue;
+		const m = matchAnchor(e.text, anchorTrim);
+		if (m) best = { entryId: e.id, matched: m };
+	}
+	return best;
+}
+
+/** 嵌入目标解析结果 */
+export type EmbedTargetResult =
+	| { ok: true; entryId: string; matched: "default" | "anchor" }
+	| { ok: false; error: string };
+
+/**
+ * 嵌入目标条目解析（embedStoryImage 目标加固，2026-08-12）：
+ * - 默认目标 = branchIds 中最后一条 assistant 条目（items 按时间序，取最后命中分支的）；
+ * - anchor 非空且默认目标文本未命中 → 全树搜索含 anchor 的条目（跨分支/历史楼层）；
+ * - 命中条目不在当前分支 → 报错（叶指针漂移/用户已回退，不静默嵌错——历史 bug：
+ *   叶漂移后 8 张图全嵌进错误楼层，根因即 anchor 只定插入位、不参与选目标）；
+ * - anchor 全树无命中 → 报错。
+ * items：全部 assistant 条目（id + 提取后的显示文本，时间序）；branchIds：当前分支条目 id 序列。
+ * 纯函数零依赖，可单测。
+ */
+export function resolveEmbedTarget(
+	items: Array<{ id: string; text: string }>,
+	branchIds: string[],
+	anchor: string | undefined,
+): EmbedTargetResult {
+	const anchorTrim = (anchor ?? "").trim();
+	// 默认目标：branchIds 中最后出现的 assistant 条目
+	let defaultEntry: { id: string; text: string } | null = null;
+	for (const it of items) {
+		if (branchIds.includes(it.id)) defaultEntry = it;
+	}
+	if (!defaultEntry) return { ok: false, error: "暂无剧情消息可嵌入" };
+	if (!anchorTrim) return { ok: true, entryId: defaultEntry.id, matched: "default" };
+	// anchor 命中默认目标 → 用默认目标（插入点由 buildInsertPatch 再定位）
+	if (matchAnchor(defaultEntry.text, anchorTrim)) {
+		return { ok: true, entryId: defaultEntry.id, matched: "anchor" };
+	}
+	// 全树搜索（跨分支/历史楼层）
+	const found = findEntryByAnchor(items, anchorTrim);
+	if (!found) {
+		return { ok: false, error: "anchor 未在剧情正文命中，无法确定嵌入位置（请确认 anchor 逐字摘录自最新剧情正文）" };
+	}
+	if (!branchIds.includes(found.entryId)) {
+		return {
+			ok: false,
+			error: `目标楼层不在当前分支（anchor 命中 ${found.entryId.slice(0, 8)}…，已离开当前叙事），嵌入放弃——请先回到该分支再重试`,
+		};
+	}
+	return { ok: true, entryId: found.entryId, matched: "anchor" };
+}
+
 /** 在 text 中找 needle 的最长匹配片段（子串连续匹配；返回命中片段与原序） */
 function longestSubstring(text: string, needle: string): { hit: string; index: number } | null {
 	const lower = text.toLowerCase();

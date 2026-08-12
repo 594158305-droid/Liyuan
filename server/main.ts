@@ -121,7 +121,7 @@ import {
 import { createAgentHost, stagehandPluginToolNames, STAGEHAND_TOOL_NAMES, type AssistantHost, type StoryBridge } from "./assistant.ts";
 import { turnEndHooks } from "../src/draw-plugins/registry.ts";
 import { registerLoreSearcher, registerPlannerCaller } from "../src/draw-plugins/draw-pipeline/index.ts";
-import { buildInsertPatch } from "../src/draw-plugins/draw-pipeline/anchor.ts";
+import { buildInsertPatch, resolveEmbedTarget } from "../src/draw-plugins/draw-pipeline/anchor.ts";
 import { createSlot } from "../src/draw-plugins/draw-slot/slot-store.ts";
 import { resolveCharacterTags } from "../src/draw-plugins/draw-role/resolver.ts";
 import { createStoryBridge, FULL_BRIDGE_PERMISSIONS } from "./bridge.ts";
@@ -1124,7 +1124,7 @@ type RoleEditTarget =
 /**
  * 分支目标定位（scriptEditMessage / storyEdit 共用）：
  * 二选一定位目标回复的「前驱」entry id。
- * - lastRoleIndex：从分支末尾倒数第 N 条「角色消息」（assistant / 可显示 custom），0=最后一条；
+ * - lastRoleIndex：从分支末尾倒数第 N 条「角色消息」（assistant），0=最后一条；
  * - branchIndex：分支数组下标（原语义）。
  * 前驱 = 目标条目的上一条 entry；目标即分支首（无前驱）时钉到分支根自身（目标回复移出当前分支）。
  */
@@ -1137,12 +1137,13 @@ const resolveRoleEditTarget = (
 		if (!Number.isInteger(input.lastRoleIndex) || input.lastRoleIndex < 0) {
 			return { ok: false, error: "lastRoleIndex 必须是非负整数" };
 		}
-		const roleIdx: number[] = [];
-		branch.forEach((e, i) => {
-			if (e.type !== "message") return;
-			const role = e.message?.role;
-			if (role === "assistant" || role === "custom") roleIdx.push(i);
-		});
+			const roleIdx: number[] = [];
+			branch.forEach((e, i) => {
+				if (e.type !== "message") return;
+				const role = e.message?.role;
+				// 2026-08-12 修复：只收 assistant——custom 角色消息（rp-edited-reply 转义等）不该被当改稿目标
+				if (role === "assistant") roleIdx.push(i);
+			});
 		const target = roleIdx[roleIdx.length - 1 - input.lastRoleIndex];
 		if (target === undefined) {
 			return { ok: false, error: `lastRoleIndex 超出角色消息范围（0..${Math.max(0, roleIdx.length - 1)}）` };
@@ -1174,7 +1175,10 @@ const resolveRoleEditTarget = (
  */
 const branchCommitToTarget = (targetId: string): void => {
 	const sm = session.sessionManager;
+	const from = sm.getLeafId();
 	sm.branch(targetId);
+	// 2026-08-12 排查日志：story_edit / embedStoryImage / regenerateSwipe 等所有 sm.branch 调用点经此记录
+	console.log(`[liyuan] branchCommit: ${from?.slice(0, 8) ?? "?"} → ${targetId.slice(0, 8)}`);
 	const ctx = sm.buildSessionContext();
 	session.agent.state.messages = ctx.messages;
 };
@@ -2245,9 +2249,20 @@ const storyBridgeBase: StoryBridge = {
 			if (!resolved.ok) return { ok: false, error: resolved.error };
 			// 3. sm.branch 直钉（绝不用 session.navigateTree——它对 user/assistant 目标有副作用语义，
 			//    实测导致分支回退到开场白、改写丢失）；append-only：原回复保留在树里
+			const beforeLeaf = session.sessionManager.getLeafId();
 			branchCommitToTarget(resolved.targetId);
 			// 4. 注入改后全文（rp-edited-reply：上下文钩子会转成 assistant 给 LLM，带「已改写」标记）
 			await session.sendCustomMessage({ customType: "rp-edited-reply", content: text, display: true });
+			// 4b. 叶校验（2026-08-12 防御）：注入后目标前驱必须仍在分支——否则说明叶被外部移动到
+			//     预期外位置（历史 bug：story_edit 改稿挂错楼层），记录告警供排查
+			{
+				const afterBranch = session.sessionManager.getBranch();
+				if (!afterBranch.some((e) => e.id === resolved.targetId)) {
+					console.error(
+						`[liyuan] story_edit 叶校验失败：目标前驱 ${resolved.targetId.slice(0, 8)} 不在注入后分支（叶 ${beforeLeaf?.slice(0, 8) ?? "?"} → ${session.sessionManager.getLeafId()?.slice(0, 8) ?? "?"}）`,
+					);
+				}
+			}
 
 			// 5. 重记账：取被编辑轮前一条 user 消息文本 + 改后 text，经网关旁路记账。
 			//    提交已把叶移到编辑后的新叙事位置（rp-edited-reply 是当前叶的一部分），
@@ -2293,7 +2308,10 @@ const storyBridgeBase: StoryBridge = {
 			}
 			if (!existsSync(abs)) return { ok: false, error: `文件不存在：${abs}` };
 
-			// 2) 最新 assistant 条目（复用 onTurnEnd branchMessages 取法：倒序找最后一条 assistant content）
+			// 2) 嵌入目标定位（2026-08-12 加固）：默认 = 当前分支最后一条 assistant；
+			//    anchor 非空且默认目标未命中 → 全树搜索含 anchor 的条目（跨分支/历史楼层）；
+			//    命中条目不在当前分支 → 报错让外部修正（不静默嵌错——历史 bug：
+			//    叶指针漂移后 8 张图全部嵌进错误楼层，根因即 anchor 只定插入位、不选目标）
 			const branch = session.sessionManager.getBranch() as Array<{
 				id?: string;
 				type?: string;
@@ -2301,21 +2319,23 @@ const storyBridgeBase: StoryBridge = {
 				customType?: string;
 				content?: unknown;
 			}>;
-			let targetId = "";
-			let targetText = "";
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const e = branch[i];
-				if (e?.type === "message" && e.message?.role === "assistant") {
-					targetId = e.id ?? "";
-					// 当前显示全文：优先取该消息后的 rp-edited-reply 覆盖（含旧占位符），
-					// 否则原始 content——重复嵌入不覆盖丢失旧图
-					targetText = targetId ? currentDisplayTextOf(branch, targetId) : extractEntryText(e.message.content);
-					if (targetText.trim()) break;
-				}
-			}
-			if (!targetId || !targetText.trim()) {
-				return { ok: false, error: "暂无剧情消息可嵌入" };
-			}
+			const branchIds = branch.map((e) => e.id ?? "");
+			const embedItems = (session.sessionManager.getEntries() as Array<{
+				id: string;
+				type?: string;
+				message?: { role?: string; content?: unknown };
+			}>)
+				.filter((e) => e.type === "message" && e.message?.role === "assistant")
+				.map((e) => ({
+					id: e.id,
+					// 当前显示全文优先（含 rp-edited-reply 覆盖的占位符/改稿内容），否则原始 content
+					text: currentDisplayTextOf(branch, e.id) || extractEntryText(e.message?.content),
+				}));
+			const resolved = resolveEmbedTarget(embedItems, branchIds, anchor);
+			if (!resolved.ok) return { ok: false, error: resolved.error };
+			const targetId = resolved.entryId;
+			const targetText = currentDisplayTextOf(branch, targetId);
+			if (!targetText.trim()) return { ok: false, error: "暂无剧情消息可嵌入" };
 
 			// 3) createSlot：slotId = slot-<uuid>，chatId=sessionId，messageId=条目 id，file=rel
 			//    params 存结构化分栏（LWB 编辑 TAG 数据源）：
@@ -2374,6 +2394,16 @@ const storyBridgeBase: StoryBridge = {
 			//    渲染走 RichContent（无 rp-draft-op 补丁的 timeline 快照问题）
 			const r = await editEntryViaStoryChannel(targetId, newText);
 			if (!r.ok) return { ok: false, error: r.error };
+			// 6b. 叶校验（2026-08-12 防御）：注入后目标必须仍在分支——否则说明叶被外部移动到
+			//     预期外位置（历史 bug：改稿/嵌入挂错楼层），记录告警供排查
+			{
+				const afterBranch = session.sessionManager.getBranch();
+				if (!afterBranch.some((e) => e.id === targetId)) {
+					console.error(
+						`[liyuan] embedStoryImage 叶校验失败：目标 ${targetId.slice(0, 8)} 不在注入后分支（叶=${session.sessionManager.getLeafId()?.slice(0, 8) ?? "?"}）`,
+					);
+				}
+			}
 			return { ok: true, slotId };
 		} catch (e) {
 			return { ok: false, error: e instanceof Error ? e.message : String(e) };
