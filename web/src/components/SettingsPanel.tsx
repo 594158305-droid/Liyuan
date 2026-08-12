@@ -704,29 +704,30 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 		return b.startsWith("data:") ? "" : b;
 	});
 	const apply = (next: Partial<UiCustom>) => {
-		const ui = {
-			chatW: next.chatW ?? chatW,
-			fontScale: next.fontScale ?? fontScale,
-			collapseUser: next.collapseUser ?? collapseUser,
-			glass: next.glass ?? glass,
-			bgImage: next.bgImage ?? bgImage,
-			bgAutoTheme: next.bgAutoTheme ?? bgAutoTheme,
-		};
+		// 以 localStorage 最新值为基础合并：异步路径（文件压缩）与滑块拖动交错时，
+		// 若用 React state 闭包合并，旧闭包里的空 bgImage 会覆盖刚选的背景图
+		const ui = { ...getUiCustom(), ...next };
 		applyUiCustom(ui);
-		if (next.chatW !== undefined) setChatW(ui.chatW);
-		if (next.fontScale !== undefined) setFontScale(ui.fontScale);
-		if (next.glass !== undefined) setGlass(ui.glass);
-		if (next.bgImage !== undefined) setBgImage(ui.bgImage);
-		if (next.bgAutoTheme !== undefined) setBgAutoTheme(ui.bgAutoTheme);
-		if (next.collapseUser !== undefined) setCollapseUser(ui.collapseUser);
+		setChatW(ui.chatW);
+		setFontScale(ui.fontScale);
+		setGlass(ui.glass);
+		setBgImage(ui.bgImage);
+		setBgAutoTheme(ui.bgAutoTheme);
+		setCollapseUser(ui.collapseUser);
 		// 聊天页监听后重读默认收起状态，即时生效
 		window.dispatchEvent(new Event(UI_CUSTOM_SETTINGS_EVENT));
 	};
 	// URL 输入防抖提交（停止键入 400ms 后生效；Enter/失焦立即提交）
 	const bgDebounceRef = useRef(0);
+	const bgUrlRef = useRef<HTMLInputElement>(null);
 	const commitBgUrl = (v: string) => {
 		window.clearTimeout(bgDebounceRef.current);
-		bgDebounceRef.current = window.setTimeout(() => apply({ bgImage: v.trim() }), 400);
+		bgDebounceRef.current = window.setTimeout(() => {
+			// 输入框已变化（如文件选择后置空）则放弃本次提交，防止旧输入覆盖背景图
+			const el = bgUrlRef.current;
+			if (el && el.value !== v) return;
+			apply({ bgImage: v.trim() });
+		}, 400);
 	};
 	useEffect(() => () => window.clearTimeout(bgDebounceRef.current), []);
 	const fileRef = useRef<HTMLInputElement>(null);
@@ -785,6 +786,7 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 				<span className="field-label">背景图</span>
 				<div className="bg-image-row">
 					<input
+						ref={bgUrlRef}
 						className="panel-search"
 						type="text"
 						placeholder="粘贴图片 URL，或选择本地图片"
@@ -796,7 +798,9 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 						onKeyDown={(e) => {
 							if (e.key === "Enter") {
 								window.clearTimeout(bgDebounceRef.current);
-								apply({ bgImage: e.currentTarget.value.trim() });
+								// 与「应显示值」一致（如文件选择后留空）时不提交，避免误清空背景图
+								const shown = bgImage.startsWith("data:") ? "" : bgImage;
+								if (e.currentTarget.value.trim() !== shown) apply({ bgImage: e.currentTarget.value.trim() });
 							}
 							if (e.key === "Escape" && bgUrl) {
 								window.clearTimeout(bgDebounceRef.current);
@@ -805,7 +809,8 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 						}}
 						onBlur={() => {
 							window.clearTimeout(bgDebounceRef.current);
-							apply({ bgImage: bgUrl.trim() });
+							const shown = bgImage.startsWith("data:") ? "" : bgImage;
+							if (bgUrl !== shown) apply({ bgImage: bgUrl.trim() });
 						}}
 					/>
 					<button type="button" className="drawer-btn" onClick={() => fileRef.current?.click()}>

@@ -88,11 +88,13 @@ html[data-theme="dark"] {
 }
 
 html[data-theme="dark"] body {
-	background:
+	background-image:
+		var(--bg-image, none),
 		radial-gradient(1000px 500px at 50% -8%, rgb(226 90 60 / 6%) 0%, transparent 50%),
 		radial-gradient(700px 380px at 100% 100%, rgb(226 90 60 / 4%) 0%, transparent 48%),
-		radial-gradient(600px 320px at 0% 90%, rgb(226 90 60 / 3%) 0%, transparent 42%),
-		var(--bg);
+		radial-gradient(600px 320px at 0% 90%, rgb(226 90 60 / 3%) 0%, transparent 42%);
+	background-color: var(--bg);
+	background-size: cover, auto, auto, auto;
 	color: var(--text);
 }
 
