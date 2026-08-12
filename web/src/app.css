@@ -126,8 +126,10 @@ html[data-theme="dark"] .btn-send:disabled {
 
 /* 世界状态条 / 输入区：禁止残留白昼硬编码底色 */
 html[data-theme="dark"] .status-strip-bar {
-	background: var(--surface);
-	border-color: var(--hairline-strong);
+	background: color-mix(in srgb, var(--surface) var(--glass-opacity, 100%), transparent);
+	backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
+	-webkit-backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
+	border-color: color-mix(in srgb, var(--hairline-strong) var(--glass-opacity, 100%), transparent);
 	color: var(--text);
 	box-shadow: var(--shadow-1);
 }
@@ -2085,14 +2087,9 @@ html[data-theme="dark"] .msg-md-code {
 
 /* ── 输入区:浮起的圆角输入卡 ── */
 .composer {
-	/* 底部渐入玻璃色而非实色 --bg：玻璃/背景图开启时与 .list 半透明面无缝衔接（不割裂）；
-	   0% 时全透明透出 body 底色（等效原实色渐变），且背景图在输入区底部不再被实色遮住 */
-	background: linear-gradient(
-		180deg,
-		transparent 0%,
-		color-mix(in srgb, var(--surface) calc(var(--glass-opacity, 0%) * 0.66), transparent) 30%,
-		color-mix(in srgb, var(--surface) var(--glass-opacity, 0%), transparent) 100%
-	);
+	/* 与 .list 同款玻璃色平铺（非顶部透明渐变）：list 底部 padding 与状态条之间的
+	   空隙不再透出未叠加的背景图原色形成色带；玻璃关闭时全透明透出 body 底色 */
+	background: color-mix(in srgb, var(--surface) var(--glass-opacity, 0%), transparent);
 	backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
 	-webkit-backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
 	flex: none;
@@ -4765,8 +4762,12 @@ input.panel-search.num {
 	align-items: center;
 	gap: 8px;
 	width: 100%;
-	background: var(--surface);
-	border: 1px solid var(--hairline-strong);
+	/* 玻璃开启时与 .list 同款半透明面+blur（无缝衔接，不显实色卡分界）；
+	   关闭时 fallback 100% 保持实色卡现状 */
+	background: color-mix(in srgb, var(--surface) var(--glass-opacity, 100%), transparent);
+	backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
+	-webkit-backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.15);
+	border: 1px solid color-mix(in srgb, var(--hairline-strong) var(--glass-opacity, 100%), transparent);
 	border-radius: 14px;
 	padding: 8px 12px;
 	font-size: 13px;

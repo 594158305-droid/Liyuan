@@ -78,10 +78,16 @@ export function applyUiCustom(ui: UiCustom): void {
 	// zoom 与宽度乘算：视觉宽度 = --chat-w × zoom，反算保证设定值即视觉值
 	html.style.setProperty("--chat-w", zoom === 1 ? `${ui.chatW}px` : `calc(${ui.chatW}px / ${zoom})`);
 	html.style.zoom = String(zoom);
-	// 主聊天玻璃：0% 时 color-mix 全透明、blur 为 0，退化为现状
-	// （--glass-blur 存 px 数值：CSS calc 不支持「百分比 × 长度」乘法，不能在样式里算）
-	html.style.setProperty("--glass-opacity", `${ui.glass}%`);
-	html.style.setProperty("--glass-blur", `${(ui.glass / 100) * 14}px`);
+	// 主聊天玻璃：0 时移除变量（.list/.composer fallback 0% 全透明；状态条 fallback 100%
+	// 保持实色卡现状），>0 时设置百分比与 blur px（CSS calc 不支持「百分比×长度」乘法，
+	// blur 值在 JS 里算好）
+	if (ui.glass > 0) {
+		html.style.setProperty("--glass-opacity", `${ui.glass}%`);
+		html.style.setProperty("--glass-blur", `${(ui.glass / 100) * 14}px`);
+	} else {
+		html.style.removeProperty("--glass-opacity");
+		html.style.removeProperty("--glass-blur");
+	}
 	// 背景图：url() 内引号/反斜杠转义（dataURL 与含特殊字符的 URL 均安全）
 	if (ui.bgImage) {
 		html.style.setProperty(
