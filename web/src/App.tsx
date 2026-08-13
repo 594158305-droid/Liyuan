@@ -561,15 +561,16 @@ export default function App() {
 		[ttsBusy, pushToast],
 	);
 
-	/** 消息工具栏「配图」：手动触发生图管线（POST /api/draw/pipeline/run {text}） */
+	/** 消息工具栏「配图」：手动触发生图管线（POST /api/draw/pipeline/run {text, entryId}） */
 	const doIllustrate = useCallback(
-		async (text: string) => {
+		async (text: string, entryId?: string) => {
 			const t = text.trim();
 			if (!t || illustrateLockRef.current) return;
 			illustrateLockRef.current = true;
 			setIllustrateBusy(true);
 			try {
-				// 宿主同步执行管线：HTTP 返回即管线执行完毕（ran/reason/slots/warnings 透传），按结果分级反馈
+				// 宿主同步执行管线：HTTP 返回即管线执行完毕（ran/reason/slots/warnings 透传），按结果分级反馈。
+				// entryId 回传点击楼层的会话树条目 id——非最新叙事层生图前明确拒绝（2026-08-14 事故修复）
 				const r = await apiPost<{
 					ok: boolean;
 					ran?: boolean;
@@ -577,7 +578,7 @@ export default function App() {
 					slots?: { slotId: string }[];
 					warnings?: string[];
 					embedded?: boolean;
-				}>("/api/draw/pipeline/run", { text: t });
+				}>("/api/draw/pipeline/run", { text: t, ...(entryId ? { entryId } : {}) });
 				if (r.ran === false) {
 					pushToast("warning", `配图未执行：${r.reason ?? "未知原因"}`);
 				} else if (r.embedded === false) {

@@ -11,7 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { enforceLimits, parseImagePlan } from "../src/draw-plugins/draw-pipeline/scene-plan.ts";
-import { buildInsertPatch } from "../src/draw-plugins/draw-pipeline/anchor.ts";
+import {
+	buildInsertPatch,
+	resolveIllustrateTarget,
+	illustrateTargetObstruction,
+} from "../src/draw-plugins/draw-pipeline/anchor.ts";
 import { buildPlannerPrompt } from "../src/draw-plugins/draw-pipeline/planner.ts";
 import {
 	markEntryProcessed,
@@ -434,4 +438,86 @@ test("runPipeline：无 groupTags / 无 uc 时行为不变（向后兼容）", a
 	assert.equal(r.ran, true);
 	assert.equal(seenPrompt, "甲_tag, running, scene");
 	assert.equal(seenNegative, "", "无 uc → negativePrompt 为空");
+});
+
+// ---------- 配图嵌入目标解析（2026-08-14 事故修复） ----------
+
+test("resolveIllustrateTarget：目标 = 分支最后一个叙事条目（含改稿覆盖，跳过 rp-state/model_change）", () => {
+	const branch = [
+		{ id: "root", type: "session" },
+		{ id: "u1", type: "message", message: { role: "user" } },
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+		{ id: "mc1", type: "model_change" },
+		{ id: "u2", type: "message", message: { role: "user" } },
+		{ id: "a2", type: "message", message: { role: "assistant" } },
+		// 改稿覆盖 = 最新叙事（原实现只认 message/assistant → 目标回跳到 a1，事故通道）
+		{ id: "edit1", type: "custom_message", customType: "rp-edited-reply" },
+		{ id: "rp1", type: "custom", customType: "rp-state" },
+	];
+	const r = resolveIllustrateTarget(branch);
+	assert.equal(r.ok, true);
+	if (r.ok) assert.equal(r.entryId, "edit1");
+});
+
+test("resolveIllustrateTarget：点击楼层非最新叙事层 → 明确拒绝", () => {
+	const branch = [
+		{ id: "root", type: "session" },
+		{ id: "u1", type: "message", message: { role: "user" } },
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+		{ id: "a2", type: "message", message: { role: "assistant" } },
+	];
+	const r = resolveIllustrateTarget(branch, "a1");
+	assert.equal(r.ok, false);
+	if (!r.ok) assert.match(r.error, /仅支持最新叙事层/);
+});
+
+test("resolveIllustrateTarget：点击最新叙事层 → 通过", () => {
+	const branch = [
+		{ id: "root", type: "session" },
+		{ id: "u1", type: "message", message: { role: "user" } },
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+	];
+	const r = resolveIllustrateTarget(branch, "a1");
+	assert.equal(r.ok, true);
+	if (r.ok) assert.equal(r.entryId, "a1");
+});
+
+test("resolveIllustrateTarget：无叙事条目 → 拒绝", () => {
+	const branch = [{ id: "root", type: "session" }, { id: "mc", type: "model_change" }];
+	const r = resolveIllustrateTarget(branch);
+	assert.equal(r.ok, false);
+	if (!r.ok) assert.match(r.error, /暂无剧情消息/);
+});
+
+test("illustrateTargetObstruction：目标后 user 消息 → user（新回合在途）", () => {
+	const branch = [
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+		{ id: "u1", type: "message", message: { role: "user" } },
+	];
+	assert.equal(illustrateTargetObstruction(branch, "a1"), "user");
+});
+
+test("illustrateTargetObstruction：目标后改稿覆盖 → custom_message", () => {
+	const branch = [
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+		{ id: "e1", type: "custom_message", customType: "rp-edited-reply" },
+	];
+	assert.equal(illustrateTargetObstruction(branch, "a1"), "custom_message");
+});
+
+test("illustrateTargetObstruction：目标后仅元数据（rp-state/model_change）→ null 可嵌入", () => {
+	const branch = [
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+		{ id: "rp1", type: "custom", customType: "rp-state" },
+		{ id: "mc1", type: "model_change" },
+	];
+	assert.equal(illustrateTargetObstruction(branch, "a1"), null);
+});
+
+test("illustrateTargetObstruction：目标后更新的 assistant → reply", () => {
+	const branch = [
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+		{ id: "a2", type: "message", message: { role: "assistant" } },
+	];
+	assert.equal(illustrateTargetObstruction(branch, "a1"), "reply");
 });

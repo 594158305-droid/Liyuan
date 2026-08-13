@@ -689,7 +689,7 @@ export interface BubbleProps {
 	onTts?: (text: string) => void;
 	ttsBusy?: boolean;
 	/** 手动为这条消息配图（生图管线旋钮；REST /api/draw/pipeline/run） */
-	onIllustrate?: (text: string) => void;
+	onIllustrate?: (text: string, entryId?: string) => void;
 	illustrateBusy?: boolean;
 	/** 开场白切换（仅会话未开聊时） */
 	greetingSwitch?: { index: number; total: number; onPrev: () => void; onNext: () => void };
@@ -1017,8 +1017,8 @@ export function Bubble({
 								<button
 									className={`act${illustrateBusy ? " btn-spin" : ""}`}
 									disabled={illustrateBusy || !msg.text.trim()}
-									onClick={() => onIllustrate(msg.text)}
-									title="为这条消息生成配图（生图管线）"
+									onClick={() => onIllustrate(msg.text, msg.id)}
+									title="为这条消息生成配图（生图管线；仅最新叙事层可配图）"
 								>
 									{!illustrateBusy && <IconImage size={13} />}
 									{illustrateBusy ? "配图中…" : "配图"}

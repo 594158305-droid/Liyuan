@@ -65,6 +65,12 @@ export interface WireMsg {
 	name?: string;
 	text: string;
 	/**
+	 * 会话树条目 id（叙事消息：assistant 回复 / rp-edited-reply 改稿；折叠气泡取同轮
+	 * 最后一段的 id）。配图/编辑等「定位具体楼层」的操作经它回传，服务端据此校验目标
+	 * 是否仍是最新叙事层（2026-08-14 配图切楼层事故后补）。
+	 */
+	id?: string;
+	/**
 	 * 未套皮原文（仅当套皮产生变化时携带；text!==raw）。
 	 * 编辑消息时 draft 初始值用 raw ?? text，编辑保存走原文——避免套皮后的 HTML 固化进存储。
 	 * 显示层照旧用 text（套皮后）。user 消息不套皮，无此字段。
@@ -521,6 +527,8 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 	if (!m || typeof m !== "object") return null;
 	const msg = m as MsgLike;
 	const text = textOf(msg.content).trim();
+	// 条目 id（branchMessages 已把会话树条目 id 附到消息对象上；配图回传定位用）
+	const msgId = typeof (m as { id?: unknown }).id === "string" ? (m as { id: string }).id : undefined;
 	const skin = opts?.skin ?? null;
 
 	if (msg.role === "user") {
@@ -601,6 +609,7 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 			channel,
 			name: names.charName,
 			text: body,
+			...(msgId ? { id: msgId } : {}),
 			...(skinned?.raw ? { raw: skinned.raw } : {}),
 			...(thinking ? { thinking } : {}),
 			...(timeline ? { timeline } : {}),
@@ -638,6 +647,7 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 				channel: "narrative",
 				name: names.charName,
 				text: skinned.text,
+				...(msgId ? { id: msgId } : {}),
 				...(skinned.raw ? { raw: skinned.raw } : {}),
 				edited: true,
 			};
@@ -710,6 +720,7 @@ export function foldTurnNarratives(msgs: WireMsg[]): WireMsg[] {
 					const merged: WireMsg = {
 						...prev,
 						text: m.text,
+						id: m.id ?? prev.id, // 覆盖版本取改稿条目 id（配图回传定位用）
 						...(m.raw ? { raw: m.raw } : {}),
 						edited: true,
 					};
@@ -727,6 +738,7 @@ export function foldTurnNarratives(msgs: WireMsg[]): WireMsg[] {
 				out[turnRoleIdx] = {
 					...prev,
 					text: joinedText,
+					id: m.id ?? prev.id, // 折叠气泡取同轮最后一段的条目 id（配图回传定位用）
 					...(mergedRaw !== joinedText ? { raw: mergedRaw } : {}),
 					...(thinking ? { thinking } : {}),
 					// 变体元数据以最后一段为准（annotateSwipes 挂在末条）

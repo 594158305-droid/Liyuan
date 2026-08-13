@@ -121,7 +121,7 @@ import {
 import { createAgentHost, stagehandPluginToolNames, STAGEHAND_TOOL_NAMES, type AssistantHost, type StoryBridge } from "./assistant.ts";
 import { turnEndHooks } from "../src/draw-plugins/registry.ts";
 import { registerLoreSearcher, registerPlannerCaller } from "../src/draw-plugins/draw-pipeline/index.ts";
-import { buildInsertPatch, resolveEmbedTarget } from "../src/draw-plugins/draw-pipeline/anchor.ts";
+import { buildInsertPatch, resolveEmbedTarget, resolveIllustrateTarget, illustrateTargetObstruction } from "../src/draw-plugins/draw-pipeline/anchor.ts";
 import { createSlot } from "../src/draw-plugins/draw-slot/slot-store.ts";
 import { resolveCharacterTags } from "../src/draw-plugins/draw-role/resolver.ts";
 import { createStoryBridge, FULL_BRIDGE_PERMISSIONS } from "./bridge.ts";
@@ -562,7 +562,7 @@ const branchMessages = (): unknown[] => {
 	try {
 		const out: unknown[] = [];
 		for (const e of session.sessionManager.getBranch() as Array<Record<string, unknown>>) {
-			if (e.type === "message" && e.message) out.push(e.message);
+			if (e.type === "message" && e.message) out.push({ ...(e.message as object), id: e.id as string });
 			else if (e.type === "custom_message") {
 				// details 必须透传：开场白序号（rpGreeting）等元数据只存在于树条目上，
 				// 丢了就让 resyncAll 后的角标退回 /api/card 轮询（切换开场白时角标卡住不动）
@@ -572,6 +572,8 @@ const branchMessages = (): unknown[] => {
 					content: e.content,
 					display: e.display,
 					details: e.details,
+					// 条目 id：配图按钮回传「点的是哪层」用（2026-08-14 事故修复）
+					id: e.id as string,
 				});
 			}
 		}
@@ -1160,7 +1162,13 @@ const resolveRoleEditTarget = (
 		if (target === undefined) {
 			return { ok: false, error: `lastRoleIndex 超出角色消息范围（0..${Math.max(0, roleIdx.length - 1)}）` };
 		}
-		return { ok: true, targetId: target <= 0 ? branch[0].id : branch[target - 1].id, targetIdx: target };
+		// 前驱锚点：跳过 runtime 生成过程记的 model_change 等纯元数据节点——钉到它们
+		// 下面会让改稿楼层挂在生成中间节点上（事故：润色后原回复被移出主路径、
+		// 改稿版挂到 model_change 层，前端刷新前后状态不一致）。只跳 model_change：
+		// user 消息/rp-state 快照等其余类型都是稳定锚点，维持「紧邻前驱」原语义。
+		let anchorIdx = target - 1;
+		while (anchorIdx > 0 && branch[anchorIdx].type === "model_change") anchorIdx--;
+		return { ok: true, targetId: target <= 0 ? branch[0].id : branch[anchorIdx].id, targetIdx: target };
 	}
 	const branchIndex = input.branchIndex;
 	if (
@@ -1757,31 +1765,44 @@ const restHost: RestHost = {
 		}
 	},
 	/** 手动触发生图管线并嵌入当前分支最新剧情消息（配图按钮；Q15 简化通道——
-	 *  runPipeline + patches 应用到最新 assistant 全文 → editEntryViaStoryChannel（rp-edited-reply）。
-	 *  anchor（选填）：用户指定的正文短原文片段——第一张图挂接位置用它（LWB anchor 设计） */
-	async manualPipelineRun(text: string, anchor?: string) {
+	 *  runPipeline + patches 应用到最新叙事条目 → editEntryViaStoryChannel（rp-edited-reply）。
+	 *  anchor（选填）：用户指定的正文短原文片段——第一张图挂接位置用它（LWB anchor 设计）。
+	 *  entryId（2026-08-14 起配图按钮回传）：点击楼层的会话树条目 id——非最新叙事层
+	 *  生图前明确拒绝（用户裁决），防止 branchCommit 钉回旧层切断后续楼层。 */
+	async manualPipelineRun(text: string, anchor?: string, entryId?: string) {
 		try {
-			console.log(`[draw-pipeline] 手动配图触发（text 前 40 字：${text.slice(0, 40).replace(/\s+/g, " ")}${anchor ? `；anchor=${anchor.slice(0, 20)}` : ""}）`);
+			console.log(`[draw-pipeline] 手动配图触发（text 前 40 字：${text.slice(0, 40).replace(/\s+/g, " ")}${anchor ? `；anchor=${anchor.slice(0, 20)}` : ""}${entryId ? `；entryId=${entryId.slice(0, 8)}` : ""}）`);
 			const { runPipeline } = await import("../src/draw-plugins/draw-pipeline/pipeline.ts");
 			const { defaultPipelineDeps } = await import("../src/draw-plugins/draw-pipeline/index.ts");
-			// 最新 assistant（嵌入目标：当前分支倒序第一条非空 assistant 文本）
+			// 嵌入目标 = 当前分支最后一个叙事条目（assistant 回复 + rp-edited-reply 改稿覆盖）。
+			// 2026-08-14 事故修复：原扫描只认 message/assistant，改稿楼层被跳过 → 目标回跳到
+			// 更早楼层，branchCommit 钉回旧层把后续楼层切出分支视图（数据仍在树内可恢复）。
 			const branch = session.sessionManager.getBranch() as Array<{
-				id?: string;
+				id: string;
 				type?: string;
+				customType?: string;
 				message?: { role?: string; content?: unknown };
+				content?: unknown;
 			}>;
-			let entryId = "";
-			let entryText = "";
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const e = branch[i];
-				if (e?.type === "message" && e.message?.role === "assistant") {
-					entryId = e.id ?? "";
-					// 当前显示全文：优先取该消息后的 rp-edited-reply 覆盖（含旧占位符），
-					// 否则原始 content——二次配图不丢旧图（旧占位符只存在覆盖条目里）
-					entryText = entryId ? currentDisplayTextOf(branch, entryId) : extractEntryText(e.message.content);
-					if (entryText.trim()) break;
-				}
+			const resolved = resolveIllustrateTarget(branch, entryId?.trim() || undefined);
+			if (!resolved.ok) return { ok: false, error: resolved.error };
+			const targetId = resolved.entryId;
+			// 目标之后不得有叙事性条目（新回合 user 消息 / 后续回复 / 改稿覆盖）——钉回会切楼层；
+			// rp-state/model_change 等元数据允许（钉回后由旁路重记账再生成）。生图前 fail-fast。
+			const obstruction = illustrateTargetObstruction(branch, targetId);
+			if (obstruction) {
+				const reason =
+					obstruction === "user"
+						? "该楼层之后已有新回合消息，配图放弃——请等本轮回复完成后再配图"
+						: obstruction === "custom_message"
+							? "该楼层之后已有改稿覆盖等其他楼层，配图仅支持最新叙事层"
+							: "该楼层之后已有更新的回复，配图放弃";
+				return { ok: false, error: reason };
 			}
+			// 当前显示全文：优先取该消息后的 rp-edited-reply 覆盖（含旧占位符），
+			// 否则原始 content——二次配图不丢旧图（旧占位符只存在覆盖条目里）
+			const entryText = currentDisplayTextOf(branch, targetId);
+			if (!entryText.trim()) return { ok: false, error: "暂无剧情消息可嵌入" };
 			// 手动触发用独立 entryId（manual-{ts}）——不与 auto 管线（onTurnEnd 用消息 entryId）
 			// 共享 processedEntries 去重：auto 已处理过的消息，用户仍可手动再配图
 			const result = await runPipeline(cwd, {
@@ -1810,12 +1831,12 @@ const restHost: RestHost = {
 				})(),
 				deps: defaultPipelineDeps(cwd),
 			});
-			// 嵌入：patches 依次应用到最新 assistant 全文 → storyEdit 通道（rp-edited-reply）
+			// 嵌入：patches 依次应用到最新叙事条目全文 → storyEdit 通道（rp-edited-reply）
 			let embedded = false;
-			if (result.ran && result.patches.length > 0 && entryId) {
+			if (result.ran && result.patches.length > 0 && targetId) {
 				let newText = entryText;
 				for (const patch of result.patches) newText = applyDraftOpToText(newText, patch);
-				const r = await editEntryViaStoryChannel(entryId, newText);
+				const r = await editEntryViaStoryChannel(targetId, newText);
 				embedded = r.ok;
 			}
 			// ran/reason 透传给前端（HTTP 返回即管线执行完毕，非「已提交」）
@@ -2249,6 +2270,11 @@ const storyBridgeBase: StoryBridge = {
 		try {
 			// 1. 等在途场记归位——避免在途场记用改前文本覆盖新状态
 			await scribeGate.waitForScribeIdle();
+			// 1b. 故事侧流式守卫（照 rewind/删除/切换的防御惯例）：流式中改稿会与在途
+			//     生成的叶指针竞态（流式分支不落树），直接拒绝而非静默写入
+			if (session.isStreaming) {
+				return { ok: false, error: "故事侧正在生成中，请等本轮生成完成后重试 story_edit" };
+			}
 
 			const branch = session.sessionManager.getBranch() as Array<{
 				id: string;
@@ -2260,6 +2286,13 @@ const storyBridgeBase: StoryBridge = {
 			// 2. 提交前找到目标：与 scriptEditMessage 的 targetId 解析（sm.getBranch + getBranch 语义）
 			const resolved = resolveRoleEditTarget(branch, { lastRoleIndex });
 			if (!resolved.ok) return { ok: false, error: resolved.error };
+			// 2c. 锚点类型日志（排查用）：确认钉叶目标是稳定锚点而非 model_change 等运行时中间节点
+			{
+				const anchor = branch.find((e) => e.id === resolved.targetId);
+				console.log(
+					`[liyuan] story_edit 钉叶锚点 ${resolved.targetId.slice(0, 8)} type=${anchor?.type ?? "?"} targetIdx=${resolved.targetIdx}`,
+				);
+			}
 			// 2b. 「仅修改最新层」校验（2026-08-12 用户决策）：story_edit 只允许改最新叙事轮——
 			//     目标必须是分支最后一个叙事条目（assistant 回复或 rp-edited-reply 改稿）；
 			//     否则目标回跳会改错楼层（历史事故：改稿/配图嵌到告别回复楼层）
@@ -2503,16 +2536,25 @@ async function editEntryViaStoryChannel(
 		await scribeGate.waitForScribeIdle();
 		const branch = session.sessionManager.getBranch() as Array<{
 			id: string;
-			type?: unknown;
-			message?: { role?: unknown; content?: unknown };
+			type?: string;
+			customType?: string;
+			message?: { role?: string; content?: unknown };
 		}>;
 		const idx = branch.findIndex((e) => e.id === entryId);
 		if (idx === -1) return { ok: false, error: "目标消息已离开当前分支（用户已进入新回合），嵌入放弃" };
-		// 目标之后不得有更新的角色回复（嵌入目标必须是最新叙事，否则钉回会旁支化新回合）
-		for (let i = idx + 1; i < branch.length; i++) {
-			if (branch[i].type === "message" && branch[i].message?.role === "assistant") {
-				return { ok: false, error: "目标消息之后已有更新的角色回复（用户已进入新回合），嵌入放弃" };
-			}
+		// 目标之后不得有叙事性条目——message（任意 role：新回合 user 消息/后续回复）或
+		// custom_message（改稿覆盖等）在钉回时都会被切出当前分支视图
+		// （2026-08-14 事故：原只查「之后无 assistant」，放行了「目标后挂 user 消息 +
+		// 改稿覆盖」的切割）。元数据条目（rp-state/model_change 等）允许，钉回后旁路重记账再生成。
+		const obstruction = illustrateTargetObstruction(branch, entryId);
+		if (obstruction) {
+			const reason =
+				obstruction === "user"
+					? "目标楼层之后已有新回合消息（用户已进入新回合），嵌入放弃——请等本轮回复完成后再配图"
+					: obstruction === "custom_message"
+						? "目标消息之后已有改稿覆盖等其他楼层，嵌入放弃——配图仅支持最新叙事层"
+						: "目标消息之后已有更新的角色回复，嵌入放弃";
+			return { ok: false, error: reason };
 		}
 		branchCommitToTarget(entryId);
 		await session.sendCustomMessage({ customType: "rp-edited-reply", content: newText, display: true });

@@ -5158,9 +5158,10 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				// 用户锚点（选填）：正文短原文片段，第一张图挂接位置用它（LWB anchor 设计）
 				const anchor = (body.anchor ?? "").trim() || undefined;
 				// 配图按钮/手动触发：宿主执行管线并嵌入当前分支最新剧情消息（Q15 简化通道——
-				// 宿主有 session/场记能力可写正文；无宿主能力（测试/嵌入式）时回退纯管线结果）
+				// 宿主有 session/场记能力可写正文；无宿主能力（测试/嵌入式）时回退纯管线结果）。
+				// entryId = 配图按钮回传的点击楼层条目 id（2026-08-14 起），非最新叙事层生图前拒绝
 				if (host.manualPipelineRun) {
-					const r = await host.manualPipelineRun(text, anchor);
+					const r = await host.manualPipelineRun(text, anchor, (body.entryId ?? "").trim() || undefined);
 					if (!r.ok) throw new Error(r.error ?? "管线执行失败");
 					sendJson(res, 200, {
 						ok: true,

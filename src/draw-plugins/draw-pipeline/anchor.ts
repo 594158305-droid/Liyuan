@@ -141,6 +141,52 @@ export function resolveEmbedTarget(
 	return { ok: true, entryId: found.entryId, matched: "anchor" };
 }
 
+/**
+ * 配图嵌入目标解析（2026-08-14 事故修复）：
+ * - 目标 = 分支最后一个「叙事条目」——assistant 回复 + rp-edited-reply 改稿覆盖
+ *   （原实现只认 message/assistant，改稿楼层被跳过 → 目标回跳到更早楼层，
+ *   branchCommit 钉回旧层把后续楼层切出分支视图）；
+ * - clickedEntryId（配图按钮回传的点击楼层 entry id）非最新叙事层 → 拒绝
+ *   （2026-08-14 用户裁决：历史楼层配图明确拒绝，生图前 fail-fast）。
+ * 纯函数零依赖，可单测。
+ */
+export function resolveIllustrateTarget(
+	branch: Array<{ id: string; type?: string; customType?: string; message?: { role?: string } | null }>,
+	clickedEntryId?: string,
+): { ok: true; entryId: string } | { ok: false; error: string } {
+	const last = [...branch]
+		.reverse()
+		.find(
+			(e) =>
+				(e.type === "message" && e.message?.role === "assistant") ||
+				(e.type === "custom_message" && e.customType === "rp-edited-reply"),
+		);
+	if (!last?.id) return { ok: false, error: "暂无剧情消息可嵌入" };
+	if (clickedEntryId && clickedEntryId !== last.id) {
+		return { ok: false, error: "该楼层之后还有楼层，配图仅支持最新叙事层——请对最新楼层配图（或先回退再配图）" };
+	}
+	return { ok: true, entryId: last.id };
+}
+
+/**
+ * 目标之后是否还有叙事性条目（message 任意 role / custom_message）——存在则钉回叶指针
+ * 会把它们切出当前分支视图（2026-08-14 事故的切割通道）。返回梗阻类型供报错措辞；
+ * 无梗阻返回 null。纯函数零依赖，可单测。
+ */
+export function illustrateTargetObstruction(
+	branch: Array<{ id: string; type?: string; customType?: string; message?: { role?: string } | null }>,
+	targetId: string,
+): "user" | "reply" | "custom_message" | null {
+	const idx = branch.findIndex((e) => e.id === targetId);
+	if (idx === -1) return null; // 目标不在分支：调用方先做存在性校验
+	for (let i = idx + 1; i < branch.length; i++) {
+		const t = branch[i];
+		if (t.type === "custom_message") return "custom_message";
+		if (t.type === "message") return t.message?.role === "user" ? "user" : "reply";
+	}
+	return null;
+}
+
 /** 在 text 中找 needle 的最长匹配片段（子串连续匹配；返回命中片段与原序） */
 function longestSubstring(text: string, needle: string): { hit: string; index: number } | null {
 	const lower = text.toLowerCase();
