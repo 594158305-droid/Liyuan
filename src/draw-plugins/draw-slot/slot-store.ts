@@ -290,9 +290,14 @@ function currentVersion(entry: SlotEntry): SlotVersion | null {
 	return null;
 }
 
-/** cache 相对路径 → 绝对路径（/cache/ 前缀或 .liyuan-cache/ 相对路径均可） */
-function resolveCacheAbs(cwd: string, file: string): string {
-	if (file.startsWith("/cache/")) return join(cwd, file.replace(/^\//, ""));
+/**
+ * slot 引用相对路径 → 绝对路径：兼容 `.liyuan-cache/`/`.liyuan-media/` 与
+ * 旧式 `/cache/`/`/media/` 前缀（旧数据 file 形如 `/cache/draw-xxx.png`，
+ * 缺一个点即解析错目录 → 保存/删除/清理误报文件不存在）。
+ */
+function resolveSlotAbs(cwd: string, file: string): string {
+	if (file.startsWith("/cache/")) return join(cwd, `.liyuan-cache/${file.slice("/cache/".length)}`);
+	if (file.startsWith("/media/")) return join(cwd, `.liyuan-media/${file.slice("/media/".length)}`);
 	return join(cwd, file);
 }
 
@@ -316,8 +321,11 @@ export function saveSlot(cwd: string, slotId: string, versionIndex?: number): { 
 	}
 	if (!ver) return { ok: false, error: `slot「${slotId}」没有有效版本` };
 	if (ver.savedAt > 0) return { ok: true }; // 已保存：幂等
+	// 生成失败占位无文件（file 为空串）：直接返回错误，避免 resolveSlotAbs("") 落到 cwd
+	// 目录本身后 readFileSync 读目录抛 EISDIR → 500 整批打断
+	if (!ver.file || !ver.file.trim()) return { ok: false, error: `slot「${slotId}」当前版本无文件（生成失败占位）` };
 
-	const cacheAbs = resolveCacheAbs(cwd, ver.file);
+	const cacheAbs = resolveSlotAbs(cwd, ver.file);
 	if (!existsSync(cacheAbs)) return { ok: false, error: `文件不存在：${ver.file}` };
 	const ext = extname(cacheAbs).toLowerCase() || ".png";
 	const mediaDir = dir(cwd, "media");
@@ -410,7 +418,7 @@ export function deleteSlot(cwd: string, slotId: string): number {
 	if (!entry) return 0;
 	let removed = 0;
 	for (const v of entry.versions) {
-		const abs = v.file.startsWith("/") ? join(cwd, v.file.replace(/^\//, "")) : join(cwd, v.file);
+		const abs = resolveSlotAbs(cwd, v.file);
 		try {
 			if (existsSync(abs)) {
 				unlinkSync(abs);
@@ -443,7 +451,7 @@ export function deleteVersion(
 	const target = entry.versions[versionIndex];
 	let removedFiles = 0;
 	if (target) {
-		const abs = target.file.startsWith("/") ? join(cwd, target.file.replace(/^\//, "")) : join(cwd, target.file);
+		const abs = resolveSlotAbs(cwd, target.file);
 		try {
 			if (existsSync(abs)) {
 				unlinkSync(abs);
@@ -511,7 +519,7 @@ export function cleanupExpired(cwd: string, retentionDays = 3): { removedSlots: 
 	let removedFiles = 0;
 
 	const dropFile = (file: string): void => {
-		const abs = file.startsWith("/") ? join(cwd, file.replace(/^\//, "")) : join(cwd, file);
+		const abs = resolveSlotAbs(cwd, file);
 		try {
 			if (existsSync(abs)) {
 				unlinkSync(abs);
@@ -664,7 +672,7 @@ export function listSlotSummaries(
 
 /** 文件修改时间辅助（重建补登记时判断 cache 文件存在性） */
 export function cacheFileExists(cwd: string, file: string): boolean {
-	return existsSync(resolveCacheAbs(cwd, file));
+	return existsSync(resolveSlotAbs(cwd, file));
 }
 
 /** 文件 stat 辅助（预留；当前未用，供后续扩展） */

@@ -136,6 +136,25 @@ test("saveAllSlots：全部未保存 slot 转存；deleteSlot 删文件 + 移除
 	assert.ok(loadSlotStore(cwd).slots["slot-b"], "另一 slot 保留");
 });
 
+// 回归：旧数据 file 以 /cache/（前导斜杠、无点）开头——解析缺一个点会落到 cache/ 目录，
+// 误报「文件不存在」导致保存/删除/清理整批失败（修复：resolveSlotAbs 统一解析）
+test("saveSlot/deleteSlot：旧式 /cache/ 前缀 file 也能正确解析保存", async () => {
+	const cwd = tmpCwd();
+	makeCacheFile(cwd, "draw-old.png", "old-img");
+	const store = createSlot(cwd, { slotId: "slot-old", chatId: "c", messageId: "m", file: "/cache/draw-old.png" });
+	saveSlotStoreNow(cwd, store);
+	const r = saveSlot(cwd, "slot-old");
+	assert.deepEqual(r, { ok: true }, "旧式 /cache/ 前缀应保存成功");
+	const after = loadSlotStore(cwd);
+	assert.ok(after.slots["slot-old"].versions[0].savedAt > 0, "savedAt 应更新");
+	assert.ok(!existsSync(join(cwd, ".liyuan-cache", "draw-old.png")), "cache 源文件应删除");
+	// deleteSlot 同前缀：media 文件应被删
+	makeMediaFile(cwd, "oldmedia.png", "m");
+	createSlot(cwd, { slotId: "slot-old2", chatId: "c", messageId: "m", file: "/media/oldmedia.png" });
+	const removed = deleteSlot(cwd, "slot-old2");
+	assert.equal(removed, 1, "旧式 /media/ 前缀文件应被删");
+});
+
 // ---------- 5. cleanupExpired ----------
 
 test("cleanupExpired：retentionDays=0 未保存 slot 被清、已保存不受影响", async () => {
