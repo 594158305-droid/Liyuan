@@ -58,10 +58,10 @@
 					"tags": "white dress, short dress, white ribbon, ribbon on collar"
 				}
 			],
+			"defaultOutfit": "7ae2c1b7",
 			"type": "girl",
 			"useDanbooruTag": true,
-			"id": "char-1777960339450-akqu",
-			"defaultOutfit": "7ae2c1b7"
+			"id": "char-1777960339450-akqu"
 		},
 		{
 			"name": "泽村·斯宾塞·英梨梨",
@@ -339,6 +339,11 @@
 			"type": "girl",
 			"useDanbooruTag": false,
 			"id": "char-1784364861753-0hxh"
+		},
+		{
+			"name": "浅仓透",
+			"appearanceTags": "1.2::asakura_tooru_(shiny_colors)::",
+			"outfits": []
 		}
 	]
 }

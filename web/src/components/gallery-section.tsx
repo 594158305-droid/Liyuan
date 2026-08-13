@@ -338,7 +338,11 @@ export function GallerySection() {
 		setLightbox({ srcs: lightboxTiles.map((t) => t.src), index: i >= 0 ? i : 0 });
 	};
 
-	/** 保存所有未保存槽位（逐个 POST save，带进度条） */
+	/**
+	 * 保存所有未保存槽位（逐个 POST save，带进度条）。
+	 * 单张失败不中断（跳过继续，结束时汇总）；流式中保存被 409 拒绝 → 提前停；
+	 * 无论成败 finally 清进度条（失败路径残留「0/N」即历史卡死症状）。
+	 */
 	const saveAllSlots = () =>
 		run(async () => {
 			const target = slotGroups.filter((s) => !s.saved);
@@ -348,14 +352,38 @@ export function GallerySection() {
 			}
 			setSaveAll({ total: target.length, done: 0 });
 			let done = 0;
-			for (const s of target) {
-				await apiPost("/api/draw/slots/save", { slotId: s.slotId });
-				done += 1;
-				setSaveAll({ total: target.length, done });
+			let failed = 0;
+			let firstError = "";
+			let streaming = false;
+			try {
+				for (const s of target) {
+					try {
+						await apiPost("/api/draw/slots/save", { slotId: s.slotId });
+					} catch (e) {
+						const msg = e instanceof Error ? e.message : String(e);
+						// 流式中保存被拒（409）：后续必然也全被拒，提前停
+						if (msg.includes("正在生成回复")) {
+							streaming = true;
+							break;
+						}
+						failed += 1;
+						if (!firstError) firstError = msg.slice(0, 60);
+						continue;
+					}
+					done += 1;
+					setSaveAll({ total: target.length, done });
+				}
+			} finally {
+				setSaveAll(null);
 			}
-			setSaveAll(null);
 			slots.reload();
-			flash(`已保存 ${target.length} 张`);
+			if (streaming) {
+				flash(done > 0 ? `已保存 ${done} 张；AI 回复中，请稍候再保存其余` : "正在生成回复，请稍候（或先停止）再保存");
+			} else if (failed === 0) {
+				flash(`已保存 ${target.length} 张`);
+			} else {
+				flash(`已保存 ${done} 张，失败 ${failed} 张${firstError ? `：${firstError}` : ""}`);
+			}
 		});
 
 	/** 删除全部（不传 slotIds = 全部）；正文占位符由后端后台异步剥离 */
