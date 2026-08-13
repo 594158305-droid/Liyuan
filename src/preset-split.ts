@@ -25,7 +25,11 @@
  * 纯函数 + 常量表，零模块级可变状态（jiti 二象性红线），可单测。
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { classifyBlock } from "./preset-classify.ts";
+import type { SplitTableOverride } from "./types.ts";
 
 export type SplitFate = "resident" | "skill" | "rules-only" | "drop";
 export type ResidentSection = "A" | "B" | "C";
@@ -337,12 +341,149 @@ const LIYUAN_CUSTOM: PresetSplitTable = {
 
 export const BUILTIN_SPLIT_TABLES: PresetSplitTable[] = [LIYUAN_CUSTOM, TGBREAK, SHUANGREN, XIAJIN, DREAMWHALE];
 
+// ---------------- 数据文件加载与覆盖合并（DESIGN-flow-config §3） ----------------
+
+/** 正则字符串编译：非法返回 undefined（宁漏勿伤，调用方跳过该规则） */
+const compileRe = (s: string, warnings?: string[]): RegExp | undefined => {
+	try {
+		return new RegExp(s);
+	} catch {
+		warnings?.push(`非法正则已跳过：${s}`);
+		return undefined;
+	}
+};
+
+/**
+ * 从配置 JSON 形态归一化为运行时形态（RegExp 字符串 → 编译）。
+ * 非法正则跳过对应规则并计入 warnings；结构非法返回 null（整表弃用，调用方回退内置）。
+ */
+export function normalizeSplitTable(raw: SplitTableOverride, warnings?: string[]): PresetSplitTable | null {
+	if (!raw || typeof raw !== "object" || typeof raw.key !== "string" || !raw.key) return null;
+	// 结构字段存在但类型错 → 整表弃用（宁缺勿留半张表）
+	if (raw.blocks !== undefined && !Array.isArray(raw.blocks)) return null;
+	if (raw.vars !== undefined && !Array.isArray(raw.vars)) return null;
+	if (raw.supplements !== undefined && !Array.isArray(raw.supplements)) return null;
+	const blocks: BlockSplitRule[] = [];
+	if (Array.isArray(raw.blocks)) {
+		for (const b of raw.blocks) {
+			if (!b || typeof b.name !== "string") continue;
+			const rule: BlockSplitRule = {
+				name: b.name,
+				nature: (b.nature as BlockNature) ?? "I",
+				fate: b.fate ?? "drop",
+			};
+			if (b.section) rule.section = b.section;
+			if (b.topic) rule.topic = b.topic;
+			if (b.sovereigntyOverride === true) rule.sovereigntyOverride = true;
+			if (b.note !== undefined) rule.note = b.note;
+			if (Array.isArray(b.stripLines)) {
+				const re = b.stripLines.map((s) => compileRe(s, warnings)).filter((r): r is RegExp => !!r);
+				if (re.length > 0) rule.stripLines = re;
+			}
+			if (Array.isArray(b.segments)) {
+				const segs: SegmentRule[] = [];
+				for (const s of b.segments) {
+					if (!s || typeof s.match !== "string") continue;
+					const re = compileRe(s.match, warnings);
+					if (!re) continue;
+					segs.push({ match: re, fate: s.fate ?? "drop", ...(s.section ? { section: s.section } : {}), ...(s.topic ? { topic: s.topic } : {}) });
+				}
+				if (segs.length > 0) rule.segments = segs;
+			}
+			blocks.push(rule);
+		}
+	}
+	const vars: VarSplitRule[] = [];
+	if (Array.isArray(raw.vars)) {
+		for (const v of raw.vars) {
+			if (!v || typeof v.name !== "string") continue;
+			const rule: VarSplitRule = { name: v.name, fate: v.fate ?? "drop" };
+			if (v.section) rule.section = v.section;
+			if (v.topic) rule.topic = v.topic;
+			if (Array.isArray(v.stripLines)) {
+				const re = v.stripLines.map((s) => compileRe(s, warnings)).filter((r): r is RegExp => !!r);
+				if (re.length > 0) rule.stripLines = re;
+			}
+			vars.push(rule);
+		}
+	}
+	const supplements: SupplementRule[] = [];
+	if (Array.isArray(raw.supplements)) {
+		for (const s of raw.supplements) {
+			if (s && (s.section === "B" || s.section === "C") && typeof s.text === "string" && typeof s.source === "string") {
+				supplements.push({ section: s.section, text: s.text, source: s.source });
+			}
+		}
+	}
+	return {
+		key: raw.key,
+		fingerprints: Array.isArray(raw.fingerprints) ? raw.fingerprints.filter((f): f is string => typeof f === "string") : [],
+		blocks,
+		vars,
+		supplements,
+	};
+}
+
+/**
+ * 读 assets/flow/split-tables.json（cwd 相对仓库根）；缺失/损坏回退代码内嵌内置表。
+ * 逐张 normalize，非法表（结构坏）弃用回退对应内置。
+ */
+export function loadBuiltinSplitTables(cwd: string, warnings?: string[]): PresetSplitTable[] {
+	try {
+		const p = join(cwd, "assets", "flow", "split-tables.json");
+		if (!existsSync(p)) return BUILTIN_SPLIT_TABLES;
+		const raw = JSON.parse(readFileSync(p, "utf8")) as { tables?: unknown };
+		if (!raw || !Array.isArray(raw.tables)) return BUILTIN_SPLIT_TABLES;
+		const out: PresetSplitTable[] = [];
+		for (const item of raw.tables) {
+			const t = normalizeSplitTable(item as SplitTableOverride, warnings);
+			if (t) out.push(t);
+		}
+		return out.length > 0 ? out : BUILTIN_SPLIT_TABLES;
+	} catch {
+		return BUILTIN_SPLIT_TABLES;
+	}
+}
+
+/**
+ * 合并覆盖（增改不删）：配置 splitTables 与内置表按 key 合并——fingerprints/vars/
+ * supplements 覆盖提供了才替换（缺省继承内置）；blocks/vars 按 name 合并（同名替换、
+ * 新名追加，内置全保留）。新 key 直接追加（配置可新增自定义表）。
+ */
+export function resolveSplitTables(builtin: PresetSplitTable[], overrides?: SplitTableOverride[], warnings?: string[]): PresetSplitTable[] {
+	if (!Array.isArray(overrides) || overrides.length === 0) return builtin;
+	const out = builtin.map((t) => ({ ...t, blocks: [...t.blocks], vars: [...t.vars], supplements: [...t.supplements] }));
+	const mergeByName = <T extends { name: string }>(base: T[], extra: T[]): T[] => {
+		const map = new Map(base.map((x) => [x.name, x]));
+		for (const x of extra) map.set(x.name, x);
+		return [...map.values()];
+	};
+	for (const o of overrides) {
+		const raw = normalizeSplitTable(o, warnings);
+		if (!raw) continue;
+		const i = out.findIndex((x) => x.key === raw.key);
+		if (i >= 0) {
+			const base = out[i];
+			out[i] = {
+				key: base.key,
+				fingerprints: raw.fingerprints.length > 0 ? raw.fingerprints : base.fingerprints,
+				blocks: mergeByName(base.blocks, raw.blocks),
+				vars: mergeByName(base.vars, raw.vars),
+				supplements: raw.supplements.length > 0 ? raw.supplements : base.supplements,
+			};
+		} else {
+			out.push(raw);
+		}
+	}
+	return out;
+}
+
 // ---------------- 匹配与分流 ----------------
 
-/** 按启用块名指纹认表（≥2 命中）；认不出返回 null（走四类兜底） */
-export function findSplitTable(enabledNames: Array<string | undefined>): PresetSplitTable | null {
+/** 按启用块名指纹认表（≥2 命中）；认不出返回 null（走四类兜底）。tables 缺省用内置表。 */
+export function findSplitTable(enabledNames: Array<string | undefined>, tables: PresetSplitTable[] = BUILTIN_SPLIT_TABLES): PresetSplitTable | null {
 	const names = new Set(enabledNames.map((n) => (n ?? "").trim()).filter(Boolean));
-	for (const table of BUILTIN_SPLIT_TABLES) {
+	for (const table of tables) {
 		const hits = table.fingerprints.filter((f) => names.has(f)).length;
 		if (hits >= 2) return table;
 	}

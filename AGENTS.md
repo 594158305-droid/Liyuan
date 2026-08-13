@@ -89,7 +89,8 @@ if ($old) { Stop-Process -Id $old.OwningProcess -Force }
 - 旧布局自动迁移（`src/paths.ts`）：启动时 `.pi/`→`.liyuan/`、`rp.config.json`→`liyuan.config.json`、`.rp-*`→`.liyuan-*`，新名存在则不覆盖。
 - agent 会话主目录：`~/.liyuan/agent`（环境变量 `LIYUAN_CODING_AGENT_DIR` / `PI_CODING_AGENT_DIR`），旧 `~/.pi/agent` 启动时合并。
 - 产品数据目录（`src/paths.ts` DIRS）：`.liyuan-state/`（账本）、`.liyuan-artifacts/`（面板）、`.liyuan-codex/`（知识库）、`.liyuan-uploads/`（素材）、`.liyuan-skills/`（技能）、`.liyuan-lore/`（补充设定集）等，均为纯 JSON/文件，可直接备份迁移。
-- **技能库双用途（8/11 起）**：`.liyuan-skills/*.md` 既是助手侧能力笔记（索引进助手提示词，`src/stagehand.ts`），又可标记 `stage-topic: true` 成为**演出主题**——经 `writing_guide` 工具按主题读取（主演侧，topic=文件名 slug，`src/stage/engine.ts` getSkill fallback 读技能库，仅限库内文件名防路径穿越）。写作指南按「每拍必守→预设常驻（B/C）、机械纪律→代码（draft_check）、按需方法论→演出主题」分层落位，详见 `docs/PRESET-SPLIT-TAXONOMY.md` §6。
+- **流程配置外置（8/13 起）**：轮次卡模板住 `assets/flow/round-cards.json`、预设拆层表住 `assets/flow/split-tables.json`（代码内嵌默认兜底，改文案必须两处同步——测试逐字比对兜底）；`liyuan.config.json` 的 `flowTemplates` / `splitTables` / `intentRegex` 三段按 key 覆盖（前者只改不删、拆层表增改不删、intentRegex 当前无调用点）。每拍素材现读，改文件/改配置下一拍生效。详见 `docs/DESIGN-flow-config.md`。
+- 技能库双用途（8/11 起）：`.liyuan-skills/*.md` 既是助手侧能力笔记（索引进助手提示词，`src/stagehand.ts`），又可标记 `stage-topic: true` 成为**演出主题**——经 `writing_guide` 工具按主题读取（主演侧，topic=文件名 slug，`src/stage/engine.ts` getSkill fallback 读技能库，仅限库内文件名防路径穿越）。写作指南按「每拍必守→预设常驻（B/C）、机械纪律→代码（draft_check）、按需方法论→演出主题」分层落位，详见 `docs/PRESET-SPLIT-TAXONOMY.md` §6。
 - 自定义 agent：`liyuan.config.json` 的 `agents` 段声明（id/name/model/prompt/tools/bridge 权限），启动时建 host、会话在 `.liyuan-agents/<id>/`；UI 管理入口在右栏助手面板「管理」（详见 `docs/DESIGN-custom-agents.md`）。**agents 变更走 PUT /api/config 热重建，不必重启**（忙碌中的 agent 记 busy，需重启）。
 - 相对导入必须带显式扩展名（`../src/card.ts`、`./wire.ts`），Node 原生 TS 按此解析。
 

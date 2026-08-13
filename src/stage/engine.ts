@@ -49,6 +49,13 @@ import {
 	type PresetResidentContent,
 } from "./assemble.ts";
 import {
+	renderRoundCard,
+	titlesOf,
+	wordRangeHintOf,
+	type RoundCardTemplate,
+	type RoundCardVars,
+} from "../flow-templates.ts";
+import {
 	constantLoreOf,
 	evalPostHistoryBlocks,
 	loadStageConfig,
@@ -307,68 +314,54 @@ const DRAFT_TOOLS = new Set(["draft_write", "draft_append", "draft_edit", "draft
  * 对照 opencode 的 plan-mode / build-switch 每轮注入：模型从注入状态知道自己
  * 在流程的哪个位置，而不是从静态系统提示词里猜。卡只在状态切换时注入一轮
  * （见 agentLoop 的 lastCard 去重），不在历史里累积。
+ *
+ * 文案来自轮次卡模板（assets/flow/round-cards.json + 配置 flowTemplates 覆盖，
+ * DESIGN-flow-config §2）；本函数只保留**状态判定与动态变量**，渲染与占位符
+ * 填充由 flow-templates.ts 承接。模板缺了某张卡（key 不在表里）则该状态不注入。
  */
 function roundCardFor(
+	templates: RoundCardTemplate[],
 	ws: TurnWorkspace,
 	userName: string,
 	wordRange?: { min: number; max: number },
 	statusBarTags?: string[],
 ): string | undefined {
+	const byKey = new Map(templates.map((t) => [t.key, t]));
+	const render = (key: string, vars: RoundCardVars): string | undefined => {
+		const t = byKey.get(key);
+		return t ? renderRoundCard(t, vars) : undefined;
+	};
+
 	if (ws.plan.length === 0 && ws.draft.trim() === "") {
-		const range = wordRange ? `，本拍总字数约 ${wordRange.min}–${wordRange.max} 字，列路标时把字数分配到每一步（几步就分几份，心里有数）` : "";
-		return (
-			`【第 1 步·规划】你还没有落笔、也还没有计划。这一轮思考只做三件事：` +
-			`读题（谁在场、上文到哪、用户要什么）、探索（拿不准就查设定/记忆/账本）、` +
-			`列路标（\`beat_plan\`）${range}。\`beat_plan\` 被接受前，不要落任何正文。` +
-			`预设的文风与行为边界从落笔起生效，这一轮不用逐条读。\n` +
-			`用户输入本身在求方向/递笔的（「接下来去找谁」「给个选项」）——直接 \`ask\`，那不需要上文。` +
-			`读题发现的**未定型重大变量**（如新人物还没定的性格/立场）——不要脑补定型：记着它，` +
-			`演到它实际影响剧情的段落之前再 \`ask\` 请用户定（那时用户手里有上文才好选；哪些变量值得问是动态的，` +
-			`看它此刻对剧情的影响程度，不是新的就要问）。\n` +
-			`**路标只写到「发生什么」的抽象层**（如「被值守弟子拦下」「褪衣取砚」）——` +
-			`具体怎么演（动作的先后、神态的变化、对白的语气、情绪的流转）留给演到那一段时再想，` +
-			`不要在这一轮预演各段的细节。\n` +
-			`思考全程用中文，与正文同语言。`
-		);
+		return render("plan", {
+			wordRangeHint: wordRange ? wordRangeHintOf(wordRange.min, wordRange.max) : "",
+		});
 	}
 	if (ws.plan.length > 0 && ws.appends === 0 && ws.draft.trim() === "") {
-		return (
-			`【开工】计划已接受。从现在起进入演出：把自己当成一位资深作家，发挥强大的剧情构思能力，肆意展现你的文笔。` +
-			`按第一条未完成的演，一段一段交（\`draft_append\`，一个自然段就交）。正文只在稿纸上诞生。思考全程用中文，与正文同语言。`
-		);
+		return render("open", {});
 	}
 	// 修复卡（8/09 问题：修复注入缺失）：上一段验收出的违规未修，优先注入修复指令——
 	// 否则模型被「演段回看卡」的构思引导带走，把修复攒到末尾统一做（实弹：四段写完才修）。
 	// 修复是这一步唯一该做的事：先修干净，再谈下一段。
 	if (ws.appends > 0 && ws.pendingViolations.length > 0) {
-		return (
-			`【修复】上一段还有 ${ws.pendingViolations.length} 处未修：\n` +
-			ws.pendingViolations.map((v) => `- ${v}`).join("\n") +
-			`\n先用 \`draft_edit\` 逐处修掉（old 逐字引用现稿原文、须唯一，可一次给多处），` +
-			`验收过了再构思下一段——已经交给用户看的段落必须是定稿。\n思考全程用中文。`
-		);
+		return render("fix", {
+			violationsCount: String(ws.pendingViolations.length),
+			violations: ws.pendingViolations.map((v) => `- ${v}`).join("\n"),
+		});
 	}
 	// 谢幕卡（8/09 review）：已封笔后不再催演/催构思——sealed 语境下回看/续写/
 	// 收笔评估卡全部失效（实弹：seal 后的记账轮被回看卡催「构思下一段」）。
 	// 封笔后的剩余正务只有记账与谢幕：状态栏等格式块是本拍最后的产出。
 	if (ws.appends > 0 && ws.sealed) {
-		const sb =
+		const statusBarTail =
 			statusBarTags && statusBarTags.length > 0
 				? `然后输出状态栏（${statusBarTags.map((t) => `<${t}>`).join(" 或 ")}）等格式块——` +
 					`状态栏意味着本拍结束，输出完即停`
 				: `没有格式块要输出就直接停笔`;
-		return `【谢幕】已封笔，不要再写正文。世界有变动就先 \`world_state_update\` 记账；${sb}。`;
+		return render("curtain", { statusBarTail });
 	}
 	if (ws.appends > 0 && ws.plan.some((s) => !s.done)) {
-		return (
-			`【演段回看】已演 ${ws.appends} 段。你需要在落笔前完成这一轮的工作：\n` +
-			`\u2460 回看：读一遍刚写下的段落，从上一拍结尾处直接继续，禁止重新铺陈环境——接住它的气口。\n` +
-			`\u2461 构思剧情走向：发挥自己职业作家的水平，思考这一段剧情往哪走、人物此刻的状态与下一步的抉择。\n` +
-			`\u2462 全力构思文笔：倾尽所有的去构思这一段怎么写得精彩——镜头、动作、感官细节、神态情绪、节奏、点睛。力求为用户提供最好的体验。\n` +
-			`\u2463 按需调写作方法论：按预设「写作·技能触发表」查本拍场景该读的主题，调 \`writing_guide\` 读对应主题，读完照着写。\n` +
-			`\u2464 重新评估：剧情到岔路就用 \`ask\` 问用户；路标不成立就重拟 \`beat_plan\`；戏到停点就收笔——收笔前先确认自然下文是否涉及 ${userName} 的行动或选择，涉及就先 \`ask\`，再 \`draft_seal\`（清单没勾完也没关系）。\n` +
-			`思考全程用中文。正文只在稿纸上写——思考里想戏与文笔，落笔交给 \`draft_append\`。`
-		);
+		return render("review", { appendsCount: String(ws.appends), userName });
 	}
 	// 路标已全部演完（或本来就没有计划）：这一拍的主体已完成。按字数决定去向——
 	// 字数不够 → 续写自然下文（8/09 定案：续写是「用户输入少 + 字数目标高」时的出口，
@@ -378,28 +371,18 @@ function roundCardFor(
 	const draftBodyChars = ws.draft.trim() ? extractDraftBody(ws.draft).replace(/\s+/g, "").length : 0;
 	if (ws.appends > 0) {
 		if (wordRange && draftBodyChars < wordRange.min) {
-			return (
-				`【续写】路标已全部演完，但本拍正文还没到目标（当前约 ${draftBodyChars} 字 / 目标 ${wordRange.min}–${wordRange.max} 字）。` +
-				`承接刚写下的，续写这一拍的自然下文——设定/世界书里的下一步（如「润墨之后的试墨」）。一段一段演。\n` +
-				`续写中涉及 ${userName} 的行动或选择，用 \`ask\` 停下来问；` +
-				`写到字数达标、戏到停点，用 \`draft_seal\` 收笔。` +
-				`状态栏等格式块是本拍**最后**的产出——续写全部完成之前不要输出。思考全程用中文。`
-			);
+			return render("extend", {
+				draftBodyChars: String(draftBodyChars),
+				wordRangeMin: String(wordRange.min),
+				wordRangeMax: String(wordRange.max),
+				userName,
+			});
 		}
 		// 收笔评估卡（8/09 卡序纠正）：ask/续写判断必须在 seal **之前**——旧卡把
 		// 「到停点就 seal」排在第一步，模型照卡执行：封完笔才评估出「下文是用户的
 		// 行动、该 ask」，全成马后炮（实弹：想 ask 却已 seal，转头记账收场，
 		// ask 没发、状态栏也没了，还替用户把下一步演进了正文）。卡序 = 行为序。
-		return (
-			`【收笔评估】路标已全部演完，戏到了一个停点。按顺序评估，评估完再动手：\n` +
-			`① 这一拍的自然下文是否涉及 ${userName} 的行动或选择（如「润墨之后该试墨」）——` +
-			`涉及就先用 \`ask\` 问用户、按答案续写，此时不要收笔；\n` +
-			`② 不涉及，再看剧情是否停在 ${userName} 可以接话、可以行动的位置——不在就续写到停点；\n` +
-			`③ 以上都满足，\`draft_seal\` 收笔；\n` +
-			`④ 封笔之后最后一步：输出状态栏等格式块——状态栏意味着本拍结束，` +
-			`必须是这拍的最后产出（续写/ask 全部完成之前不要输出）。\n` +
-			`思考全程用中文。`
-		);
+		return render("seal", { userName });
 	}
 	return undefined;
 }
@@ -456,6 +439,7 @@ export class StageEngine {
 	#warnedMacros = "";
 	#warnedAuditDrop = 0;
 	#warnedProtocolDrop = "";
+	#warnedFlow = "";
 	#lastAssemblyJson = "";
 
 	constructor(deps: StageEngineDeps) {
@@ -543,6 +527,14 @@ export class StageEngine {
 			if (key !== this.#warnedMacros) {
 				this.#warnedMacros = key;
 				ev.onNotify?.("warning", `预设含未支持的宏（已置空处理）：${materials.macroWarnings.join("、")}`);
+			}
+		}
+		// 流程配置（拆层表/轮次卡）加载警告：非法正则等按内容去重播报一次
+		if (materials.flowWarnings.length > 0) {
+			const key = materials.flowWarnings.join(",");
+			if (key !== this.#warnedFlow) {
+				this.#warnedFlow = key;
+				ev.onNotify?.("warning", `流程配置加载警告（对应规则已跳过）：${materials.flowWarnings.join("、")}`);
 			}
 		}
 
@@ -725,7 +717,7 @@ export class StageEngine {
 		// P1 注入层：首轮（规划轮）卡并入注入块（用户话之前）——用户当拍的话必须保持
 		// 上下文最后一句（8/03 教训：注入块压提问之后，模型会把提问读成历史旧话）。
 		// 轮次卡是工作指令（如 opencode 的 system-reminder），随注入区在用户话前送达。
-		const firstCard = roundCardFor(ws, config.userName, wsDeps.rules.wordRange, wsDeps.rules.statusBarTagGroup);
+		const firstCard = roundCardFor(materials.roundCards, ws, config.userName, wsDeps.rules.wordRange, wsDeps.rules.statusBarTagGroup);
 		const injWithCard = firstCard ? `${injection}\n\n${firstCard}` : injection;
 		const tailText = endsWithUser ? `${injWithCard}\n\n${history[history.length - 1].text}` : injWithCard;
 
@@ -838,6 +830,7 @@ export class StageEngine {
 				tools,
 				ws,
 				wsDeps,
+				roundCards: materials.roundCards,
 				language: config.language,
 				readDeps,
 				directText: text,
@@ -1080,6 +1073,8 @@ export class StageEngine {
 		tools: StageTool[];
 		ws: TurnWorkspace;
 		wsDeps: WorkspaceDeps;
+		/** 轮次卡模板（assets/flow/round-cards.json + 配置覆盖，每拍素材现读） */
+		roundCards: RoundCardTemplate[];
 		/** 剧情语言（统一工具层按面装配描述/schema，M-D1） */
 		language: string;
 		/** 读侧工具依赖（装配清单与执行同源，M-D2） */
@@ -1539,8 +1534,8 @@ export class StageEngine {
 			// 规划/开工卡：状态切换才注入一次（一次性指令）。
 			// 演段回看卡 / 收笔评估卡：**每轮都注入**——循环指令，每轮重新看到
 			// （8/08 修：旧逻辑只切一次，模型后面几轮看不到评估指令）。
-			// 用替换语义防累积：推新卡前把上一张卡从 convo 里移除。
-			const card = roundCardFor(o.ws, o.wsDeps.userName, o.wsDeps.rules.wordRange, o.wsDeps.rules.statusBarTagGroup);
+			// 用替换语义防累积：推新卡前把上一张卡从 convo 里移除（匹配前缀 = 模板 title）。
+			const card = roundCardFor(o.roundCards, o.ws, o.wsDeps.userName, o.wsDeps.rules.wordRange, o.wsDeps.rules.statusBarTagGroup);
 			const hasPending = o.ws.plan.some((s) => !s.done);
 			const draftBodyChars = o.ws.draft.trim() ? extractDraftBody(o.ws.draft).replace(/\s+/g, "").length : 0;
 			const wordRange = o.wsDeps.rules.wordRange;
@@ -1553,13 +1548,14 @@ export class StageEngine {
 				: o.ws.plan.length > 0 ? "open" : "plan";
 			if (card) {
 				if (cardKind === "review" || cardKind === "seal" || cardKind === "extend" || cardKind === "fix" || cardKind === "curtain") {
-					// 替换上一张卡（找最后一个 role=user 且以各卡名开头）
+					// 替换上一张卡（找最后一个 role=user 且以循环卡 title 开头）
+					const cycleTitles = titlesOf(o.roundCards, ["review", "seal", "extend", "fix", "curtain"]);
 					for (let k = convo.length - 1; k >= 0; k--) {
 						const msg = convo[k] as { role?: string; content?: Array<{ type?: string; text?: string }> };
 						const txt = Array.isArray(msg.content)
 							? msg.content.map((c) => c.text ?? "").join("")
 							: "";
-						if (msg.role === "user" && (txt.includes("【演段回看】") || txt.includes("【收笔评估】") || txt.includes("【续写】") || txt.includes("【修复】") || txt.includes("【谢幕】"))) {
+						if (msg.role === "user" && cycleTitles.some((t) => t && txt.includes(t))) {
 							convo.splice(k, 1);
 							break;
 						}

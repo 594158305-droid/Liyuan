@@ -300,6 +300,76 @@ export interface RpConfig {
 	 * 每回合现读配置，保存后下一回合生效；按会话分文件。
 	 */
 	chatTrace?: boolean;
+	/**
+	 * 轮次卡模板覆盖（2026-08-13，DESIGN-flow-config §2）：assets/flow/round-cards.json
+	 * 之上按 key 同名替换（7 个固定 key：plan/open/fix/curtain/review/extend/seal）。
+	 * 只改不删——配置删掉的 key 用内置模板补回。占位符见 docs/DESIGN-flow-config.md。
+	 */
+	flowTemplates?: FlowTemplateConfig[];
+	/**
+	 * 预设拆层表覆盖（2026-08-13，DESIGN-flow-config §3）：assets/flow/split-tables.json
+	 * 之上按 key 同名替换内置表（liyuan-custom / tgbreak-v2 / shuangren-v10 / xiajin-v2 /
+	 * dreamwhale-v5）。RegExp 字段（stripLines / segments.match）为字符串，加载时编译，
+	 * 非法正则跳过该规则（宁漏勿伤）。
+	 */
+	splitTables?: SplitTableOverride[];
+	/**
+	 * 回合意图分类正则覆盖（2026-08-13，DESIGN-flow-config §4）：turn-intent 的
+	 * WANTS_STORY / PURE_OPS 正则清单外置。**当前无调用点**（shouldApplyStoryPreset 为
+	 * 预留接口，未挂进回合流程），仅声明字段与 factory 支持，为将来激活而设。
+	 */
+	intentRegex?: IntentRegexConfig;
+}
+
+/** 轮次卡模板（DESIGN-flow-config §2）：key 为程序判定键，title 含【】卡名，body 含占位符 */
+export interface FlowTemplateConfig {
+	key: string;
+	title: string;
+	body: string;
+}
+
+/** 拆层表覆盖（DESIGN-flow-config §3）：JSON 数据形态，RegExp 字段为字符串 */
+export interface SplitTableOverride {
+	/** 表标识；与内置表同 key 即替换 */
+	key: string;
+	/** 启用块名指纹（≥2 命中认表） */
+	fingerprints?: string[];
+	blocks?: Array<{
+		name: string;
+		nature: string;
+		fate: "resident" | "skill" | "rules-only" | "drop";
+		section?: "A" | "B" | "C";
+		topic?: string;
+		/** 句级：摘掉命中行（正则字符串） */
+		stripLines?: string[];
+		segments?: Array<{
+			match: string;
+			fate: "resident" | "skill" | "rules-only" | "drop";
+			section?: "A" | "B" | "C";
+			topic?: string;
+		}>;
+		/** 该块声明了自定义用户代言边界 → 主权检查降档 */
+		sovereigntyOverride?: boolean;
+		note?: string;
+	}>;
+	/** 变量级去向（值从求值后的变量表取） */
+	vars?: Array<{
+		name: string;
+		fate: "resident" | "skill" | "drop";
+		section?: "B" | "C";
+		topic?: string;
+		stripLines?: string[];
+	}>;
+	/** 从被退场块转述救出的规则句 */
+	supplements?: Array<{ section: "B" | "C"; text: string; source: string }>;
+}
+
+/** 回合意图分类正则清单（DESIGN-flow-config §4）：字符串数组，加载时 join("|") 编译 */
+export interface IntentRegexConfig {
+	/** 明确要求推进/续写场面（命中走剧情预设） */
+	wantsStory?: string[];
+	/** 高置信纯办事/维护（短句命中跳过预设） */
+	pureOps?: string[];
 }
 
 export const DEFAULT_CONFIG: RpConfig = {

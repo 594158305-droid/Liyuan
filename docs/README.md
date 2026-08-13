@@ -3,16 +3,17 @@
 > 整理：2026-08-10 · 核对基线：git HEAD `0856703`（master）
 > 原则：**只索引与标注，不改写、不删减任何文档内容**——历史文档即使过时也原地保留，状态与出处都在本索引中如实标注。
 
-本索引是 docs/ 的入口：36 份文档全量分类（§1）、散落各文档的待办与遗留事项汇总（§2）、文档与代码的对应关系（§3）、文档中与当前代码不一致的过时标注（§4）、引用关系与命名注意（§5）。
+本索引是 docs/ 的入口：38 份文档全量分类（§1）、散落各文档的待办与遗留事项汇总（§2）、文档与代码的对应关系（§3）、文档中与当前代码不一致的过时标注（§4）、引用关系与命名注意（§5）。
 
 ---
 
-## §1 文档分类总表（36 份）
+## §1 文档分类总表（38 份）
 
-### 一、长期有效规范（6 份）
+### 一、长期有效规范（7 份）
 
 | 文档 | 行数 | 一句话主题 |
 |---|---|---|
+| [FLOW-MAP.md](FLOW-MAP.md) | 171 | 主聊天一拍流程图：每步作用 + 预设定制面/代码面标注 + F 机械纪律真实链路（2026-08-13） |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 543 | 梨园整体架构（v1.2.0）：五层结构、分域职责、数据流、数据目录、外部依赖、关键决策 |
 | [PLAN-ROUND-FLOW.md](PLAN-ROUND-FLOW.md) | 293 | 分轮演出流程**最终形态**（2026-08-08 定稿）：规划轮→演段轮→收尾轮、ask 接入、提示词四层结构、落地记录 P1–P14 |
 | [PRESET-SPLIT-TAXONOMY.md](PRESET-SPLIT-TAXONOMY.md) | 182 | 预设拆层类型学：九种性质（A–I）→ 五个去向，三份预设逐块拆层表与量化结论 |
@@ -20,10 +21,11 @@
 | [DEV-extend.md](DEV-extend.md) | 187 | 开发者扩展技术路径（REST/MCP/技能/程序卡，纯配置→扩展文件→改源码分级） |
 | [jsrunner-port.md](jsrunner-port.md) | 306 | JS Runner（TavernHelper）移植文档（M5 兼容性审计基线 + G1–G12 缺口全表）⚠ 部分内容与代码不符，见 §4 |
 
-### 二、功能设计（7 份，均已实现并与代码吻合）
+### 二、功能设计（8 份，均已实现并与代码吻合）
 
 | 文档 | 行数 | 一句话主题 |
 |---|---|---|
+| [DESIGN-flow-config.md](DESIGN-flow-config.md) | 113 | 流程配置外置：轮次卡模板 / 预设拆层表 / 回合意图正则 → 数据文件 + liyuan.config.json 覆盖段（2026-08-13） |
 | [DESIGN-draw.md](DESIGN-draw.md) | 474 | 生图系统分层设计（底座 + 四插件），一期二期实施完成，§8 实施对账 |
 | [DESIGN-websearch.md](DESIGN-websearch.md) | 201 | 内置网络搜索 MCP（SearXNG 默认 / tavily 可插拔），已实现（2026-08-10） |
 | [DESIGN-debug-trace.md](DESIGN-debug-trace.md) | 53 | 主聊天跟踪（开发者模式）：JSONL 全过程记录（提示词/思考/工具/草稿/旁路/定稿）、REST 列表下载、事件 schema（2026-08-11） |
@@ -176,6 +178,8 @@
 
 | 文档 | 对应代码（实现位置） |
 |---|---|
+| FLOW-MAP.md | `src/stage/engine.ts`（#turn/#agentLoop/roundCardFor）、`src/stage/materials.ts`（loadStageMaterials）、`src/stage/assemble.ts`（system 分节/注入块）、`src/draft.ts`（extractDraftRules/checkDraft）、`src/stage/workspace.ts`（验收消费） |
+| DESIGN-flow-config.md | `assets/flow/round-cards.json`、`assets/flow/split-tables.json`、`src/flow-templates.ts`、`src/preset-split.ts`（normalizeSplitTable/loadBuiltinSplitTables/resolveSplitTables）、`src/turn-intent.ts`（createIntentClassifier）、`src/types.ts`（flowTemplates/splitTables/intentRegex 段）、`src/stage/engine.ts`（roundCardFor 模板化）、`src/stage/materials.ts`（加载合并）、`liyuan.config.json` 三段 |
 | ARCHITECTURE.md | 全仓库（分层总览，无单一实现） |
 | PLAN-ROUND-FLOW.md | `src/stage/engine.ts:426`（StageEngine）、`:955`（#agentLoop）、`:1006`（round 循环）、`:286-345`（roundCardFor 注入卡）、`:1127-1210`（同轮连发门禁）；`src/stage/assemble.ts:349`（# 怎么演这一拍）；`src/stage/workspace.ts`、`src/stage/tools.ts`（beat_plan 等写侧五件）；`src/preset-macro.ts` |
 | PRESET-SPLIT-TAXONOMY.md | `src/preset-split.ts`（九性质五去向）、`src/preset-classify.ts`（四类兜底）、`src/preset-macro.ts`（宏求值） |

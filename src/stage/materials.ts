@@ -15,6 +15,12 @@ import { loadCardFile, readCardRawJson } from "../card.ts";
 import { cardStatusBarFormats } from "../cardfront.ts";
 import { stripAuditLines } from "../draft.ts";
 import {
+	DEFAULT_ROUND_CARDS,
+	loadRoundCardsFile,
+	resolveRoundCardTemplates,
+	type RoundCardTemplate,
+} from "../flow-templates.ts";
+import {
 	applyDisabledLore,
 	constantEntries,
 	loadLorebookFile,
@@ -28,8 +34,10 @@ import { createMacroEnv, evalPresetMacros } from "../preset-macro.ts";
 import { stripProtocolEntries, type ProtocolDrop } from "../protocol-detect.ts";
 import {
 	findSplitTable,
+	loadBuiltinSplitTables,
 	lookupBlockRule,
 	reportItemFor,
+	resolveSplitTables,
 	splitBlockContent,
 	type AssemblyReportItem,
 	type PresetSplitTable,
@@ -52,6 +60,10 @@ export interface StageMaterials {
 	preset: RpPreset | null;
 	/** 拆层表（内置命中；null＝未知预设走四类兜底）——engine 对 postHistory 每拍复用 */
 	splitTable: PresetSplitTable | null;
+	/** 轮次卡模板（assets/flow/round-cards.json + 配置 flowTemplates 覆盖，DESIGN-flow-config §2） */
+	roundCards: RoundCardTemplate[];
+	/** 流程配置加载警告（非法正则跳过等；engine 按内容去重播报一次） */
+	flowWarnings: string[];
 	/**
 	 * M-C 拆层产物（system 通道，静态）：
 	 * A 破限原文（原序）；B 文风与写法 / C 行为边界（归拢文本，含变量级救出与 supplements）。
@@ -100,6 +112,12 @@ export function loadStageConfig(cwd: string): RpConfig {
 /** 装载一拍所需全部素材；卡缺失/损坏时抛错（引擎转告用户，不演） */
 export function loadStageMaterials(cwd: string): StageMaterials {
 	const config = loadStageConfig(cwd);
+
+	// 流程配置（DESIGN-flow-config）：轮次卡模板 + 拆层表，每拍现读，改文件/改配置下一拍生效。
+	// 缺省回退内嵌默认（round-cards.json / split-tables.json 缺失或损坏时）；非法正则跳过并进警告。
+	const flowWarnings: string[] = [];
+	const roundCards = resolveRoundCardTemplates(loadRoundCardsFile(cwd) ?? DEFAULT_ROUND_CARDS, config.flowTemplates);
+	const splitTables = resolveSplitTables(loadBuiltinSplitTables(cwd, flowWarnings), config.splitTables, flowWarnings);
 
 	const cardAbs = resolvePath(cwd, config.card);
 	const card = loadCardFile(cardAbs);
@@ -177,7 +195,7 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 
 	// ---- M-C 拆层（docs/PRESET-SPLIT-TAXONOMY.md）----
 	const allEnabledNames = preset ? preset.blocks.filter((b) => b.enabled).map((b) => b.name) : [];
-	const splitTable = preset ? findSplitTable(allEnabledNames) : null;
+	const splitTable = preset ? findSplitTable(allEnabledNames, splitTables) : null;
 
 	const presetResidentA: PresetBlock[] = [];
 	const presetResidentB: string[] = [];
@@ -264,6 +282,8 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 		entries,
 		preset,
 		splitTable,
+		roundCards,
+		flowWarnings,
 		presetResidentA,
 		presetResidentB,
 		presetResidentC,

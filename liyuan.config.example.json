@@ -17,6 +17,28 @@
 	"sideJailbreak": "",
 	"greetingIndex": 0,
 	"plugins": {},
+	"flowTemplates": [
+		{
+			"_exampleNote": "轮次卡模板覆盖（DESIGN-flow-config §2）：assets/flow/round-cards.json 之上按 key 同名覆盖（7 个固定 key：plan/open/fix/curtain/review/extend/seal），只改不删。body 支持占位符 {userName} {wordRangeHint} {wordRangeMin} {wordRangeMax} {violations} {violationsCount} {statusBarTail} {appendsCount} {draftBodyChars}。删除本段 = 用内置模板。",
+			"key": "seal",
+			"title": "【收笔评估】",
+			"body": "路标已全部演完，戏到了一个停点。按顺序评估，评估完再动手：\n① 这一拍的自然下文是否涉及 {userName} 的行动或选择（如「润墨之后该试墨」）——涉及就先用 `ask` 问用户、按答案续写，此时不要收笔；\n② 不涉及，再看剧情是否停在 {userName} 可以接话、可以行动的位置——不在就续写到停点；\n③ 以上都满足，`draft_seal` 收笔；\n④ 封笔之后最后一步：输出状态栏等格式块——状态栏意味着本拍结束，必须是这拍的最后产出（续写/ask 全部完成之前不要输出）。\n思考全程用中文。"
+		}
+	],
+	"splitTables": [
+		{
+			"_exampleNote": "预设拆层表覆盖（DESIGN-flow-config §3）：assets/flow/split-tables.json 之上按 key 增改合并（同名块替换、新名追加、内置全保留；fingerprints/vars/supplements 缺省继承内置）。RegExp 字段（stripLines / segments.match）为字符串，非法正则跳过该规则。删除本段 = 用内置表。",
+			"key": "tgbreak-v2",
+			"blocks": [
+				{ "name": "👻TG推荐文风", "nature": "B", "fate": "resident", "section": "B" }
+			]
+		}
+	],
+	"intentRegex": {
+		"_exampleNote": "回合意图分类正则覆盖（DESIGN-flow-config §4）：turn-intent 的 wantsStory/pureOps 清单。**当前无调用点**（预留接口），仅声明供将来激活；删除本段 = 用内置清单。",
+		"wantsStory": ["继续", "续写"],
+		"pureOps": ["改配置", "换模型"]
+	},
 	"agents": [
 		{
 			"id": "director",

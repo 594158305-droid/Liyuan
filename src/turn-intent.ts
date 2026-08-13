@@ -6,54 +6,155 @@
  *
  * 默认走预设（剧情是主路径）；仅高置信非剧情返回 false。
  * 混写（既办事又要续演）一律走预设。
+ *
+ * 正则清单已外置（DESIGN-flow-config §4）：liyuan.config.json 的 intentRegex 段可覆盖
+ * （createIntentClassifier 接收配置，缺省用内置清单）。**当前无调用点**——shouldApplyStoryPreset
+ * 为预留接口，尚未挂进回合流程，外置仅为将来激活而设，不改判定逻辑。
  */
 
 import { isBackstageText } from "./stance.ts";
+import type { IntentRegexConfig } from "./types.ts";
 
-/** 用户明确要求推进/续写场面 → 强制走预设 */
-const WANTS_STORY =
-	/(继续|续写|接着演|接着写|往下写|推进剧情|写一段|开写|演戏|写剧情|场景推进|然后写|办完继续|办完再写|办完续|边办边演|continue\s*(the\s*)?(story|scene)|keep\s*writ)/i;
+/** 用户明确要求推进/续写场面 → 强制走预设（内置默认，数组项 join("|") 后与旧正则等价） */
+const DEFAULT_WANTS_STORY = [
+	"继续",
+	"续写",
+	"接着演",
+	"接着写",
+	"往下写",
+	"推进剧情",
+	"写一段",
+	"开写",
+	"演戏",
+	"写剧情",
+	"场景推进",
+	"然后写",
+	"办完继续",
+	"办完再写",
+	"办完续",
+	"边办边演",
+	"continue\\s*(the\\s*)?(story|scene)",
+	"keep\\s*writ",
+];
 
-/** 高置信纯办事 / 维护（无续写诉求时跳过预设） */
-const PURE_OPS =
+/** 高置信纯办事 / 维护（无续写诉求时跳过预设；内置默认分五类） */
+const DEFAULT_PURE_OPS = [
 	// 配置 / 模型 / 诊断
-	/(改配置|写配置|切换模型|换模型|换预设|改预设|开预设|关预设|预设采样|采样参数|temperature|诊断|排错|看日志|\bMCP\b|技能笔记|沉淀技能|装技能)/i.source +
-	"|" +
+	"改配置",
+	"写配置",
+	"切换模型",
+	"换模型",
+	"换预设",
+	"改预设",
+	"开预设",
+	"关预设",
+	"预设采样",
+	"采样参数",
+	"temperature",
+	"诊断",
+	"排错",
+	"看日志",
+	"\\bMCP\\b",
+	"技能笔记",
+	"沉淀技能",
+	"装技能",
 	// 面板 / 账本 / 设定维护
-	/(角色仓库|更新面板|改面板|写面板|同步面板|关面板|面板更新|状态栏|账本|世界状态|补设定|写设定|挂载知识|知识库|lorebook)/i
-		.source +
-	"|" +
+	"角色仓库",
+	"更新面板",
+	"改面板",
+	"写面板",
+	"同步面板",
+	"关面板",
+	"面板更新",
+	"状态栏",
+	"账本",
+	"世界状态",
+	"补设定",
+	"写设定",
+	"挂载知识",
+	"知识库",
+	"lorebook",
 	// 媒体 / API
-	/(调\s*API|调接口|生图|文生图|配音|\bTTS\b|合成语音|生成视频|上传文件)/i.source +
-	"|" +
+	"调\\s*API",
+	"调接口",
+	"生图",
+	"文生图",
+	"配音",
+	"\\bTTS\\b",
+	"合成语音",
+	"生成视频",
+	"上传文件",
 	// 明确不要剧情
-	/(只改|仅改|只要改|只更新|仅更新|不用写|别写正文|不要正文|别续写|先别写|不要推进|别推进|纯办事|系统事务|不要剧情|别演)/i
-		.source +
-	"|" +
+	"只改",
+	"仅改",
+	"只要改",
+	"只更新",
+	"仅更新",
+	"不用写",
+	"别写正文",
+	"不要正文",
+	"别续写",
+	"先别写",
+	"不要推进",
+	"别推进",
+	"纯办事",
+	"系统事务",
+	"不要剧情",
+	"别演",
 	// 显式助手
-	/(让助手|叫助手|委托助手|右栏助手)/i.source;
+	"让助手",
+	"叫助手",
+	"委托助手",
+	"右栏助手",
+];
 
-const PURE_OPS_RE = new RegExp(PURE_OPS, "i");
+export interface IntentClassifierOptions {
+	wantsStory?: string[];
+	pureOps?: string[];
+}
 
 /**
- * 本轮是否应装配用户剧情预设（system 块 + postHistory 块）。
- * @returns true = 剧情生成回合，走预设；false = 纯非剧情，跳过预设
+ * 构造回合意图分类器：正则清单（字符串数组）→ 编译 → 判定函数。
+ * 缺省用内置清单；配置覆盖时整体替换（DESIGN-flow-config §4）。
  */
-export function shouldApplyStoryPreset(userText: string): boolean {
-	const t = userText.trim();
-	if (!t) return true;
+export function createIntentClassifier(opts: IntentClassifierOptions = {}): (userText: string) => boolean {
+	const wantsStory = opts.wantsStory ?? DEFAULT_WANTS_STORY;
+	const pureOps = opts.pureOps ?? DEFAULT_PURE_OPS;
+	const WANTS_STORY_RE = new RegExp(wantsStory.join("|"), "i");
+	const PURE_OPS_RE = new RegExp(pureOps.join("|"), "i");
 
-	// 场外标记（// / 双括号 / 整段括号）：按非剧情办事处理
-	if (isBackstageText(t)) return false;
+	/**
+	 * 本轮是否应装配用户剧情预设（system 块 + postHistory 块）。
+	 * @returns true = 剧情生成回合，走预设；false = 纯非剧情，跳过预设
+	 */
+	return (userText: string): boolean => {
+		const t = userText.trim();
+		if (!t) return true;
 
-	// 长段用户正文（动作/对白）默认剧情
-	if (t.length > 280) return true;
+		// 场外标记（// / 双括号 / 整段括号）：按非剧情办事处理
+		if (isBackstageText(t)) return false;
 
-	// 混写或明确续写 → 预设
-	if (WANTS_STORY.test(t)) return true;
+		// 长段用户正文（动作/对白）默认剧情
+		if (t.length > 280) return true;
 
-	// 短句 + 纯办事信号 → 不走预设
-	if (PURE_OPS_RE.test(t)) return false;
+		// 混写或明确续写 → 预设
+		if (WANTS_STORY_RE.test(t)) return true;
 
-	return true;
+		// 短句 + 纯办事信号 → 不走预设
+		if (PURE_OPS_RE.test(t)) return false;
+
+		return true;
+	};
 }
+
+/** 配置覆盖（intentRegex 段）：缺省用内置清单（DESIGN-flow-config §4） */
+export function intentOptionsOf(config?: IntentRegexConfig): IntentClassifierOptions {
+	if (!config) return {};
+	return {
+		...(Array.isArray(config.wantsStory) ? { wantsStory: config.wantsStory } : {}),
+		...(Array.isArray(config.pureOps) ? { pureOps: config.pureOps } : {}),
+	};
+}
+
+/** 预留接口：默认分类器（当前无调用点，行为与旧实现一致） */
+export const shouldApplyStoryPreset: (userText: string) => boolean = createIntentClassifier();
