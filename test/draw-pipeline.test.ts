@@ -389,16 +389,18 @@ test("runPipeline：角色 uc 并入 negativePrompt（task.negative + uc 逗号�
 	assert.equal(seenNegative, "lowres, bad_hair");
 });
 
-test("runPipeline：角色 groupTags 并入 prompt（base 与 action 之间）", async () => {
+test("runPipeline：角色 groupTags 并入分栏（base 与 action 之间），scene 不再拼角色 tag（V4 分栏语义）", async () => {
 	resetPipelineDedupe();
 	resetPipelineTimer();
 	let seenPrompt = "";
+	let seenChars: { name: string; prompt: string }[] = [];
 	const deps = fakeDeps({
 		callPlanner: async () =>
 			`<image_gen>\n  - index: 1\n    scene: "scene"\n    characters:\n      - name: 甲\n        action: running\n</image_gen>`,
 		resolveChars: (names) => names.map((n) => ({ tags: "appearance_tag", groupTags: "role_group_tag" })),
 		generate: async (opts) => {
 			seenPrompt = opts.prompt;
+			seenChars = opts.characterPrompts ?? [];
 			return { src: "/cache/draw-1.png", slotId: "slot-1" };
 		},
 	});
@@ -410,13 +412,16 @@ test("runPipeline：角色 groupTags 并入 prompt（base 与 action 之间）",
 		deps,
 	});
 	assert.equal(r.ran, true);
-	assert.ok(seenPrompt.startsWith("appearance_tag, role_group_tag, running, scene"), `顺序应为 base, group, action, scene，实际：${seenPrompt}`);
+	assert.equal(seenPrompt, "scene", "角色特征走分栏，scene 不再拼接");
+	assert.equal(seenChars.length, 1);
+	assert.equal(seenChars[0]!.prompt, "appearance_tag, role_group_tag, running", `顺序应为 base, group, action，实际：${seenChars[0]?.prompt}`);
 });
 
 test("runPipeline：无 groupTags / 无 uc 时行为不变（向后兼容）", async () => {
 	resetPipelineDedupe();
 	resetPipelineTimer();
 	let seenPrompt = "";
+	let seenChars: { name: string; prompt: string }[] = [];
 	let seenNegative = "unset";
 	const deps = fakeDeps({
 		callPlanner: async () =>
@@ -424,6 +429,7 @@ test("runPipeline：无 groupTags / 无 uc 时行为不变（向后兼容）", a
 		resolveChars: (names) => names.map((n) => ({ tags: `${n}_tag` })), // 无 uc / 无 groupTags
 		generate: async (opts) => {
 			seenPrompt = opts.prompt;
+			seenChars = opts.characterPrompts ?? [];
 			seenNegative = opts.negativePrompt ?? "";
 			return { src: "/cache/draw-1.png", slotId: "slot-1" };
 		},
@@ -436,8 +442,41 @@ test("runPipeline：无 groupTags / 无 uc 时行为不变（向后兼容）", a
 		deps,
 	});
 	assert.equal(r.ran, true);
-	assert.equal(seenPrompt, "甲_tag, running, scene");
+	assert.equal(seenPrompt, "scene");
+	assert.equal(seenChars.length, 1);
+	assert.equal(seenChars[0]!.prompt, "甲_tag, running");
 	assert.equal(seenNegative, "", "无 uc → negativePrompt 为空");
+});
+
+test("runPipeline：无档案/无名角色用 LLM 条目组装进分栏（type+appear+costume+action+center）", async () => {
+	resetPipelineDedupe();
+	resetPipelineTimer();
+	let seenPrompt = "";
+	let seenChars: { name: string; prompt: string; center?: { x: number; y: number } }[] = [];
+	const deps = fakeDeps({
+		callPlanner: async () =>
+			`<image_gen>\n  - index: 1\n    scene: "2girls, 1boy, cafe"\n    characters:\n      - name: 甲\n        action: smiling\n      - name: ""\n        type: girl\n        appear: black hair, purple eyes\n        costume: cafe uniform, white apron\n        center: B2\n</image_gen>`,
+		// 只甲有档案；无名角色（name 空）resolver 返回空
+		resolveChars: (names) => names.map((n) => (n === "甲" ? { tags: "甲_tag" } : { tags: "" })),
+		generate: async (opts) => {
+			seenPrompt = opts.prompt;
+			seenChars = opts.characterPrompts ?? [];
+			return { src: "/cache/draw-1.png", slotId: "slot-1" };
+		},
+	});
+	const r = await runPipeline(tmpCwd(), {
+		entryId: "e-unknown",
+		chatId: "c",
+		messageText: "正文",
+		settings: defaultSettings(),
+		deps,
+	});
+	assert.equal(r.ran, true);
+	assert.equal(seenPrompt, "2girls, 1boy, cafe", "scene 原样，角色特征走分栏");
+	assert.equal(seenChars.length, 2, "无档案角色不再被丢弃");
+	assert.equal(seenChars[0]!.prompt, "甲_tag, smiling");
+	assert.equal(seenChars[1]!.prompt, "girl, black hair, purple eyes, cafe uniform, white apron", `无名角色按 type+appear+costume 组装，实际：${seenChars[1]?.prompt}`);
+	assert.deepEqual(seenChars[1]!.center, { x: 0.3, y: 0.3 }, "B2 → 归一化坐标");
 });
 
 // ---------- 配图嵌入目标解析（2026-08-14 事故修复） ----------

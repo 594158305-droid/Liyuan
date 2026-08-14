@@ -15,6 +15,8 @@ import { enforceLimits, parseImagePlan, type ImagePlan } from "./scene-plan.ts";
 import { createPlaceholder } from "../draw-slot/slot-store.ts";
 import { classifyError } from "../../draw/errors.ts";
 import { DEFAULT_DRAW_ASPECTS, type DrawAspects } from "../../draw/config.ts";
+import { gridToCenter } from "../../draw/novelai.ts";
+import { assembleUnknownCharacter } from "../draw-role/resolver.ts";
 import { randomUUID } from "node:crypto";
 
 export interface PipelineSettings {
@@ -38,6 +40,8 @@ export interface PipelineDeps {
 		negativePrompt?: string;
 		aspect: "portrait" | "landscape" | "square";
 		providerId?: string;
+		/** 角色分栏（V4 分栏出图：每角色独立 char_caption + center 坐标；缺省无分栏） */
+		characterPrompts?: { name: string; prompt: string; uc?: string; center?: { x: number; y: number } }[];
 	}) => Promise<{ src: string; slotId: string }>;
 	/** 角色特征解析（默认实现：draw-role resolver.resolveCharacterTags；测试注入 fake） */
 	resolveChars: (names: string[]) => { tags: string; uc?: string; referenceImage?: string; groupTags?: string }[];
@@ -45,7 +49,11 @@ export interface PipelineDeps {
 	registerSlot: (
 		slotId: string,
 		file: string,
-		tags?: { scene: string; characterPrompts?: { name: string; prompt: string }[]; failed?: { code?: string; reason: string } },
+		tags?: {
+			scene: string;
+			characterPrompts?: { name: string; prompt: string; uc?: string; center?: { x: number; y: number } }[];
+			failed?: { code?: string; reason: string };
+		},
 	) => void;
 	/** lore 检索（选填；不可用/失败时 loreText=""；host 注入真实实现） */
 	searchLore?: (query: string, limit?: number) => string;
@@ -241,22 +249,38 @@ export async function runPipeline(cwd: string, opts: RunPipelineOpts): Promise<P
 	const slots: { slotId: string; src: string; index: number }[] = [];
 	for (const task of plan.tasks) {
 		try {
-			// 角色 tag 组装：resolver 已组装 appearance+outfit tags + 角色选中组 tags（groupTags 并入 base 与 action 之间）
+			// 角色 tag 组装：档案命中 → 档案 tags（appearance+outfit）+ groupTags + action；
+			// 档案未命中/无名 → assembleUnknownCharacter 用 LLM 条目（type/appear/costume/action）组装——不再静默丢人；
+			// center：A1~E5 网格 → 归一化坐标（分栏出图 use_coords 生效）
+			// V4 语义：角色特征只走 char_captions 分栏，base_caption（scene）不再拼接角色 tag（防重复）
 			let promptText = task.scene;
-			const characterPrompts: { name: string; prompt: string }[] = [];
+			const characterPrompts: { name: string; prompt: string; uc?: string; center?: { x: number; y: number } }[] = [];
 			let negativePrompt = task.negative;
 			if (task.characters.length > 0) {
-				const resolved = deps.resolveChars(task.characters.map((c) => c.name));
-				const charTags = task.characters
-					.map((c, i) => {
-						const base = resolved[i]?.tags ?? "";
-						const group = resolved[i]?.groupTags ?? "";
-						const full = [base, group, c.action ?? ""].filter(Boolean).join(", ");
-						characterPrompts.push({ name: c.name, prompt: full });
-						return full;
-					})
-					.filter(Boolean);
-				if (charTags.length > 0) promptText = `${charTags.join(", ")}, ${promptText}`;
+				const resolved = deps.resolveChars(task.characters.map((c) => c.name ?? ""));
+				for (const [i, c] of task.characters.entries()) {
+					const arch = resolved[i];
+					const base = arch?.tags ?? "";
+					const full = base
+						? [base, arch?.groupTags ?? "", c.action ?? "", c.interact ?? ""].filter(Boolean).join(", ")
+						: assembleUnknownCharacter({
+								name: c.name || undefined,
+								type: c.type,
+								appear: c.appear,
+								costume: c.costume,
+								action: c.action,
+								interact: c.interact,
+								uc: c.uc,
+							}).tags;
+					if (!full.trim()) continue; // 无任何特征可画 → 不进分栏
+					const center = c.center && /^[A-Ea-e][1-5]$/.test(c.center.trim()) ? gridToCenter(c.center.trim()) : undefined;
+					characterPrompts.push({
+						name: c.name ?? "路人",
+						prompt: full,
+						...(c.uc ? { uc: c.uc } : {}),
+						...(center ? { center } : {}),
+					});
+				}
 				// 角色级负面：task.negative + 各角色 uc（逗号连接，去重）
 				const ucParts = resolved.map((r) => (r.uc && r.uc.trim() ? r.uc.trim() : "")).filter(Boolean);
 				const negParts = [...(task.negative && task.negative.trim() ? [task.negative.trim()] : []), ...ucParts];
@@ -266,10 +290,13 @@ export async function runPipeline(cwd: string, opts: RunPipelineOpts): Promise<P
 				prompt: promptText,
 				negativePrompt,
 				aspect: task.aspect,
+				...(characterPrompts.length > 0 ? { characterPrompts } : {}),
 			});
 			deps.registerSlot(r.slotId, r.src, {
 				scene: task.scene,
-				...(characterPrompts.length > 0 ? { characterPrompts } : {}),
+				...(characterPrompts.length > 0
+					? { characterPrompts: characterPrompts.map((cp) => ({ name: cp.name, prompt: cp.prompt, ...(cp.center ? { center: cp.center } : {}) })) }
+					: {}),
 			});
 			slots.push({ slotId: r.slotId, src: r.src, index: task.index });
 		} catch (e) {

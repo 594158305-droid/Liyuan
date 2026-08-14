@@ -19,7 +19,17 @@ export interface ImageTask {
 	scene: string;
 	/** 整图补充负面（选填） */
 	negative?: string;
-	characters: { name: string; action?: string }[];
+	/** 角色条目：name 可空=无名配角；无档案角色用 type/appear/costume/action 组装（对齐 draw_generate） */
+	characters: {
+		name?: string;
+		type?: string;
+		appear?: string;
+		costume?: string;
+		action?: string;
+		interact?: string;
+		uc?: string;
+		center?: string;
+	}[];
 }
 
 export interface ImagePlan {
@@ -58,7 +68,16 @@ function parseBlockBody(body: string): ImageTask[] {
 	const lines = body.split("\n");
 	const tasks: ImageTask[] = [];
 	let cur: ImageTask | null = null;
-	let charCur: { name: string; action?: string } | null = null;
+	let charCur: {
+		name?: string;
+		type?: string;
+		appear?: string;
+		costume?: string;
+		action?: string;
+		interact?: string;
+		uc?: string;
+		center?: string;
+	} | null = null;
 
 	for (const raw of lines) {
 		const line = raw.replace(/\r$/, "");
@@ -70,13 +89,13 @@ function parseBlockBody(body: string): ImageTask[] {
 			charCur = null;
 			continue;
 		}
-		// 字符条目：`- name: xxx`（缩进在 characters 下；若无明确层级则只要在 task 内）
-		const charStart = /^\s*-\s*name\s*:\s*(.+)$/.exec(line);
-		if (charStart && cur) {
-			charCur = { name: unquote(charStart[1].trim()) };
-			cur.characters.push(charCur);
-			continue;
-		}
+	// 字符条目：`- name: xxx`（缩进在 characters 下；若无明确层级则只要在 task 内；name 可空=无名配角）
+	const charStart = /^\s*-\s*name\s*:\s*(.*)$/.exec(line);
+	if (charStart && cur) {
+		charCur = { name: unquote(charStart[1].trim()) || undefined };
+		cur.characters.push(charCur);
+		continue;
+	}
 		const kv = parseKeyValue(line);
 		if (!kv || !cur) continue;
 		const val = unquote(kv.value);
@@ -101,6 +120,30 @@ function parseBlockBody(body: string): ImageTask[] {
 			case "action":
 				if (charCur) charCur.action = val;
 				else if (cur.characters.length > 0) cur.characters[cur.characters.length - 1]!.action = val;
+				break;
+			case "type":
+				if (charCur) charCur.type = val;
+				else if (cur.characters.length > 0) cur.characters[cur.characters.length - 1]!.type = val;
+				break;
+			case "appear":
+				if (charCur) charCur.appear = val;
+				else if (cur.characters.length > 0) cur.characters[cur.characters.length - 1]!.appear = val;
+				break;
+			case "costume":
+				if (charCur) charCur.costume = val;
+				else if (cur.characters.length > 0) cur.characters[cur.characters.length - 1]!.costume = val;
+				break;
+			case "uc":
+				if (charCur) charCur.uc = val;
+				else if (cur.characters.length > 0) cur.characters[cur.characters.length - 1]!.uc = val;
+				break;
+			case "center":
+				if (charCur) charCur.center = val;
+				else if (cur.characters.length > 0) cur.characters[cur.characters.length - 1]!.center = val;
+				break;
+			case "interact":
+				if (charCur) charCur.interact = val;
+				else if (cur.characters.length > 0) cur.characters[cur.characters.length - 1]!.interact = val;
 				break;
 			default:
 				// 未知字段：忽略（多级容错，不因多余字段中断）
@@ -183,7 +226,13 @@ export function enforceLimits(
 			aspect,
 			scene: truncatedScene,
 			...(t.negative ? { negative: t.negative } : {}),
-			characters: chars.map((c) => ({ name: c.name, ...(c.action ? { action: c.action } : {}) })),
+			characters: chars.map((c) => {
+				const out: ImageTask["characters"][number] = {};
+				for (const k of ["name", "type", "appear", "costume", "action", "interact", "uc", "center"] as const) {
+					if (c[k]) out[k] = c[k];
+				}
+				return out;
+			}),
 		});
 	}
 	return { tasks: out, warnings };

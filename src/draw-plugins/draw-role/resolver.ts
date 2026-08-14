@@ -37,6 +37,17 @@ function resolveRefAbs(cwd: string, ref: string): string {
 	return join(cwd, ref);
 }
 
+/** danbooru 下划线 → NAI 空格分隔（对齐 LWBox danbooruToNai；NAI 对空格 tag 解析更稳） */
+function danbooruToNai(tag: string): string {
+	return tag.replace(/_/g, " ");
+}
+
+/** NAI 形象类型：档案 type 字段（UI 选项 girl/boy/man/woman）；仅匹配英文合法值时进 tag（防老数据中文值如「主角」误伤） */
+function naiTypeOf(c: { type?: string }): string {
+	const t = (c.type ?? "").trim();
+	return /^(girl|boy|woman|man|other)$/i.test(t) ? t.toLowerCase() : "";
+}
+
 /**
  * 解析角色特征：
  * - names 里的名字逐一到服装档案（loadWardrobe(cwd, cardPath)）查角色
@@ -66,8 +77,9 @@ export function resolveCharacterTags(
 		}
 		const roleGroupTags = getRoleGroupTags(cwd, name, character.selectedGroupId);
 		const parts = [
+			character.useDanbooruTag !== false && character.danbooruTag ? danbooruToNai(character.danbooruTag) : "",
+			naiTypeOf(character),
 			character.appearanceTags,
-			character.useDanbooruTag !== false && character.danbooruTag ? character.danbooruTag : "",
 			outfit?.tags ?? "",
 			roleGroupTags,
 		]
@@ -115,3 +127,28 @@ export function resolvePresentWithAliases(
 
 /** 类型再导出：供调用方把 ResolvedCharacter 转 CharacterPrompt（center 由调用方决定） */
 export type { CharacterPrompt };
+
+/**
+ * 无档案/无名角色的 LLM 完整条目 → ResolvedCharacter（对齐 LWBox：type 进 tag 串，
+ * 与 appear/costume/action 拼接——无档案角色照样有独立分栏，不是"不算人"）。
+ * name 可空 = 无名配角（type 兜底 boy，与 LWBox「默认无名配角 type=boy」一致）。
+ */
+export interface UnknownCharacterEntry {
+	name?: string;
+	type?: string;
+	appear?: string;
+	costume?: string;
+	action?: string;
+	interact?: string;
+	uc?: string;
+}
+
+export function assembleUnknownCharacter(c: UnknownCharacterEntry): ResolvedCharacter {
+	const type = (c.type ?? "").trim() || "boy";
+	const tags = [type, c.appear, c.costume, c.action, c.interact].filter(Boolean).join(", ").trim();
+	return {
+		name: (c.name ?? "").trim() || type,
+		tags,
+		uc: (c.uc ?? "").trim(),
+	};
+}

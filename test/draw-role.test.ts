@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 import { detectPresentCharacters, detectPresentCharactersWithAliases } from "../src/draw-plugins/draw-role/character-detect.ts";
 import { loadCharacterTagDb, searchCharacters, searchTags, tagDbStats } from "../src/draw-plugins/draw-role/tagdb.ts";
-import { resolveCharacterTags, resolvePresentWithAliases } from "../src/draw-plugins/draw-role/resolver.ts";
+import { assembleUnknownCharacter, resolveCharacterTags, resolvePresentWithAliases } from "../src/draw-plugins/draw-role/resolver.ts";
 import { loadWardrobe, saveWardrobe, upsertCharacter, wardrobePath } from "../src/wardrobe.ts";
 import type { WardrobeFile } from "../src/wardrobe.ts";
 
@@ -242,8 +242,31 @@ test("resolver：danbooruTag 并入 tag；useDanbooruTag=false 不并入", () =>
 	};
 	saveWardrobe(cwd, wb);
 	const r = resolveCharacterTags(cwd, card, ["用", "不用"]);
-	assert.equal(r.characters[0].tags, "blond_hair hatsune_miku");
+	assert.equal(r.characters[0].tags, "hatsune miku blond_hair", "danbooru 下划线转空格且前置（对齐 LWBox）");
 	assert.equal(r.characters[1].tags, "blond_hair");
+});
+
+test("resolver：档案 type（girl/boy/man/woman）进角色 tag 串开头；中文 type 不误伤", () => {
+	const cwd = tmpCwd();
+	const card = "assets/cards/test.json";
+	const wb: WardrobeFile = {
+		format: "liyuan-wardrobe",
+		version: 1,
+		cardPath: card,
+		characters: [
+			{
+				name: "千束",
+				type: "girl",
+				appearanceTags: "nishikigi chisato, middle breasts",
+				outfits: [{ id: "o1", name: "战斗服", tags: "side ponytail, red jacket" }],
+			},
+			{ name: "旧档", type: "主角", appearanceTags: "black hair", outfits: [] },
+		],
+	};
+	saveWardrobe(cwd, wb);
+	const r = resolveCharacterTags(cwd, card, ["千束", "旧档"]);
+	assert.equal(r.characters[0].tags, "girl nishikigi chisato, middle breasts side ponytail, red jacket", "type 在 danbooru/外观前（LWBox 顺序；梨园空格分隔）");
+	assert.equal(r.characters[1].tags, "black hair", "中文 type 不进 tag 串");
 });
 
 test("resolver：negativeTags → uc；无 negativeTags → uc 空串", () => {
@@ -302,4 +325,29 @@ test("resolvePresentWithAliases：从档案读 name+aliases 检出主名（hidde
 	// 别名"隐主"出现在正文但角色 hidden → 不检出
 	assert.deepEqual(resolvePresentWithAliases(cwd, card, "隐主在"), []);
 	assert.deepEqual(resolvePresentWithAliases(cwd, card, "凯尔在"), ["凯尔"]);
+});
+
+// ---------- assembleUnknownCharacter（8/15：无档案/无名角色分栏通道） ----------
+
+test("assembleUnknownCharacter：type+appear+costume+action 组装，type 进 tag 串（对齐 LWBox）", () => {
+	const r = assembleUnknownCharacter({
+		name: "井上泷奈",
+		type: "girl",
+		appear: "black hair, side ponytail, purple eyes",
+		costume: "cafe uniform, black blouse, white apron",
+		action: "smiling",
+		uc: "hat",
+	});
+	assert.equal(r.name, "井上泷奈");
+	assert.equal(r.tags, "girl, black hair, side ponytail, purple eyes, cafe uniform, black blouse, white apron, smiling");
+	assert.equal(r.uc, "hat");
+});
+
+test("assembleUnknownCharacter：无名配角 name 空 → 名字兜底 type，type 缺省 boy", () => {
+	const r = assembleUnknownCharacter({ action: "standing" });
+	assert.equal(r.name, "boy");
+	assert.equal(r.tags, "boy, standing");
+	const g = assembleUnknownCharacter({ type: "girl", appear: "blonde hair" });
+	assert.equal(g.name, "girl");
+	assert.equal(g.tags, "girl, blonde hair");
 });

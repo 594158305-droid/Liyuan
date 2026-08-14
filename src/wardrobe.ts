@@ -32,7 +32,7 @@ export interface WardrobeCharacter {
 	defaultOutfit?: string;
 	/** 别名（检出用；正文含别名即算在场） */
 	aliases?: string[];
-	/** 角色类型（如 主角/配角/NPC） */
+	/** 角色类型（NAI 形象类型：girl/boy/man/woman，角色管理 UI 类型选项；生图时进角色 tag 串开头） */
 	type?: string;
 	/** 角色级负面 tag（生图时并入 negativePrompt） */
 	negativeTags?: string;

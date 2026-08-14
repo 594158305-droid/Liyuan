@@ -23,7 +23,9 @@ import {
 	SessionManager,
 	SettingsManager,
 	type AgentSession,
+	type AuthStorage,
 	type ExtensionFactory,
+	type ModelRegistry,
 	type ToolDefinition,
 } from "@liyuan/agent-runtime";
 import { Type } from "typebox";
@@ -78,8 +80,8 @@ import { parseCardFromSessionHead } from "./wire.ts";
 import { loadDrawConfig } from "../src/draw/config.ts";
 import { generateImage, enhanceImage } from "../src/draw/service.ts";
 import { DrawError } from "../src/draw/errors.ts";
-import type { CharacterPrompt } from "../src/draw/novelai.ts";
-import { resolveCharacterTags } from "../src/draw-plugins/draw-role/resolver.ts";
+import { gridToCenter, type CharacterPrompt } from "../src/draw/novelai.ts";
+import { assembleUnknownCharacter, resolveCharacterTags } from "../src/draw-plugins/draw-role/resolver.ts";
 import { enabledPluginToolDefs, enabledPluginToolNames, initPlugins } from "../src/draw-plugins/registry.ts";
 
 /** 剧情会话桥：main.ts 提供，助手工具经此只读剧情面 / 提交白名单写操作 */
@@ -259,6 +261,14 @@ export interface CreateAgentHostOptions {
 	model?: { provider: string; id: string } | null;
 	/** false = 关闭跟随剧情模型（自定义 agent 显式模型时用）；缺省 true */
 	followsStoryModel?: boolean;
+	/**
+	 * 与主聊天共享的模型注册表/认证存储（2026-08-15 修复：会话快照与主会话不一致，
+	 * 运行中配置热重载后助手仍持旧快照 → 主聊天能用的渠道助手报「缺少 API key」）。
+	 * 传入后 agent 会话与主会话同一实例——主会话 refreshModels / POST /api/auth 后
+	 * 立即一致；缺省不传 = 各自新建（现状行为，向后兼容）。
+	 */
+	modelRegistry?: ModelRegistry;
+	authStorage?: AuthStorage;
 }
 
 /** 内置助手专用选项（createAssistantHost 兼容包装的类型，= CreateAgentHostOptions 全量） */
@@ -812,14 +822,26 @@ function createStagehandTools(
 		defineTool({
 			name: "draw_generate",
 			label: "生成图片",
-			description:
-				"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影，不含角色特征 tag——角色特征由 characters 参数经领域层自动套服装档案）；**prompt 必须用英文 Danbooru tag 或英文画面描述（NovelAI 不认中文 tag，写中文会出无效图）**；characters 传在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**anchor 必填**：图片默认嵌入最近一条剧情消息正文，必须给 anchor（**本次配图仅针对用户指定的单楼层**——缺省 = 最近一条剧情回复；从**该楼层正文**逐字摘录 8-15 字短原文片段，图片挂在该片段所在段落而不是消息末尾；正文内容用 story_read 读取后再摘录）；仅用户明确不要进正文时传 embed:false（此时 anchor 可不填）。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。**生图前先 read `.liyuan-skills/moment-capture.md` 盘点视觉时刻（七类时刻 + 密度分档 + 分级证据，产出时刻清单），再按 skill novelai-draw 写图**。tag 写法与构图规范见 skill novelai-draw。",
+				description:
+					"按画面描述生成图片（NovelAI 后端）。prompt 传**画面描述**（场景/构图/光影/角色计数与相对位置，不含角色特征 tag——角色特征全部放 characters 参数：有服装档案的传角色名自动套档案，无档案的传对象条目写 appear/costume/action）；**prompt 必须用英文 Danbooru tag 或英文画面描述（NovelAI 不认中文 tag，写中文会出无效图）**；characters 传在场角色（字符串=角色名自动套服装档案；对象={name?,type?,appear?,costume?,action?,uc?,center?}——**每个在场角色都进 characters，无档案/无名配角写 type+appear+costume+action 照样独立分栏，角色特征不要混进 prompt**，生成后编辑 TAG 可按角色分栏修改）；negativePrompt 传整图负面；aspect 选 portrait/landscape/square；provider/preset/styleId/params 可选覆盖。**anchor 必填**：图片默认嵌入最近一条剧情消息正文，必须给 anchor（**本次配图仅针对用户指定的单楼层**——缺省 = 最近一条剧情回复；从**该楼层正文**逐字摘录 8-15 字短原文片段，图片挂在该片段所在段落而不是消息末尾；正文内容用 story_read 读取后再摘录）；仅用户明确不要进正文时传 embed:false（此时 anchor 可不填）。生成结果默认缓存态（保留约 3 天），需长期保存请提示用户在绘图面板保存。**生图前先 read `.liyuan-skills/moment-capture.md` 盘点视觉时刻（七类时刻 + 密度分档 + 分级证据，产出时刻清单），再按 skill novelai-draw 写图**。tag 写法与构图规范见 skill novelai-draw。",
 			parameters: Type.Object({
 				prompt: Type.String({ description: "画面描述/场景构图（**必须英文 Danbooru tag 或英文描述，NAI 不认中文 tag**；不含角色特征 tag）" }),
 				negativePrompt: Type.Optional(Type.String({ description: "整图负面 tag（英文）" })),
 				characters: Type.Optional(
 					Type.Array(
-						Type.String({ description: "在场角色名列表（自动套用服装档案外观+当前穿着 tag 组装角色特征；不传则 prompt 需含完整 tag，无角色分栏）" }),
+						Type.Union([
+							Type.String({ description: "在场角色名（自动套服装档案外观+当前穿着 tag 组装角色特征；档案无此名时无特征可用，会报错提示）" }),
+							Type.Object({
+								name: Type.Optional(Type.String({ description: "角色名（有服装档案时填，自动套档案；无名配角可省略）" })),
+								type: Type.Optional(Type.String({ description: "身份（仅无档案/无名角色）：girl / boy / woman / man / other" })),
+								appear: Type.Optional(Type.String({ description: "外貌 tag（仅无档案角色；英文 Danbooru tag，如 black hair, purple eyes）" })),
+								costume: Type.Optional(Type.String({ description: "服装 tag（无档案角色必填；英文 Danbooru tag）" })),
+								action: Type.Optional(Type.String({ description: "动作/姿态/表情 tag（英文；有档案角色也追加到档案 tag 之后）" })),
+								interact: Type.Optional(Type.String({ description: "互动标签（仅多角色关键互动）：source#动作 / target#动作 / mutual#动作" })),
+								uc: Type.Optional(Type.String({ description: "角色级排除 tag（英文）" })),
+								center: Type.Optional(Type.String({ description: "画面位置 A1~E5 网格坐标（默认 C3=画面中心；仅偏离中心时填）" })),
+							}),
+						]),
 					),
 				),
 				anchor: Type.String({ description: "挂接位置（**必填**）：从最近剧情消息正文**逐字摘录** 8-15 字短原文片段（图片将挂接在该片段所在段落，而非消息末尾；正文先用 story_read 读取再摘录；仅用户明确 embed:false 不进正文时可不填）" }),
@@ -854,25 +876,62 @@ function createStagehandTools(
 					// 角色分栏：characters 经服装档案解析**一次**，生图与 slot 分栏（编辑 TAG）共用同一份——
 					// 修复 draw_generate 不带角色特征生图（修复前 characters 只进 embedStoryImage 元数据，
 					// generateImage 收到 characterPrompts: [] → 图上没有角色特征，手动重新生成走面板 redraw 才正常）
+					// 8/15：条目支持对象（name/type/appear/costume/action/uc/center）——无档案/无名角色
+					// 也照常进分栏（对齐 LWBox：LLM 完整条目组装），center 网格坐标接入 gridToCenter
 					let characterPrompts: CharacterPrompt[] = [];
 					let slotCharacters: Array<{ name: string; prompt: string; uc?: string }> = [];
 					if (params.characters && params.characters.length > 0) {
 						const cardPath = currentCard().path;
 						if (cardPath) {
 							try {
-								const r = resolveCharacterTags(cwd, cardPath, params.characters, bridge.worldState());
-								const kept = r.characters.filter((c) => c.tags.trim() || c.referenceImage);
-								characterPrompts = kept.map((c) => ({
-									prompt: c.tags.trim(),
-									uc: c.uc,
-									center: { x: 0.5, y: 0.5 },
-									...(c.referenceImage ? { referenceImage: c.referenceImage } : {}),
-								}));
-								slotCharacters = kept.map((c) => ({
-									name: c.name,
-									prompt: c.tags.trim(),
-									...(c.uc ? { uc: c.uc } : {}),
-								}));
+								const entries: Array<{
+									name?: string;
+									type?: string;
+									appear?: string;
+									costume?: string;
+									action?: string;
+									interact?: string;
+									uc?: string;
+									center?: string;
+								}> = params.characters.map((c) => (typeof c === "string" ? { name: c } : { ...c }));
+								const named = entries.filter((e) => e.name && e.name.trim());
+								const r =
+									named.length > 0
+										? resolveCharacterTags(cwd, cardPath, named.map((e) => e.name!), bridge.worldState())
+										: { characters: [], unknown: [] };
+								const byName = new Map(r.characters.map((c) => [c.name, c]));
+								for (const e of entries) {
+									const nm = (e.name ?? "").trim();
+									const arch = nm ? byName.get(nm) : undefined;
+									const ctr = (e.center ?? "").trim();
+									const center = /^[A-Ea-e][1-5]$/.test(ctr) ? gridToCenter(ctr) : { x: 0.5, y: 0.5 };
+								if (arch) {
+									const prompt = [arch.tags, e.action ?? "", e.interact ?? ""].filter(Boolean).join(", ").trim();
+									const uc = arch.uc || e.uc || "";
+									if (!prompt && !arch.referenceImage) continue;
+									characterPrompts.push({
+										prompt,
+										uc,
+										center,
+										...(arch.referenceImage ? { referenceImage: arch.referenceImage } : {}),
+									});
+									slotCharacters.push({ name: nm, prompt, ...(uc ? { uc } : {}) });
+								} else {
+									// 无档案/无名：LLM 条目直接组装，不再静默丢弃
+									const u = assembleUnknownCharacter({
+										name: nm || undefined,
+										type: e.type,
+										appear: e.appear,
+										costume: e.costume,
+										action: e.action,
+										interact: e.interact,
+										uc: e.uc,
+									});
+										if (!u.tags.trim()) continue;
+										characterPrompts.push({ prompt: u.tags, uc: u.uc, center });
+										slotCharacters.push({ name: u.name, prompt: u.tags, ...(u.uc ? { uc: u.uc } : {}) });
+									}
+								}
 							} catch {
 								// 解析失败：不带角色分栏生图（embedStoryImage 侧仍按 characters 自行解析兜底）
 							}
@@ -1834,6 +1893,10 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 		const { session: s } = await createAgentSession({
 			cwd,
 			agentDir,
+			// 与主会话共享同一 modelRegistry/authStorage（2026-08-15）：避免创建时快照
+			// 与磁盘配置脱节——主会话配置热重载刷新后 agent 立即一致（sdk.ts 已支持传入）
+			...(opts.modelRegistry ? { modelRegistry: opts.modelRegistry } : {}),
+			...(opts.authStorage ? { authStorage: opts.authStorage } : {}),
 			customTools: createStagehandTools(cwd, bridge, toolHooks, toolsAllow),
 			// backendControl 关 = 分发模式：助手也不给本机工具（read/bash/edit/write），只留领域工具
 			...(config.backendControl === false ? { noTools: "builtin" as const } : {}),

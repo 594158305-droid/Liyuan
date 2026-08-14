@@ -44,9 +44,14 @@ function buildOutputFormatSpec(aspects: DrawAspects): string {
     aspect: landscape                  # portrait(${portrait.width}x${portrait.height}) | landscape(${landscape.width}x${landscape.height}) | square(${square.width}x${square.height})
     scene: "1girl, tavern interior, warm candlelight, ..."   # 完整画面描述（Danbooru tag 或自然语言，70-100 个 tag/词）
     negative: ""                       # 选填：整图补充负面
-    characters:                        # 选填：需要角色特征时
-      - name: "角色名"
+    characters:                        # 选填：需要角色特征时（每个在场角色一条）
+      - name: "角色名"                 # 有服装档案的角色填档案名（自动套外观+服装）；无名配角可省略
+        type: "boy"                    # 仅无档案/无名角色：girl / boy / woman / man / other
+        appear: "black hair, purple eyes"      # 仅无档案角色：外貌 tag（英文 Danbooru tag）
+        costume: "cafe uniform, white apron"   # 仅无档案角色：服装 tag（英文）
         action: "pushing open the door, surprised"
+        uc: "hat"                      # 选填：角色级排除 tag
+        center: "A1"                   # 选填：画面位置 A1~E5 网格坐标（默认 C3 画面中心）
 </image_gen>
 \`\`\`
 
@@ -56,9 +61,10 @@ function buildOutputFormatSpec(aspects: DrawAspects): string {
   子串/模糊匹配四重保底找回
 - **scene 必须用英文 Danbooru tag 或英文画面描述，禁止中文（NovelAI 不认中文 tag，写中文会出无效图）**
 - 多张图时按正文出现顺序给 index: 1,2,3…，各图 anchor 对应正文不同位置（段落对应）
-- scene 里的角色 tag 不要重复写（角色特征由系统从服装档案自动组装）——scene 只写场景、动作、氛围
+- **每个在场角色都进 characters**（有档案传名字自动套；无档案/无名配角写 type+appear+costume+action
+  照样有独立人物分栏）——scene 只写计数/关系/视角/背景，**角色特征不要混进 scene**
 - 分级：sfw 内容直接写；轻度擦边用 0.5::nsfw:: 前缀；重度 nsfw 在 scene 里显式写 nsfw 标签（NAI 会拒绝越界内容）
-- 5×5 网格说明（每图可选，默认中心）：画面重心默认居中，多角色时注意构图平衡
+- 5×5 网格说明（每图可选，默认中心）：画面重心默认居中，多角色时注意构图平衡，偏离中心的角色用 center 坐标标注
 - 每张图的画面描述 tag 配额 70-100 个（danbooru 下划线格式或英文自然语言，宁多勿少）`;
 }
 

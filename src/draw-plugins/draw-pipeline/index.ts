@@ -145,20 +145,30 @@ export function defaultPipelineDeps(cwd: string): PipelineDeps {
 			if (!plannerCaller) throw new Error("规划 LLM 未注入（registerPlannerCaller 未调用）");
 			return plannerCaller(prompt, llm);
 		},
-		generate: async (opts) => {
-			// 二期自定义标签组：全局选中组（selectedGroupId 语义）的 tags 追加到 scene；
-			// 未选全局组时回退全部 enabled 全局组（getGlobalSelectedGroupTags 兜底）
-			let prompt = opts.prompt;
-			const extra = getGlobalSelectedGroupTags(cwd);
-			if (extra) prompt = `${prompt}, ${extra}`;
-			const r = await generateImage(cwd, {
-				prompt,
-				negativePrompt: opts.negativePrompt,
-				aspect: opts.aspect,
-				providerId: opts.providerId,
-			});
-			return { src: r.src, slotId: r.slotId };
-		},
+			generate: async (opts) => {
+				// 二期自定义标签组：全局选中组（selectedGroupId 语义）的 tags 追加到 scene；
+				// 未选全局组时回退全部 enabled 全局组（getGlobalSelectedGroupTags 兜底）
+				let prompt = opts.prompt;
+				const extra = getGlobalSelectedGroupTags(cwd);
+				if (extra) prompt = `${prompt}, ${extra}`;
+				const r = await generateImage(cwd, {
+					prompt,
+					negativePrompt: opts.negativePrompt,
+					aspect: opts.aspect,
+					providerId: opts.providerId,
+					// 角色分栏出图（V4 char_captions + centers）
+					...(opts.characterPrompts && opts.characterPrompts.length > 0
+						? {
+								characterPrompts: opts.characterPrompts.map((cp) => ({
+									prompt: cp.prompt,
+									...(cp.uc ? { uc: cp.uc } : {}),
+									center: cp.center ?? { x: 0.5, y: 0.5 },
+								})),
+							}
+						: {}),
+				});
+				return { src: r.src, slotId: r.slotId };
+			},
 		resolveChars: (names) => {
 			const card = (loadConfig(cwd).card ?? "").trim();
 			if (!card) return names.map(() => ({ tags: "" }));
