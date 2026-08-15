@@ -462,7 +462,9 @@ export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "e
 	const [jsonOverride, setJsonOverride] = useState<string | null>(null);
 
 	const current = modelsData.data?.current ?? null;
-	const allModels = modelsData.data?.models ?? [];
+	// 模型配置归一（2026-08-15）：与旁路 / 助手共用 allModels（全量渠道 + ready 标记）——
+	// 配置声明了但未配 key 的渠道模型也显示（置灰不可选），三处选择器看到同一份列表
+	const allModels = modelsData.data?.allModels ?? modelsData.data?.models ?? [];
 	const activeConfig: LiyuanAgentConfig = agentCfg.data?.config ?? { version: 1, providers: {} };
 	const profiles = profilesData.data?.profiles ?? [];
 
@@ -1150,6 +1152,7 @@ export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "e
 								{activeProviders.flatMap((pk) =>
 									modelsOfActive(pk).map((m) => {
 										const on = current.provider === m.provider && current.id === m.id;
+										const ready = m.ready !== false;
 										const think = modelThinkingOf(activeConfig, m.provider, m.id);
 										const ctx = modelContextOf(activeConfig, m.provider, m.id) ?? m.contextWindow;
 										const maxOut = modelMaxTokensOf(activeConfig, m.provider, m.id);
@@ -1158,15 +1161,22 @@ export function ConnectPanel({ toast }: { toast: (level: "info" | "warning" | "e
 												<button
 													type="button"
 													className={`conn-pick-model ${on ? "on" : ""}`}
-													disabled={busy || on}
+													disabled={busy || on || !ready}
 													onClick={() => void selectModel(m)}
+													title={!ready ? "该渠道未配置 API key——在下方配置仓库/生成器里填 key 后可用" : undefined}
 												>
 													<span className="conn-pick-name">{m.name}</span>
 													<span className="conn-pick-meta">
 														{on && <span className="chip chip-cap">使用中</span>}
-														{think ? <span className="chip chip-cap">{think}</span> : null}
-														{ctx > 0 ? <span className="chip chip-cap">{fmtCtx(ctx)}</span> : null}
-														{maxOut ? <span className="chip chip-cap">出{fmtCtx(maxOut)}</span> : null}
+														{!ready ? (
+															<span className="chip chip-cap">未配 key</span>
+														) : (
+															<>
+																{think ? <span className="chip chip-cap">{think}</span> : null}
+																{ctx > 0 ? <span className="chip chip-cap">{fmtCtx(ctx)}</span> : null}
+																{maxOut ? <span className="chip chip-cap">出{fmtCtx(maxOut)}</span> : null}
+															</>
+														)}
 													</span>
 												</button>
 											</li>

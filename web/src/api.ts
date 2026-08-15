@@ -215,11 +215,16 @@ export interface ModelInfo {
 	vision: boolean;
 	contextWindow: number;
 	maxTokens?: number;
+	/** 该模型所属 provider 是否已配 key（false = 看得见但用不了；仅 allModels 里有区分） */
+	ready?: boolean;
 }
 
 export interface ModelsResponse {
 	current: CurrentModelInfo | null;
+	/** 已认证模型（可直选） */
 	models: ModelInfo[];
+	/** 全量模型（含未配 key 的 provider，ready=false 置灰展示） */
+	allModels?: ModelInfo[];
 }
 
 export interface AuthProviderInfo {

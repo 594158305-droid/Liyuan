@@ -11,7 +11,6 @@ import {
 	apiPut,
 	downloadTraceFile,
 	getTraceFiles,
-	type ModelsResponse,
 	type RpConfigView,
 	type TraceFileInfo,
 } from "../api.ts";
@@ -19,6 +18,7 @@ import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
 import { readSoundSettings, saveSoundSettings, type SoundSettings } from "../sounds.ts";
 import { readImageAsCompressedDataUrl } from "../bg-theme.ts";
 import { Field, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { ModelSelect } from "./ModelSelect.tsx";
 import { IconChevronDown } from "./icons.tsx";
 import {
 	applyUiCustom,
@@ -999,8 +999,6 @@ const fmtSize = (n: number): string =>
 
 export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
-	// 旁挂模型下拉的数据源（与连接面板同款：/api/models）
-	const modelsData = usePanelData(() => apiGet<ModelsResponse>("/api/models"), { cacheKey: "/api/models" });
 	const { busy, run } = useAction(toast);
 
 	const [scanDepth, setScanDepth] = useState(4);
@@ -1072,22 +1070,25 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 			return next;
 		});
 
-	const save = () =>
-		run(async () => {
-			// 只改本面板可见项；不碰 lorebook / importStripTags（由别处或默认处理）
-			const sm = sideModelKey.split("/");
-			await apiPut("/api/config", {
-				greeting: true,
-				scanDepth,
-				maxLoreInjections: maxLore,
-				compactEveryNTurns: compactEvery,
-				backendControl,
-				creationMode: askMode ? "ask" : "silent",
-				sideModel: sm.length === 2 && sm[0] && sm[1] ? { provider: sm[0], id: sm[1] } : null,
-				sideJailbreak: sideJailbreak.trim(),
-				developerMode,
-				chatTrace,
-			});
+		const save = () =>
+			run(async () => {
+				// 只改本面板可见项；不碰 lorebook / importStripTags（由别处或默认处理）
+				// "provider/id"——id 本身可能含 "/"（如 openrouter 的 google/gemini-3.7-flash）：
+				// 第一段是 provider，其余全部拼回 id（2026-08-15 修，与 ModelSelect 同口径）
+				const [sm0, ...smRest] = sideModelKey.split("/");
+				const smId = smRest.join("/");
+				await apiPut("/api/config", {
+					greeting: true,
+					scanDepth,
+					maxLoreInjections: maxLore,
+					compactEveryNTurns: compactEvery,
+					backendControl,
+					creationMode: askMode ? "ask" : "silent",
+					sideModel: sm0 && smId ? { provider: sm0, id: smId } : null,
+					sideJailbreak: sideJailbreak.trim(),
+					developerMode,
+					chatTrace,
+				});
 			reload();
 		}, "已保存并重载会话");
 
@@ -1211,30 +1212,29 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 						</div>
 					</CollapsibleSection>
 
-					<CollapsibleSection title="旁挂模型" storageKey="liyuan.settings.open.sideModel" defaultOpen>
-						<div className="field-row">
-							<span className="field-label">旁路模型</span>
-							<select
-								className="field-input"
-								value={sideModelKey}
-								disabled={busy}
-								onChange={(e) => {
-									setSideModelKey(e.target.value);
-									touch();
-								}}
-								style={{ maxWidth: "100%" }}
-							>
-								<option value="">跟随剧情模型</option>
-								{(modelsData.data?.models ?? []).map((m) => (
-									<option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
-										{m.providerName} / {m.name}
-									</option>
-								))}
-							</select>
-						</div>
-						<div className="field-hint">
-							表格回填 / 导入建账与摘要 / 场记 / 生图规划等旁路调用统一使用的独立模型；空 = 跟随剧情模型。改动保存后立即生效。
-						</div>
+						<CollapsibleSection title="旁挂模型" storageKey="liyuan.settings.open.sideModel" defaultOpen>
+							<div className="field-row">
+								<span className="field-label">旁路模型</span>
+								<ModelSelect
+									className="field-input"
+									value={sideModelKey}
+									emptyLabel="跟随剧情模型"
+									disabled={busy}
+									onChange={(sel) => {
+										setSideModelKey(sel ? `${sel.provider}/${sel.id}` : "");
+										touch();
+									}}
+									title="旁路模型（与主聊天共用同一模型列表）"
+									ariaLabel="旁路模型"
+									style={{ maxWidth: "100%" }}
+								/>
+							</div>
+							<div className="field-hint">
+								表格回填 / 导入建账与摘要 / 场记 / 语义评审 / 生图规划等旁路调用统一使用的独立模型；空 = 跟随剧情模型。改动保存后立即生效。
+							</div>
+							<div className="field-hint">
+								模型列表与主聊天 / 助手共用一份（模型配置归一）——「未配 key」= 该渠道还没填 API key，在连接面板的渠道生成器里配置后即可选。旁路模型不必与主模型同一渠道。
+							</div>
 						<div style={{ marginTop: 8 }}>
 							<span className="field-label">破甲提示词（可选）</span>
 							<textarea

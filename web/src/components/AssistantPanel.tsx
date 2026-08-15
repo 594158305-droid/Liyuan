@@ -8,9 +8,9 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { apiGet, type ModelsResponse } from "../api.ts";
 import type { AssistantModelInfo, AssistantMsg, AssistantSessionInfo, WireActivity } from "../wire.ts";
 import { LiveSteps, RichContent, ThinkingBlock, ZoomImg } from "./Messages.tsx";
+import { ModelSelect } from "./ModelSelect.tsx";
 import { IconPlus, IconSend, IconStop, IconTrash } from "./icons.tsx";
 
 /** 助手交付的媒体（show_media）：图片走 lightbox，音视频走原生播放器 */
@@ -180,23 +180,9 @@ export function AssistantPanel({
 	onOpenManager,
 }: AssistantPanelProps) {
 	const [input, setInput] = useState("");
-	const [models, setModels] = useState<ModelsResponse | null>(null);
 	const [histOpen, setHistOpen] = useState(false);
 	const listRef = useRef<HTMLDivElement>(null);
 	const stickRef = useRef(true);
-
-	// 模型清单：打开面板拉一次（选择器数据；失败静默，选择器只剩「跟随」）
-	useEffect(() => {
-		let alive = true;
-		apiGet<ModelsResponse>("/api/models")
-			.then((r) => {
-				if (alive) setModels(r);
-			})
-			.catch(() => {});
-		return () => {
-			alive = false;
-		};
-	}, []);
 
 	// 打开面板时拉一次助手历史（按当前卡）
 	useEffect(() => {
@@ -224,16 +210,6 @@ export function AssistantPanel({
 		stickRef.current = true;
 		onSend(t);
 	};
-
-	const groups = useMemo(() => {
-		const map = new Map<string, Array<{ value: string; label: string }>>();
-		for (const m of models?.models ?? []) {
-			const arr = map.get(m.providerName) ?? [];
-			arr.push({ value: `${m.provider} ${m.id}`, label: m.name || m.id });
-			map.set(m.providerName, arr);
-		}
-		return [...map.entries()];
-	}, [models]);
 
 	const histCount = sessions?.length ?? 0;
 	const currentAgentName = useMemo(
@@ -270,31 +246,13 @@ export function AssistantPanel({
 					管理
 				</button>
 				<label className="asst-model">
-					<select
-						value={follow ? "" : model ? `${model.provider} ${model.id}` : ""}
-						onChange={(e) => {
-							const v = e.target.value;
-							if (!v) {
-								onPickModel(null);
-								return;
-							}
-							const [provider, id] = v.split(" ");
-							if (provider && id) onPickModel({ provider, id });
-						}}
-						title="助手使用的模型（独立于剧情模型）"
-						aria-label="助手模型"
-					>
-						<option value="">跟随对话模型{follow && model ? `（${model.name}）` : ""}</option>
-						{groups.map(([providerName, items]) => (
-							<optgroup key={providerName} label={providerName}>
-								{items.map((it) => (
-									<option key={it.value} value={it.value}>
-										{it.label}
-									</option>
-								))}
-							</optgroup>
-						))}
-					</select>
+					<ModelSelect
+						value={follow ? "" : model ? `${model.provider}/${model.id}` : ""}
+						emptyLabel={`跟随对话模型${follow && model ? `（${model.name}）` : ""}`}
+						onChange={onPickModel}
+						title="助手使用的模型（与主聊天共用同一模型列表）"
+						ariaLabel="助手模型"
+					/>
 				</label>
 				<button
 					type="button"
