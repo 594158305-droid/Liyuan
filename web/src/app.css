@@ -46,6 +46,7 @@
 	--shadow-msg-char: 0 1px 2px rgb(188 65 35 / 4%), 0 6px 20px rgb(33 30 27 / 5%);
 
 	--chat-w: 900px;
+	--chat-img-scale: 1;
 	--font:
 		-apple-system, BlinkMacSystemFont, "PingFang SC", "MiSans", "HarmonyOS Sans SC", "Microsoft YaHei",
 		"Noto Sans SC", "Segoe UI", sans-serif;
@@ -1614,7 +1615,7 @@ html[data-theme="dark"] .msg-md-code {
 	border: 1px solid var(--hairline);
 	border-radius: var(--radius);
 	box-shadow: var(--shadow-1);
-	max-width: 480px;
+	max-width: calc(480px * var(--chat-img-scale, 1));
 }
 .msg-image img {
 	display: block;
@@ -1637,7 +1638,7 @@ html[data-theme="dark"] .msg-md-code {
 }
 .msg-attach-img {
 	display: block;
-	max-width: 260px;
+	max-width: calc(260px * var(--chat-img-scale, 1));
 	border: 1px solid var(--hairline);
 	border-radius: var(--radius);
 	overflow: hidden;
@@ -1647,7 +1648,7 @@ html[data-theme="dark"] .msg-md-code {
 .msg-attach-img img {
 	display: block;
 	width: 100%;
-	max-height: 320px;
+	max-height: calc(320px * var(--chat-img-scale, 1));
 	object-fit: cover;
 }
 .file-chip {
@@ -1798,7 +1799,7 @@ html[data-theme="dark"] .msg-md-code {
 	vertical-align: middle;
 }
 .draw-slot-wrap img.zoomable {
-	max-width: min(420px, 100%);
+	max-width: min(calc(420px * var(--chat-img-scale, 1)), 100%);
 	/* 版本切换后不同比例图片按自然比例显示（曾固定 max-height:320px 导致 portrait/异比例版本被压缩变形） */
 	max-height: none;
 	border-radius: var(--radius);
@@ -9144,6 +9145,32 @@ label.drawer-btn {
 	border-radius: var(--radius-s);
 	margin: 0 4px 10px;
 }
+/* 保存与删除并排，save-btn 默认 width:100% 会把删除按钮挤出编辑区 */
+.ct-char-edit .save-btn {
+	width: auto;
+}
+.ct-outfit-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.ct-outfit-card {
+	border: 1px solid var(--hairline-strong);
+	border-radius: var(--radius-s);
+	background: var(--surface);
+	padding: 8px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.ct-outfit-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.ct-outfit-head .ct-char-name {
+	flex: 1;
+}
 .ct-learn-row {
 	display: flex;
 	align-items: center;
@@ -9236,7 +9263,7 @@ label.drawer-btn {
 .draw-slot-inner img.zoomable {
 	display: block;
 	width: auto;
-	max-width: 520px;
+	max-width: calc(520px * var(--chat-img-scale, 1));
 	border-radius: var(--radius);
 }
 @media (max-width: 560px) {
@@ -10259,7 +10286,7 @@ label.drawer-btn {
 	border: 1px solid var(--hairline);
 	border-radius: var(--radius);
 	box-shadow: var(--shadow-1);
-	max-width: 480px;
+	max-width: calc(480px * var(--chat-img-scale, 1));
 }
 .msg-image img {
 	display: block;
@@ -10282,7 +10309,7 @@ label.drawer-btn {
 }
 .msg-attach-img {
 	display: block;
-	max-width: 260px;
+	max-width: calc(260px * var(--chat-img-scale, 1));
 	border: 1px solid var(--hairline);
 	border-radius: var(--radius);
 	overflow: hidden;
@@ -10292,7 +10319,7 @@ label.drawer-btn {
 .msg-attach-img img {
 	display: block;
 	width: 100%;
-	max-height: 320px;
+	max-height: calc(320px * var(--chat-img-scale, 1));
 	object-fit: cover;
 }
 .file-chip {

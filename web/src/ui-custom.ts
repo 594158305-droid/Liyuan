@@ -1,8 +1,9 @@
 /**
- * 自定义 UI（页面宽度 + 字体比例 + 默认收起用户消息 + 玻璃透明度 + 背景图 + 自动配色）：
+ * 自定义 UI（页面宽度 + 字体比例 + 默认收起用户消息 + 玻璃透明度 + 背景图 + 自动配色 + 聊天图片比例）：
  * localStorage 持久化，行内 CSS 变量即时生效。字体比例用 html zoom 整体缩放（全站 px
  * 硬编码，逐处变量化不现实）；zoom 与宽度乘算，宽度反算 --chat-w = 设定px / zoom 保持
  * 视觉宽度准确。玻璃/背景图的 CSS 应用与异步取样配色见 bg-theme.ts。
+ * 聊天图片比例用 --chat-img-scale 乘到各图片容器的固定 px 上限上（100 = 原样）。
  */
 
 import { applyBgTheme } from "./bg-theme";
@@ -20,6 +21,8 @@ export type UiCustom = {
 	bgImage: string;
 	/** 按背景图主色取样适配界面颜色 */
 	bgAutoTheme: boolean;
+	/** 聊天图片显示比例（百分比整数，100 = 原样，最高 150） */
+	imageScale: number;
 };
 
 const KEY = "liyuan.ui.custom";
@@ -31,6 +34,7 @@ export const UI_DEFAULTS: UiCustom = {
 	glass: 0,
 	bgImage: "",
 	bgAutoTheme: false,
+	imageScale: 100,
 };
 
 export const UI_CHAT_W_MIN = 640;
@@ -42,6 +46,9 @@ export const UI_FONT_STEP = 5;
 export const UI_GLASS_MIN = 0;
 export const UI_GLASS_MAX = 100;
 export const UI_GLASS_STEP = 5;
+export const UI_IMAGE_SCALE_MIN = 50;
+export const UI_IMAGE_SCALE_MAX = 150;
+export const UI_IMAGE_SCALE_STEP = 5;
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
@@ -61,8 +68,12 @@ export function getUiCustom(): UiCustom {
 						typeof raw.glass === "number" && Number.isFinite(raw.glass)
 							? clamp(Math.round(raw.glass), UI_GLASS_MIN, UI_GLASS_MAX)
 							: UI_DEFAULTS.glass,
-					bgImage: typeof raw.bgImage === "string" ? raw.bgImage : "",
-					bgAutoTheme: raw.bgAutoTheme === true,
+				bgImage: typeof raw.bgImage === "string" ? raw.bgImage : "",
+				bgAutoTheme: raw.bgAutoTheme === true,
+				imageScale:
+						typeof raw.imageScale === "number" && Number.isFinite(raw.imageScale)
+							? clamp(Math.round(raw.imageScale), UI_IMAGE_SCALE_MIN, UI_IMAGE_SCALE_MAX)
+							: UI_DEFAULTS.imageScale,
 				};
 			}
 		}
@@ -78,6 +89,8 @@ export function applyUiCustom(ui: UiCustom): void {
 	// zoom 与宽度乘算：视觉宽度 = --chat-w × zoom，反算保证设定值即视觉值
 	html.style.setProperty("--chat-w", zoom === 1 ? `${ui.chatW}px` : `calc(${ui.chatW}px / ${zoom})`);
 	html.style.zoom = String(zoom);
+	// 聊天图片比例：CSS 里各图片上限 px 乘这个因子（100 = 原样）
+	html.style.setProperty("--chat-img-scale", String(ui.imageScale / 100));
 	// 主聊天玻璃：0 时移除变量（.list/.composer fallback 0% 全透明；状态条 fallback 100%
 	// 保持实色卡现状），>0 时设置百分比与 blur px（CSS calc 不支持「百分比×长度」乘法，
 	// blur 值在 JS 里算好）

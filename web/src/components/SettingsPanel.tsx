@@ -33,6 +33,9 @@ import {
 	UI_GLASS_MAX,
 	UI_GLASS_MIN,
 	UI_GLASS_STEP,
+	UI_IMAGE_SCALE_MAX,
+	UI_IMAGE_SCALE_MIN,
+	UI_IMAGE_SCALE_STEP,
 	type UiCustom,
 } from "../ui-custom.ts";
 
@@ -698,6 +701,7 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 	const [bgImage, setBgImage] = useState(() => getUiCustom().bgImage);
 	const [bgAutoTheme, setBgAutoTheme] = useState(() => getUiCustom().bgAutoTheme);
 	const [collapseUser, setCollapseUser] = useState(() => getUiCustom().collapseUser);
+	const [imageScale, setImageScale] = useState(() => getUiCustom().imageScale);
 	// 背景图 URL 输入框值：dataURL（本地文件压缩产物）太长不显示，留空
 	const [bgUrl, setBgUrl] = useState(() => {
 		const b = getUiCustom().bgImage;
@@ -714,6 +718,7 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 		setBgImage(ui.bgImage);
 		setBgAutoTheme(ui.bgAutoTheme);
 		setCollapseUser(ui.collapseUser);
+		setImageScale(ui.imageScale);
 		// 聊天页监听后重读默认收起状态，即时生效
 		window.dispatchEvent(new Event(UI_CUSTOM_SETTINGS_EVENT));
 	};
@@ -747,7 +752,8 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 		glass === UI_DEFAULTS.glass &&
 		bgImage === UI_DEFAULTS.bgImage &&
 		bgAutoTheme === UI_DEFAULTS.bgAutoTheme &&
-		collapseUser === UI_DEFAULTS.collapseUser;
+		collapseUser === UI_DEFAULTS.collapseUser &&
+		imageScale === UI_DEFAULTS.imageScale;
 	return (
 		<>
 			<div className="field-hint">
@@ -771,6 +777,15 @@ function UiCustomSection({ toast }: { toast: (level: "info" | "warning" | "error
 					max={UI_FONT_MAX}
 					step={UI_FONT_STEP}
 					onChange={(v) => apply({ fontScale: v })}
+				/>
+				<SliderField
+					label="聊天图片比例"
+					hint={`聊天内图片显示缩放（${UI_IMAGE_SCALE_MIN}%–${UI_IMAGE_SCALE_MAX}%，默认 ${UI_DEFAULTS.imageScale}%）：生图占位图 / 插图 / 附件图一起变`}
+					value={imageScale}
+					min={UI_IMAGE_SCALE_MIN}
+					max={UI_IMAGE_SCALE_MAX}
+					step={UI_IMAGE_SCALE_STEP}
+					onChange={(v) => apply({ imageScale: v })}
 				/>
 			</div>
 			<SliderField

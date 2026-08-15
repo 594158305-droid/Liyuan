@@ -5,7 +5,7 @@
  *         /api/draw/tags/online-status 与 /online-update（在线标签缓存）。
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api.ts";
 import { ConfirmButton, Field, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { IconDownload, IconPlus, IconRefresh, IconTrash, IconUploads } from "./icons.tsx";
@@ -16,6 +16,8 @@ interface WardrobeOutfit {
 	id: string;
 	name: string;
 	tags: string;
+	referenceImage?: string;
+	notes?: string;
 }
 interface WardrobeCharacter {
 	name: string;
@@ -54,6 +56,8 @@ interface OnlineStatus {
 
 const TYPE_OPTIONS = ["", "girl", "boy", "man", "woman"];
 
+const newId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
 /** 行内状态徽标：外貌已设置 / 未设置 */
 function AppearanceBadge({ c }: { c: WardrobeCharacter }) {
 	return c.appearanceTags.trim() ? (
@@ -77,8 +81,21 @@ export function CharacterTagsSection({ toast }: { toast: ToastFn }) {
 	const [expanded, setExpanded] = useState<string | null>(null);
 	const [addName, setAddName] = useState("");
 	const [drafts, setDrafts] = useState<Record<string, Partial<WardrobeCharacter>>>({});
+	const [outfitDrafts, setOutfitDrafts] = useState<Record<string, { name: string; tags: string }>>({});
 
 	const chars = wardrobe.data?.wardrobe?.characters ?? [];
+
+	// 服装草稿：首次见到服装时用档案当前值初始化（用户输入才覆盖）
+	useEffect(() => {
+		const wb = wardrobe.data?.wardrobe;
+		if (!wb) return;
+		setOutfitDrafts((m) => {
+			const next = { ...m };
+			for (const c of wb.characters)
+				for (const o of c.outfits) if (next[o.id] === undefined) next[o.id] = { name: o.name, tags: o.tags };
+			return next;
+		});
+	}, [wardrobe.data]);
 
 	// ---- 概览统计 ----
 	const stats = useMemo(() => {
@@ -145,6 +162,31 @@ export function CharacterTagsSection({ toast }: { toast: ToastFn }) {
 	};
 
 	const deleteChar = (name: string) => persist(chars.filter((c) => c.name !== name), `已删除「${name}」`);
+
+	// ---- 服装编辑（在角色标签内维护每套服装的 name/tags） ----
+	const patchOutfitDraft = (o: WardrobeOutfit, patch: Partial<{ name: string; tags: string }>) =>
+		setOutfitDrafts((m) => ({ ...m, [o.id]: { name: m[o.id]?.name ?? o.name, tags: m[o.id]?.tags ?? o.tags, ...patch } }));
+
+	const saveOutfit = (c: WardrobeCharacter, o: WardrobeOutfit) => {
+		const draft = outfitDrafts[o.id] ?? { name: o.name, tags: o.tags };
+		persist(
+			chars.map((x) =>
+				x.name === c.name
+					? { ...x, outfits: x.outfits.map((y) => (y.id === o.id ? { ...y, name: draft.name, tags: draft.tags } : y)) }
+					: x,
+			),
+			`已保存服装「${draft.name}」`,
+		);
+	};
+
+	const addOutfit = (c: WardrobeCharacter) =>
+		persist(
+			chars.map((x) => (x.name === c.name ? { ...x, outfits: [...x.outfits, { id: newId(), name: "新服装", tags: "" }] } : x)),
+			"已添加服装",
+		);
+
+	const deleteOutfit = (c: WardrobeCharacter, oid: string) =>
+		persist(chars.map((x) => (x.name === c.name ? { ...x, outfits: x.outfits.filter((y) => y.id !== oid) } : x)), "服装已删除");
 
 	const clearAll = () => persist([], "已清除全部角色");
 
@@ -363,6 +405,54 @@ export function CharacterTagsSection({ toast }: { toast: ToastFn }) {
 											<div className="draw-toggle-row">
 												<span>隐藏（生图时忽略）</span>
 												<Toggle checked={!!d.hidden} onChange={(hidden) => patchChar(c.name, { hidden })} />
+											</div>
+											<div className="ct-outfit-list">
+												<div className="sp-section-head">
+													<div className="draw-sub-title">服装（{d.outfits.length}）</div>
+													<button type="button" className="act" disabled={busy} onClick={() => addOutfit(c)}>
+														<IconPlus size={13} /> 添加服装
+													</button>
+												</div>
+												{d.outfits.length === 0 && <div className="sp-empty">还没有服装，点「添加服装」为角色建一套。</div>}
+												{d.outfits.map((o) => {
+													const od = outfitDrafts[o.id] ?? { name: o.name, tags: o.tags };
+													return (
+														<div key={o.id} className="ct-outfit-card">
+															<div className="ct-outfit-head">
+																<span className="ct-char-name">{od.name}</span>
+																<ConfirmButton
+																	className="act"
+																	disabled={busy}
+																	confirmText="确认删除"
+																	title="删除服装"
+																	onConfirm={() => void deleteOutfit(c, o.id)}
+																>
+																	<IconTrash size={12} />
+																</ConfirmButton>
+															</div>
+															<Field label="服装名称">
+																<input
+																	className="panel-search"
+																	value={od.name}
+																	onChange={(e) => patchOutfitDraft(o, { name: e.target.value })}
+																/>
+															</Field>
+															<Field label="服装 tags（空格分隔，可带 n::tag:: 权重，生图时并入当前穿着）">
+																<textarea
+																	className="panel-search ta"
+																	rows={2}
+																	value={od.tags}
+																	onChange={(e) => patchOutfitDraft(o, { tags: e.target.value })}
+																/>
+															</Field>
+															<div className="panel-row">
+																<button type="button" className="drawer-btn" disabled={busy} onClick={() => saveOutfit(c, o)}>
+																	保存服装
+																</button>
+															</div>
+														</div>
+													);
+												})}
 											</div>
 											<div className="panel-row">
 												<button type="button" className="drawer-btn save-btn" disabled={busy} onClick={() => saveChar(c)}>
