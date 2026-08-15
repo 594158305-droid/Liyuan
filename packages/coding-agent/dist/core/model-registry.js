@@ -735,8 +735,11 @@ export class ModelRegistry {
                     baseUrl: modelDef.baseUrl ?? config.baseUrl,
                     reasoning: modelDef.reasoning,
                     thinkingLevelMap: modelDef.thinkingLevelMap,
-                    input: modelDef.input,
-                    cost: modelDef.cost,
+                    // 与 src 修复同步（registerProvider 路径默认补齐，2026-08-15）：
+                    // input/cost 缺省会触发 openai-completions.ts:1076 `model.input.includes`
+                    // 与 models.ts:389 `model.cost.input` 崩（reading 'includes'/'input'）。
+                    input: modelDef.input ?? ["text"],
+                    cost: modelDef.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                     contextWindow: modelDef.contextWindow,
                     maxTokens: modelDef.maxTokens,
                     headers: undefined,

@@ -67,9 +67,11 @@ export interface BridgePermissions {
   storyEdit: boolean;      // storyEdit（DESIGN-story-edit §3）
   queueCommand: boolean;   // queueStoryCommand（含 /back /store 等全部命令）
   applyStatePatch: boolean;// applyStatePatch
+  tableOps: boolean;       // applyTableOp/applyTemplate/applyTableBackfill（DESIGN-custom-tables §7）
   emitMedia: boolean;      // emitStoryMedia
   refreshMaterials: boolean; // refreshStoryMaterials
   mountCodex: boolean;     // mountCodex
+  embedStoryImage: boolean; // draw_generate 嵌入剧情正文（Q15）
 }
 export function createStoryBridge(base: StoryBridge, perms: BridgePermissions): StoryBridge;
 ```
@@ -122,3 +124,11 @@ export function createStoryBridge(base: StoryBridge, perms: BridgePermissions): 
 - **单 host 全局变量**（main.ts:1593）：改 Map 后所有引用点（switchToStory 调用点 1193/2633/2649、runner 1690）须同步；
 - **wire 兼容**：加字段不动帧名，旧前端不炸；新前端对旧服务端（无 agentId）按缺省处理；
 - **权限默认最小**：queueCommand/applyStatePatch/storyEdit 默认 false——用户配错最多是"委托报无权限"，不会产生越权写。
+
+## 10. 模型注册表共享（2026-08-15）
+
+所有 agent 会话（内置助手 + 自定义 agent）与主聊天**共享同一 ModelRegistry / AuthStorage 实例**：main.ts 的 `createAgentHost` 调用传 `runtime.services.modelRegistry / authStorage`，assistant.ts `build → createAgentSession` 原样透传（sdk.ts 支持传入）。
+
+背景（修复「主聊天能用、助手报缺少 API key」）：此前 agent 会话各自独立创建 ModelRegistry（创建时快照、从不刷新），运行中配置热重载（连接面板/agent-config → 重写 models.json + 主会话 `refreshModels`）后主会话立即生效、agent 仍持旧快照——`applyModelTo` 的 `hasConfiguredAuth` 判定失败。共享后刷新即全局一致。
+
+注意：`CreateAgentHostOptions.modelRegistry/authStorage` 为可选字段，缺省不传 = 各自新建（向后兼容）。

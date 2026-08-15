@@ -893,6 +893,7 @@ const CONFIG_EDITABLE = new Set([
 	"assistantModel",
 	"sideModel",
 	"sideJailbreak",
+	"storyPrefix",
 	"developerMode",
 	"chatTrace",
 	"semanticReview",

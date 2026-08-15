@@ -718,7 +718,7 @@ export class StageEngine {
 				: {}),
 		};
 
-		const systemPrompt = buildStageSystemPrompt({
+		const builtSystemPrompt = buildStageSystemPrompt({
 			card,
 			config,
 			constantLore: constantLoreOf(materials),
@@ -736,6 +736,12 @@ export class StageEngine {
 			// 与旧 director.ts 同一位置——工具清单里有 mcp__ 工具，这里说明它们是什么。
 			mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description })),
 		});
+		// 固定前缀（2026-08-15，开发者调试用）：非空时拼在剧情模型 systemPrompt **最前**
+		// （先于卡作者附加指令等一切内容）。config 每拍现读（loadStageMaterials → 读盘），
+		// 保存后下一拍生效；agent 循环各轮复用同一 systemPrompt（#agentLoop 的 o.systemPrompt），
+		// 前缀自动继承。旁路 / 助手调用不受影响（它们走 #sideText / backfillSideText 自己的提示词）。
+		const storyPrefix = config.storyPrefix?.trim();
+		const systemPrompt = storyPrefix ? `${storyPrefix}\n\n${builtSystemPrompt}` : builtSystemPrompt;
 		const injection = buildStageInjection({
 			state,
 			activatedLore: activated,

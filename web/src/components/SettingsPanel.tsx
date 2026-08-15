@@ -1013,6 +1013,8 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	// 旁挂模型 + 破甲（2026-08-10）：sideModelKey = "provider/id" 或 ""（跟随剧情模型）
 	const [sideModelKey, setSideModelKey] = useState("");
 	const [sideJailbreak, setSideJailbreak] = useState("");
+	// 固定前缀（2026-08-15，开发者调试用）：固定放剧情模型 systemPrompt 最前；失焦自动保存
+	const [storyPrefix, setStoryPrefix] = useState("");
 	// 开发者模式 + 主聊天跟踪（2026-08-11）：全局配置（liyuan.config.json），保存后生效
 	const [developerMode, setDeveloperMode] = useState(false);
 	const [chatTrace, setChatTrace] = useState(false);
@@ -1027,6 +1029,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 			setAskMode(data.config.creationMode === "ask");
 			setSideModelKey(data.config.sideModel?.provider && data.config.sideModel.id ? `${data.config.sideModel.provider}/${data.config.sideModel.id}` : "");
 			setSideJailbreak(data.config.sideJailbreak ?? "");
+			setStoryPrefix(data.config.storyPrefix ?? "");
 			setDeveloperMode(data.config.developerMode === true);
 			setChatTrace(data.config.chatTrace === true);
 			setDirty(false);
@@ -1055,6 +1058,15 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	};
 
 	const touch = () => setDirty(true);
+
+	// 固定前缀（2026-08-15）：失焦自动保存——独立 PUT 只带本字段，不碰面板其他未保存项；
+	// 空值 = 清空（服务端删除可选键）。保存后下一拍生效（引擎每拍现读配置）。
+	const saveStoryPrefix = () => {
+		const v = storyPrefix.trim();
+		run(async () => {
+			await apiPut("/api/config", { storyPrefix: v });
+		}, v ? "固定前缀已保存（下一拍生效）" : "固定前缀已清空");
+	};
 
 	const onTheme = (on: boolean) => {
 		const mode: ThemeMode = on ? "dark" : "light";
@@ -1086,6 +1098,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 					creationMode: askMode ? "ask" : "silent",
 					sideModel: sm0 && smId ? { provider: sm0, id: smId } : null,
 					sideJailbreak: sideJailbreak.trim(),
+					storyPrefix: storyPrefix.trim(),
 					developerMode,
 					chatTrace,
 				});
@@ -1322,6 +1335,21 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 										)}
 									</div>
 								)}
+								<div style={{ marginTop: 8 }}>
+									<span className="field-label">固定前缀（可选）</span>
+									<textarea
+										className="field-input"
+										value={storyPrefix}
+										rows={4}
+										placeholder="固定放在剧情模型 systemPrompt 最前，用于开发者调试；留空不注入"
+										onChange={(e) => setStoryPrefix(e.target.value)}
+										onBlur={saveStoryPrefix}
+										style={{ width: "100%", boxSizing: "border-box" }}
+									/>
+								</div>
+								<div className="field-hint">
+									每次剧情模型调用（主演回合）的 systemPrompt 最前都会带上这段文本；输入框失焦即自动保存，保存后下一拍生效。由你主动配置，谨慎使用。
+								</div>
 							</>
 						)}
 					</CollapsibleSection>

@@ -22,7 +22,7 @@
 		},
 		{
 			"name": "凯尔",
-			"appearanceTags": "1.3::male::, muscular, tall, short dark hair, black hair",
+			"appearanceTags": "1.3::male::, muscular, tall, faceless",
 			"outfits": [
 				{
 					"id": "8495bcfe",
@@ -35,7 +35,7 @@
 					"tags": "male, shirt, open collar, long sleeves, casual clothing, white shirt, black pants"
 				}
 			],
-			"defaultOutfit": "kyle-casual",
+			"defaultOutfit": "8495bcfe",
 			"type": "man",
 			"useDanbooruTag": false,
 			"id": "char-1777961310219-h9l0"
@@ -176,7 +176,7 @@
 		},
 		{
 			"name": "黎维塔",
-			"appearanceTags": "3::Liberta (Brown Dust 2)::, small breasts, hair ribbon, black ribbon, side braid",
+			"appearanceTags": "3::Liberta (Brown Dust 2)::, hair ribbon, black ribbon, side braid",
 			"outfits": [
 				{
 					"id": "fd58c742",
@@ -320,8 +320,20 @@
 					"id": "25852c44",
 					"name": "咖啡店员工作服",
 					"tags": "bob cut, bangs, red eyes, gentle smile, looking at viewer, red shirt, long sleeves, cross collar, black collar, black trim, ribbed cuffs, pleated skirt, red skirt,"
+				},
+				{
+					"id": "be4755ee",
+					"name": "湿红吊带裙",
+					"tags": "1.5::wet red dress::, 1.3::spaghetti strap dress::, thin straps, slip dress, clingy dress, wet clothes, dress clinging to body, see-through, no bra, soaked"
+				},
+				{
+					"id": "chisato-nude",
+					"name": "裸体",
+					"tags": "nude, naked, completely naked, no bra, no panties",
+					"notes": "千束裸体状态（用户要求新增的 nude 服装）"
 				}
 			],
+			"defaultOutfit": "chisato-nude",
 			"aliases": [
 				"千束"
 			],
@@ -344,6 +356,12 @@
 			"name": "浅仓透",
 			"appearanceTags": "1.2::asakura_tooru_(shiny_colors)::",
 			"outfits": []
+		},
+		{
+			"name": "井之上泷奈",
+			"appearanceTags": "inumura takina (lycoris recoil)",
+			"outfits": [],
+			"type": "girl"
 		}
 	]
 }

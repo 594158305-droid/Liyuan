@@ -8,6 +8,8 @@ import {
 	extractSaves,
 	findSave,
 	formatWorldlineText,
+	hasUnsavedStoryAfterSave,
+	parseSaveData,
 	planNewSave,
 	softDeleteSave,
 	type SaveOnTree,
@@ -191,6 +193,103 @@ test("extractSaves + softDelete + findSave + view", () => {
 	assert.equal(view.lines.length, 1);
 	assert.equal(view.currentSaveId, "s2");
 	assert.ok(formatWorldlineText(view).includes("进城"));
+});
+
+test("parseSaveData 解析/缺省 kind，返回点透传", () => {
+	const normal = parseSaveData({
+		id: "s1",
+		name: "开场",
+		worldlineId: "w1",
+		worldlineName: "主线",
+		createdAt: 10,
+	});
+	assert.equal(normal?.kind, "save");
+
+	const ret = parseSaveData({
+		id: "s2",
+		name: "返回点",
+		worldlineId: "w2",
+		worldlineName: "从「进城」分出 · 线2",
+		parentSaveId: "s1",
+		forkFromSaveId: "s1",
+		kind: "return",
+		createdAt: 20,
+	});
+	assert.equal(ret?.kind, "return");
+});
+
+test("extractSaves / buildWorldlineView 保留 kind，文本视图标记返回点", () => {
+	const entries: TreeEntryLite[] = [
+		entry("m0", null),
+		entry("e1", "m0", {
+			save: {
+				id: "s1",
+				name: "进城",
+				worldlineId: "w1",
+				worldlineName: "主线",
+				createdAt: 10,
+			},
+		}),
+		entry("m1", "e1"),
+		entry("e2", "m1", {
+			save: {
+				id: "s2",
+				name: "返回点",
+				worldlineId: "w2",
+				worldlineName: "从「进城」分出 · 线2",
+				parentSaveId: "s1",
+				forkFromSaveId: "s1",
+				kind: "return",
+				createdAt: 20,
+			},
+		}),
+	];
+	const saves = extractSaves(entries);
+	assert.equal(saves[0].kind, "save");
+	assert.equal(saves[1].kind, "return");
+
+	const { branchIdsFromLeaf } = buildAncestryIndex(entries);
+	const branch = branchIdsFromLeaf("e2");
+	const view = buildWorldlineView(saves, { deletedSaveIds: [], worldlineNames: {} }, branch, "e2");
+	const node = view.lines.flatMap((l) => l.saves).find((s) => s.id === "s2");
+	assert.equal(node?.kind, "return");
+	assert.ok(formatWorldlineText(view).includes("[返] 返回点"));
+});
+
+test("hasUnsavedStoryAfterSave：叶子是存档/仅运行时节点→false，其后有正文→true", () => {
+	const entries: TreeEntryLite[] = [
+		entry("m0", null),
+		entry("e1", "m0", {
+			save: {
+				id: "s1",
+				name: "进城",
+				worldlineId: "w1",
+				worldlineName: "主线",
+				createdAt: 10,
+			},
+		}),
+		entry("m1", "e1"),
+		entry("e2", "m1", {
+			save: {
+				id: "s2",
+				name: "返回点",
+				worldlineId: "w2",
+				worldlineName: "从「进城」分出 · 线2",
+				parentSaveId: "s1",
+				forkFromSaveId: "s1",
+				kind: "return",
+				createdAt: 20,
+			},
+		}),
+		entry("model", "e2", { type: "model_change" }),
+		entry("m2", "e2"),
+		entry("m3", "m2"),
+	];
+	assert.equal(hasUnsavedStoryAfterSave(entries, "e1"), false);
+	assert.equal(hasUnsavedStoryAfterSave(entries, "e2"), false);
+	assert.equal(hasUnsavedStoryAfterSave(entries, "model"), false); // 存档后只有 model_change，无剧情
+	assert.equal(hasUnsavedStoryAfterSave(entries, "m3"), true);
+	assert.equal(hasUnsavedStoryAfterSave(entries, null), false);
 });
 
 test("defaultSaveName 非空", () => {

@@ -20,10 +20,12 @@ export interface WorldlineViewDto {
 			parentSaveId?: string;
 			onCurrentBranch: boolean;
 			worldlineId: string;
+			kind?: "save" | "return";
 		}>;
 	}>;
 	currentSaveId: string | null;
 	leafEntryId: string | null;
+	currentLeafHasUnsavedStory?: boolean;
 }
 
 interface GraphNode {
@@ -34,6 +36,7 @@ interface GraphNode {
 	onCurrentBranch: boolean;
 	worldlineId: string;
 	worldlineName: string;
+	kind?: "save" | "return";
 	/** layout */
 	col: number;
 	row: number;
@@ -74,6 +77,7 @@ function layoutGraph(data: WorldlineViewDto): {
 				onCurrentBranch: s.onCurrentBranch,
 				worldlineId: s.worldlineId,
 				worldlineName: lineName.get(s.worldlineId) ?? line.name,
+				kind: s.kind,
 				col: 0,
 				row: 0,
 				x: 0,
@@ -214,14 +218,37 @@ export function WorldlinePanel({ toast, runCommand, onStore }: Props) {
 	const { data, error, loading, reload } = usePanelData(load, { watchAgent: true });
 	const { busy, run } = useAction(toast);
 	const [menu, setMenu] = useState<{ saveId: string; name: string } | null>(null);
+	const [backTarget, setBackTarget] = useState<{ name: string } | null>(null);
 
 	const graph = useMemo(() => (data && data.lines.length > 0 ? layoutGraph(data) : null), [data]);
 
-	const backTo = (name: string) => {
+	const currentLeafSaved = useMemo(() => {
+		if (!data || !data.leafEntryId) return false;
+		return data.lines.some((l) => l.saves.some((s) => s.entryId === data.leafEntryId));
+	}, [data]);
+
+	const currentSaveName = useMemo(() => {
+		if (!data) return "当前位置";
+		const cur = data.lines.flatMap((l) => l.saves).find((s) => s.id === data.currentSaveId);
+		return cur?.name ?? "当前位置";
+	}, [data]);
+
+	const backTo = (name: string, protect = false) => {
 		setMenu(null);
-		runCommand(`/back ${name}`);
-		toast("info", `回档到「${name}」…`);
-		setTimeout(reload, 600);
+		setBackTarget(null);
+		runCommand(`/back ${name}${protect ? " --protect" : ""}`);
+		toast("info", protect ? `已钉返回点并回档到「${name}」…` : `回档到「${name}」…`);
+		setTimeout(reload, 800);
+	};
+
+	const requestBack = (name: string) => {
+		const needsProtect = data ? (data.currentLeafHasUnsavedStory ?? !currentLeafSaved) : false;
+		if (!needsProtect) {
+			backTo(name);
+		} else {
+			setMenu(null);
+			setBackTarget({ name });
+		}
 	};
 
 	const remove = (saveId: string, name: string) => {
@@ -313,7 +340,7 @@ export function WorldlinePanel({ toast, runCommand, onStore }: Props) {
 							return (
 								<g
 									key={n.id}
-									className={`wl-node ${n.onCurrentBranch ? "on-branch" : ""} ${isCur ? "current" : ""}`}
+									className={`wl-node ${n.onCurrentBranch ? "on-branch" : ""} ${isCur ? "current" : ""} ${n.kind === "return" ? "return" : ""}`}
 									transform={`translate(${n.x}, ${n.y})`}
 									onClick={() => setMenu({ saveId: n.id, name: n.name })}
 									style={{ cursor: "pointer" }}
@@ -330,10 +357,15 @@ export function WorldlinePanel({ toast, runCommand, onStore }: Props) {
 									<circle r={R + 8} className="wl-hit" />
 									<circle r={R} className="wl-disk" />
 									{isCur && <circle r={R + 4} className="wl-ring" />}
+									{n.kind === "return" && (
+										<text className="wl-node-tag" y={R - 8} textAnchor="middle">
+											返
+										</text>
+									)}
 									<text className="wl-node-name" y={R + 14} textAnchor="middle">
 										{n.name.length > 8 ? `${n.name.slice(0, 7)}…` : n.name}
 									</text>
-									<title>{`${n.name}\n${fmtTime(n.createdAt)}\n${n.worldlineName}`}</title>
+									<title>{`${n.kind === "return" ? "返回点 · " : ""}${n.name}\n${fmtTime(n.createdAt)}\n${n.worldlineName}`}</title>
 								</g>
 							);
 						})}
@@ -353,6 +385,11 @@ export function WorldlinePanel({ toast, runCommand, onStore }: Props) {
 					<span>
 						<span className="wl-leg-dot off" /> 其他线
 					</span>
+					{graph.nodes.some((n) => n.kind === "return") && (
+						<span>
+							<span className="wl-leg-dot return" /> 返回点
+						</span>
+					)}
 				</div>
 			)}
 
@@ -366,7 +403,7 @@ export function WorldlinePanel({ toast, runCommand, onStore }: Props) {
 						onClick={(e) => e.stopPropagation()}
 					>
 						<h4>{menu.name}</h4>
-						<button type="button" className="drawer-btn primary" onClick={() => backTo(menu.name)} disabled={busy}>
+						<button type="button" className="drawer-btn primary" onClick={() => requestBack(menu.name)} disabled={busy}>
 							回到此节点
 						</button>
 						<button type="button" className="drawer-btn danger" onClick={() => remove(menu.saveId, menu.name)} disabled={busy}>
@@ -375,6 +412,35 @@ export function WorldlinePanel({ toast, runCommand, onStore }: Props) {
 						<button type="button" className="drawer-btn" onClick={() => setMenu(null)}>
 							取消
 						</button>
+					</div>
+				</div>
+			)}
+
+			{backTarget && (
+				<div className="wl-menu-backdrop" role="presentation" onClick={() => setBackTarget(null)}>
+					<div
+						className="wl-menu"
+						role="dialog"
+						aria-modal="true"
+						aria-label="跳转保护"
+						onClick={(e) => e.stopPropagation()}
+					>
+						<h4>跳转保护</h4>
+						<p className="field-hint">
+							当前在「{currentSaveName}」，切到「{backTarget.name}」后，世界线里没有直接回到当前位置的节点。
+						</p>
+						<p className="field-hint">可以先在当前位置钉一个返回点，之后随时能从世界线切回来。</p>
+						<div className="panel-row" style={{ marginTop: 12 }}>
+							<button type="button" className="drawer-btn primary" onClick={() => backTo(backTarget.name, true)} disabled={busy}>
+								先钉返回点再跳转
+							</button>
+							<button type="button" className="drawer-btn" onClick={() => backTo(backTarget.name, false)} disabled={busy}>
+								直接跳转
+							</button>
+							<button type="button" className="drawer-btn" onClick={() => setBackTarget(null)}>
+								取消
+							</button>
+						</div>
 					</div>
 				</div>
 			)}

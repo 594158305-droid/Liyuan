@@ -5,6 +5,8 @@
  * - 存档（/store）= 当前世界线上的节点；一条线上可有多个存档。
  * - 仅当「回到旧存档后走出与既有后续不同的路」再 /store 时，才产生新世界线。
  * - 世界线名默认自动生成，可被 meta 覆盖；用户必交互的是存档名。
+ * - 返回点（kind="return"）是跳转保护自动生成的存档：/back --protect 时若当前位置
+ *   有未存档剧情后续，会先钉一个返回点再跳转，保证世界线里始终有入口能切回来。
  *
  * 树内存：customType === "rp-save" 的会话条目。
  * 旁路 meta：.liyuan-worldline/<sessionId>.json（软删除、线名覆盖）——避免 tombstone 污染 leaf。
@@ -17,6 +19,9 @@ import { readJsonFile } from "./jsonio.ts";
 
 export const RP_SAVE_TYPE = "rp-save";
 
+/** 存档类型：正式存档 / 跳转保护自动生成的返回点 */
+export type SaveKind = "save" | "return";
+
 export interface SaveData {
 	/** 稳定 id（软删除与查找用，不等于树 entry id） */
 	id: string;
@@ -27,6 +32,8 @@ export interface SaveData {
 	parentSaveId?: string;
 	/** 若本线从某存档分叉，记录分叉源 save id */
 	forkFromSaveId?: string;
+	/** 存档类型；缺省按普通存档处理 */
+	kind?: SaveKind;
 	createdAt: number;
 }
 
@@ -54,6 +61,8 @@ export interface WorldlineSaveNode {
 	/** 当前叶所在分支是否经过此存档 */
 	onCurrentBranch: boolean;
 	worldlineId: string;
+	/** 存档类型；返回点用于跳转保护 */
+	kind?: SaveKind;
 }
 
 export interface WorldlineLine {
@@ -69,6 +78,8 @@ export interface WorldlineView {
 	/** 当前分支上最近的存档 id */
 	currentSaveId: string | null;
 	leafEntryId: string | null;
+	/** 当前位置是否有未存档的剧情后续（跳转保护弹窗判断用） */
+	currentLeafHasUnsavedStory?: boolean;
 }
 
 export interface TreeEntryLite {
@@ -158,6 +169,7 @@ export function parseSaveData(raw: unknown): SaveData | null {
 		worldlineName: o.worldlineName,
 		...(typeof o.parentSaveId === "string" ? { parentSaveId: o.parentSaveId } : {}),
 		...(typeof o.forkFromSaveId === "string" ? { forkFromSaveId: o.forkFromSaveId } : {}),
+		kind: o.kind === "return" ? "return" : "save",
 		createdAt: o.createdAt,
 	};
 }
@@ -295,6 +307,7 @@ export function buildWorldlineView(
 					...(parentSaveId ? { parentSaveId } : {}),
 					onCurrentBranch: branchEntryIds.has(s.entryId),
 					worldlineId: id,
+					kind: s.kind ?? "save",
 				};
 			}),
 		});
@@ -354,6 +367,33 @@ export function buildAncestryIndex(entries: TreeEntryLite[]): {
 	return { ancestorsOf, branchIdsFromLeaf };
 }
 
+/**
+ * 判断当前叶子到最近存档之间是否还有剧情正文（message/custom_message）。
+ * 若没有存档则按“只要有正文就算未存档”处理；叶子本身就是存档点返回 false。
+ * 供 /back --protect 与前端跳转保护弹窗共用同一套判断。
+ */
+export function hasUnsavedStoryAfterSave(entries: TreeEntryLite[], leafId: string | null): boolean {
+	if (!leafId) return false;
+	const byId = new Map<string, TreeEntryLite>();
+	for (const e of entries) byId.set(e.id, e);
+
+	let cur = byId.get(leafId);
+	const seen = new Set<string>();
+	let sawStory = false;
+	while (cur && !seen.has(cur.id)) {
+		seen.add(cur.id);
+		if (cur.type === "custom" && cur.customType === RP_SAVE_TYPE) {
+			// 叶子本身就是存档点：当前位置已可被世界线节点直接回到
+			return cur.id === leafId ? false : sawStory;
+		}
+		if (cur.type === "message" || cur.type === "custom_message") {
+			sawStory = true;
+		}
+		cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+	}
+	return sawStory;
+}
+
 /** TUI / 通知用的纯文本时间线 */
 export function formatWorldlineText(view: WorldlineView): string {
 	if (view.lines.length === 0) return "尚无存档。用 /store 在当前剧情点钉一个存档。";
@@ -363,7 +403,8 @@ export function formatWorldlineText(view: WorldlineView): string {
 		for (const s of line.saves) {
 			const mark = s.onCurrentBranch ? (s.id === view.currentSaveId ? "●" : "○") : "·";
 			const cur = s.id === view.currentSaveId ? " ← 当前" : s.onCurrentBranch ? "" : "";
-			lines.push(`  ${mark} ${s.name}${cur}`);
+			const tag = s.kind === "return" ? "[返] " : "";
+			lines.push(`  ${mark} ${tag}${s.name}${cur}`);
 		}
 		lines.push("");
 	}

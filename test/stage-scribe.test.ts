@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { runScribeTurn, type ScribeRunDeps } from "../src/stage/scribe-run.ts";
+import { buildTableTodo } from "../src/table-todo.ts";
 import { defaultState } from "../src/state.ts";
 import type { WorldState } from "../src/types.ts";
 
@@ -137,9 +138,10 @@ test("场记：tables-only 无 auto 表 → skipped（省一次旁路调用）",
 	assert.equal(deps.prompts.length, 0, "未发起调用");
 });
 
-test("场记：tables-only 补丁应用在 baseState（主演 patch 投影）上", async () => {
+test("场记：tables-only 逐表派发——补丁应用在 baseState（主演 patch 投影）上", async () => {
 	const base = autoState();
-	const deps = makeDeps(JSON.stringify({ patch: { tables: { 在场角色表: { insert: [{ 姓名: "沈舟" }] } } } }));
+	// 单表 ops 格式（提取器输出）：{ insert/update/delete }，不再是场记全量 patch 格式
+	const deps = makeDeps(JSON.stringify({ insert: [{ 姓名: "沈舟" }] }));
 	const r = await runScribeTurn(deps, { ...baseInput, state: defaultState(), baseState: base, scope: "tables-only" });
 
 	assert.equal(r.kind, "applied");
@@ -149,23 +151,114 @@ test("场记：tables-only 补丁应用在 baseState（主演 patch 投影）上
 		[{ 姓名: "云澜" }, { 姓名: "沈舟" }],
 		"行叠加在主演投影后的账本上",
 	);
+	assert.ok(deps.prompts[0].includes("【本轮对话】"), "数据源标签为本轮对话");
 });
 
-test("场记：tables-only 注入裁剪——【当前账本】只含时间/地点/角色名册/表格", async () => {
+test("场记：tables-only 逐表派发——每表注入该表状态而非全量账本", async () => {
 	const base = autoState();
-	const deps = makeDeps(JSON.stringify({ patch: { tables: {} } }));
+	const deps = makeDeps(JSON.stringify({ insert: [] }));
 	await runScribeTurn(deps, { ...baseInput, state: base, baseState: base, scope: "tables-only" });
 
 	const user = deps.prompts[0];
-	const ledgerBlock = user.slice(user.indexOf("【当前账本】"), user.indexOf("【本轮对话】"));
-	const parsed = JSON.parse(ledgerBlock.slice(ledgerBlock.indexOf("{"))) as {
-		characters: unknown;
-		tables: unknown;
-		inventory?: unknown;
+	assert.ok(user.includes("【当前表状态】"), "注入该表状态（含现有行，供 match 唯一键）");
+	assert.ok(user.includes("【表说明（description，优先级最高）】"), "表说明（头提示词）进提示词");
+	assert.ok(user.includes("【本轮对话】"), "数据源为本轮对话");
+	assert.ok(deps.systemPrompts[0].includes("表格数据提取器"), "提取器头提示词");
+});
+
+test("场记：tables-only TODO 空 → skipped（正文未提任何表且无时间链）", async () => {
+	const base = autoState();
+	const deps = makeDeps(JSON.stringify({ insert: [] }));
+	const r = await runScribeTurn(deps, {
+		...baseInput,
+		userText: "雨下大了。",
+		assistantText: "窗外的雨声渐渐密集起来，落在屋檐上噼啪作响。",
+		state: base,
+		baseState: base,
+		scope: "tables-only",
+	});
+
+	assert.deepEqual(r, { kind: "skipped", reason: "no-related-tables" });
+	assert.equal(deps.prompts.length, 0, "未发起调用");
+});
+
+test("场记：逐表派发——单表调用失败/输出垃圾不影响其他表", async () => {
+	const base = autoState();
+	base.tables["恋爱对象表"] = {
+		name: "恋爱对象表",
+		auto: true,
+		columns: [{ name: "姓名" }],
+		rows: [{ 姓名: "加藤惠" }],
 	};
-	assert.deepEqual(parsed.characters, ["云澜"], "tables-only 注入角色名册而非全量字段");
-	assert.ok(parsed.tables && typeof parsed.tables === "object", "表格全量注入（场记 update 的 match 需要现有行）");
-	assert.equal(parsed.inventory, undefined, "顶层字段不注入");
-	// 分工指令进 system prompt：场记只维护 tables，不输出顶层
-	assert.ok(deps.systemPrompts[0].includes("只维护 tables 补丁"), "分工指令进 system prompt");
+	const responses = [
+		{ error: "429 rate limited" }, // 在场角色表：调用失败 → 跳过
+		JSON.stringify({ insert: [{ 姓名: "路人甲" }] }), // 恋爱对象表：正常应用
+	];
+	const deps = makeDeps("", {
+		sideText: async () => responses.shift() ?? { error: "unexpected" },
+	});
+	const r = await runScribeTurn(deps, {
+		...baseInput,
+		userText: "我把怀表递给她，加藤惠在旁边看着。",
+		assistantText: "云澜接过怀表，指尖顿了顿，朝加藤惠点了点头。",
+		state: base,
+		baseState: base,
+		scope: "tables-only",
+	});
+
+	assert.equal(r.kind, "applied");
+	if (r.kind !== "applied") return;
+	assert.deepEqual(r.state.tables["恋爱对象表"].rows, [{ 姓名: "加藤惠" }, { 姓名: "路人甲" }], "失败表跳过、成功表照常");
+	assert.deepEqual(r.state.tables["在场角色表"].rows, [{ 姓名: "云澜" }], "失败表未被改动");
+});
+
+test("场记：full 顶层兜底 + 表格域逐表合并；顶层 patch 里的 tables 剥掉不双重写", async () => {
+	const base = autoState();
+	base.time = "午时";
+	let call = 0;
+	const deps = makeDeps("", {
+		sideText: async () => {
+			call++;
+			if (call === 1) {
+				// 顶层兜底：full patch 格式，即便带了 tables 也会被剥掉
+				return JSON.stringify({
+					patch: { time: "未时", location: "溪桥", tables: { 在场角色表: { insert: [{ 姓名: "幽灵行" }] } } },
+				});
+			}
+			// 表格域：单表 ops 格式
+			return JSON.stringify({ insert: [{ 姓名: "沈舟" }] });
+		},
+	});
+	const r = await runScribeTurn(deps, { ...baseInput, state: base, baseState: base });
+
+	assert.equal(r.kind, "applied");
+	if (r.kind !== "applied") return;
+	assert.equal(r.state.time, "未时", "顶层应用");
+	assert.equal(r.state.location, "溪桥");
+	assert.equal(call, 2, "顶层一次 + 表格域一次");
+	// 顶层 patch 的 tables 被剥掉（幽灵行不出现），表格只经逐表通道写入
+	assert.deepEqual(r.state.tables["在场角色表"].rows, [{ 姓名: "云澜" }, { 姓名: "沈舟" }]);
+});
+
+test("场记 TODO：正文提及行实体 → 命中；未提及 → 不命中", async () => {
+	const tables = {
+		在场角色表: { name: "在场角色表", auto: true, columns: [{ name: "姓名" }], rows: [{ 姓名: "云澜" }] },
+		商店商品表: { name: "商店商品表", auto: true, columns: [{ name: "商品名" }], rows: [] },
+	};
+	assert.deepEqual(buildTableTodo("云澜接过了怀表。", tables), ["在场角色表"], "行实体命中");
+	assert.deepEqual(buildTableTodo("天气很好。", tables), [], "无关正文不命中");
+});
+
+test("场记 TODO：时间/地点/纪要链表强制入列（列名特征，正文不点名也维护）", async () => {
+	const tables = {
+		全局数据表: {
+			name: "全局数据表",
+			auto: true,
+			columns: [{ name: "当前时间" }, { name: "当前详细地点" }],
+			rows: [],
+		},
+		恋爱对象表: { name: "恋爱对象表", auto: true, columns: [{ name: "姓名" }], rows: [{ 姓名: "加藤惠" }] },
+	};
+	// 正文完全无关：全局数据表（列含「时间/地点」）强制入列；恋爱对象表（行实体未提及）不入列
+	assert.deepEqual(buildTableTodo("窗外下起了雨。", tables), ["全局数据表"]);
 });

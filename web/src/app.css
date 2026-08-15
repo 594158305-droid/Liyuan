@@ -1,4 +1,4 @@
-﻿/* ============================================================
+/* ============================================================
    梨园 · 白瓷朱砂(F4 + 二次质感加厚)
    命题:明亮白色;层次与戏文感加强,布局结构不动
    · 宣纸底微纹理 + 暖白浮层,投影更深一档
@@ -5913,6 +5913,20 @@ label.drawer-btn {
 .wl-node:hover .wl-disk {
 	stroke-width: 2.5;
 }
+.wl-node.return .wl-disk {
+	stroke-dasharray: 4 3;
+	stroke: color-mix(in srgb, var(--accent) 45%, var(--hairline-strong));
+	fill: color-mix(in srgb, var(--surface) 88%, var(--accent-wash));
+}
+.wl-node.return.on-branch .wl-disk {
+	stroke: color-mix(in srgb, var(--accent) 70%, var(--hairline-strong));
+	fill: color-mix(in srgb, var(--surface) 82%, var(--accent-wash));
+}
+.wl-node-tag {
+	font-size: 9px;
+	fill: var(--text-faint);
+	pointer-events: none;
+}
 .wl-svg-label {
 	font-size: 11px;
 	fill: var(--accent-strong);
@@ -5947,6 +5961,11 @@ label.drawer-btn {
 .wl-leg-dot.on {
 	background: var(--accent-wash);
 	border-color: var(--accent);
+}
+.wl-leg-dot.return {
+	border-style: dashed;
+	border-color: color-mix(in srgb, var(--accent) 55%, var(--hairline-strong));
+	background: color-mix(in srgb, var(--surface) 85%, var(--accent-wash));
 }
 .wl-menu-backdrop {
 	position: fixed;

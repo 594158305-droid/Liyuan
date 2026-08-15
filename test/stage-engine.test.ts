@@ -768,15 +768,14 @@ test("引擎记账（8/13 域分工）：主演顶层 patch + 场记 tables 补�
 			fauxAssistantMessage(
 				[
 					fauxToolCall("world_state_update", { patch: { time: "戌时", location: "溪桥" } }),
-					fauxToolCall("draft_write", { content: "暮色四合，两人到了溪桥。" }),
+					fauxToolCall("draft_write", { content: "暮色四合，云澜与沈舟到了溪桥。" }),
 				],
 				{ stopReason: "toolUse" },
 			),
 			fauxAssistantMessage(""), // 收笔
-			// 主演已提交顶层 → 场记仍发 tables-only 补丁（8/13 域分工，不再被 patches>0 跳过）
-			fauxAssistantMessage(
-				JSON.stringify({ patch: { tables: { 在场角色表: { insert: [{ 姓名: "沈舟" }] } } } }),
-			),
+			// 主演已提交顶层 → 场记逐表派发（8/15）：正文提及「云澜」→ 在场角色表命中，
+			// 输出该表单表 ops（提取器格式），不再是全量场记 patch 格式
+			fauxAssistantMessage(JSON.stringify({ insert: [{ 姓名: "沈舟" }] })),
 		]);
 		const engine = new StageEngine({
 			cwd,

@@ -32,6 +32,8 @@ export function buildTableBackfillPrompt(
 	stateSnapshot: string,
 	chunkText: string,
 	relatedTables?: Record<string, CustomTable>,
+	/** 数据源标签（2026-08-15 逐表派发复用）：历史回填 = "历史片段"；每轮场记逐表维护 = "本轮对话" */
+	sourceLabel = "历史片段",
 ): { systemPrompt: string; userText: string } {
 	const columns = table.columns.map((c) => (c.type ? `${c.name}（${c.type}）` : c.name)).join("、");
 	const systemPrompt = `你是【表格数据提取器】。你的唯一工作：依据<正文数据>与<当前表格数据>，把与目标表「${table.name}」相关的数据以 JSON 操作形式写入该表。
@@ -88,7 +90,7 @@ ${
 		: "（无）"
 }
 
-【历史片段】
+【${sourceLabel}】
 ${chunkText}`;
 	return { systemPrompt, userText };
 }
@@ -182,22 +184,40 @@ function countFromApplied(applied: string[] | undefined): number {
 	return 0;
 }
 
-/** 把一组的 ops 应用到表（直接 applyTableOperation，非 auto 表也生效）；返回成功应用的行数 */
-function applyOps(state: WorldState, tableName: string, ops: TableBackfillOps): number {
+/** applyOps 的结果：行数 + applied 消息（逐表派发记账摘要用） */
+export interface ApplyOpsResult {
+	/** 成功应用的行数 */
+	rows: number;
+	/** 每笔操作的 applied 消息（如「表 X 插入 1 行」） */
+	applied: string[];
+}
+
+/** 把一组的 ops 应用到表（直接 applyTableOperation，非 auto 表也生效）；返回行数与 applied 消息 */
+export function applyOps(state: WorldState, tableName: string, ops: TableBackfillOps): ApplyOpsResult {
+	const applied: string[] = [];
 	let rows = 0;
 	for (const row of ops.insert ?? []) {
 		const r = applyTableOperation(state, { kind: "insert", table: tableName, row });
-		if (r.ok) rows += countFromApplied(r.applied);
+		if (r.ok) {
+			rows += countFromApplied(r.applied);
+			applied.push(...(r.applied ?? []));
+		}
 	}
 	for (const u of ops.update ?? []) {
 		const r = applyTableOperation(state, { kind: "update", table: tableName, match: u.match, changes: u.changes });
-		if (r.ok) rows += countFromApplied(r.applied);
+		if (r.ok) {
+			rows += countFromApplied(r.applied);
+			applied.push(...(r.applied ?? []));
+		}
 	}
 	for (const match of ops.delete ?? []) {
 		const r = applyTableOperation(state, { kind: "delete", table: tableName, match });
-		if (r.ok) rows += countFromApplied(r.applied);
+		if (r.ok) {
+			rows += countFromApplied(r.applied);
+			applied.push(...(r.applied ?? []));
+		}
 	}
-	return rows;
+	return { rows, applied };
 }
 
 export interface TableBackfillDeps {
@@ -278,7 +298,7 @@ export async function runTableBackfill(deps: TableBackfillDeps): Promise<
 			}
 			const ops = typeof resp === "string" ? parseTableBackfillOps(resp) : null;
 			if (ops) {
-				rows += applyOps(deps.state, deps.tableName, ops);
+				rows += applyOps(deps.state, deps.tableName, ops).rows;
 				done = true;
 				break;
 			}

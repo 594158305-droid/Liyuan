@@ -15,6 +15,7 @@
 	"tableBackfillThreshold": 6,
 	"sideModel": null,
 	"sideJailbreak": "",
+	"storyPrefix": "",
 	"greetingIndex": 0,
 	"plugins": {},
 	"flowTemplates": [

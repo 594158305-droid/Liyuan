@@ -322,6 +322,8 @@ export interface RpConfigView {
 	sideModel?: { provider: string; id: string } | null;
 	/** 破甲提示词（可选，固定放旁路 systemPrompt 最前；空 = 不注入） */
 	sideJailbreak?: string;
+	/** 固定前缀（可选，固定放剧情模型 systemPrompt 最前；空 = 不注入，开发者调试用） */
+	storyPrefix?: string;
 	/** 开发者模式总开关（2026-08-11）：打开后设置面板显示开发者选项 */
 	developerMode?: boolean;
 	/** 主聊天跟踪（2026-08-11）：记录聊天全过程到 .liyuan-state/trace/<sessionId>.jsonl */

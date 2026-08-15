@@ -6,14 +6,29 @@
 			"fingerprints": ["身份契约", "模型禁词·DeepSeek", "写作·技能触发表", "写作·目标"],
 			"blocks": [
 				{ "name": "身份契约", "nature": "A", "fate": "resident", "section": "A", "note": "主笔身份/上帝视角/中文第三人称" },
-				{ "name": "写作·常开纪律", "nature": "B", "fate": "resident", "section": "B", "note": "大纲模式契约+主权/信息差/篇幅/承接/文风自由+防复读" },
+				{
+					"name": "写作·常开纪律",
+					"nature": "B",
+					"fate": "resident",
+					"section": "B",
+					"stripLines": ["^## 写作·常开纪律"],
+					"segments": [
+						{ "match": "【输入契约·大纲模式】[\\s\\S]*?(?=\\n【|$)", "fate": "resident", "section": "C" },
+						{ "match": "【语言/人称/主权】[\\s\\S]*?(?=\\n【|$)", "fate": "resident", "section": "C" },
+						{ "match": "【篇幅】[\\s\\S]*?(?=\\n【|$)", "fate": "resident", "section": "C" },
+						{ "match": "【开头承接】[\\s\\S]*?(?=\\n【|$)", "fate": "resident", "section": "C" },
+						{ "match": "【收尾纪律（防突兀收场）】[\\s\\S]*?(?=\\n【|$)", "fate": "resident", "section": "C" }
+					],
+					"note": "句级拆：输入契约/语言主权/篇幅/承接/收尾 → C；文风各段 → B（壳词重复句已从预设原文删除；上限 18000 由规则提取扫全量）"
+				},
 				{ "name": "写作·审查纪律", "nature": "C", "fate": "resident", "section": "C", "note": "人设铁律/防恶堕/权力角色/声音反馈/空壳确认/推演≠交付" },
 				{ "name": "写作·目标", "nature": "C", "fate": "resident", "section": "C", "note": "色情后宫/感情渐进/口味上限/长篇维护/八股压制" },
 				{ "name": "写作·技能触发表", "nature": "C", "fate": "resident", "section": "C", "note": "场景→writing_guide 主题权威映射" },
 				{ "name": "模型禁词·DeepSeek", "nature": "B", "fate": "resident", "section": "B", "note": "DeepSeek 系八股分档（硬禁/软禁）+破折号/半角/不是…是 触发——模型可见控制频率，机械验收兜底" },
 				{ "name": "NSFW-协议注入", "nature": "C", "fate": "resident", "section": "C", "note": "常驻生理红线+场景分层+词汇轮换（细节走技能）" },
-				{ "name": "状态栏·记账纪律", "nature": "C", "fate": "resident", "section": "C", "note": "账本+19 表维护纪律" },
-				{ "name": "状态栏·玩法检索与发卡", "nature": "C", "fate": "resident", "section": "C", "note": "NSFW 玩法 lorebook 检索+ask 发卡" }
+				{ "name": "状态栏·记账纪律", "nature": "C", "fate": "resident", "section": "C", "note": "主演侧记账纪律（world_state_update+查表时机+分钟级 time）；场记细节已删——场记是旁路模型读不到预设，指令在表 description" },
+				{ "name": "状态栏·玩法检索与发卡", "nature": "E", "fate": "skill", "topic": "liyuan-play", "note": "玩法意图场景专题——平时不进上下文；触发表加索引行（writing_guide liyuan-play）" },
+				{ "name": "反电报体·末端强抑制", "nature": "B", "fate": "resident", "section": "B", "note": "正文行文质感（防电报体/省略式流水账）——postHistory 末端注入" }
 			],
 			"vars": [],
 			"supplements": []

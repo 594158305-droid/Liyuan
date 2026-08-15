@@ -8,16 +8,18 @@ import { apiGet, apiPut, type ModelsResponse } from "../api.ts";
 import { IconClose, IconPencil, IconTrash } from "./icons.tsx";
 import { ConfirmButton, Field, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
 
-/** 桥权限：8 个对剧情世界的操作开关 */
+/** 桥权限：10 个对剧情世界的操作开关（与 server/bridge.ts BridgePermissions、server/rest.ts BRIDGE_PERM_KEYS 对齐） */
 type AgentBridge = {
 	readStory?: boolean;
 	writePanels?: boolean;
 	storyEdit?: boolean;
 	queueCommand?: boolean;
 	applyStatePatch?: boolean;
+	tableOps?: boolean;
 	emitMedia?: boolean;
 	refreshMaterials?: boolean;
 	mountCodex?: boolean;
+	embedStoryImage?: boolean;
 };
 
 /** 自定义 agent 配置条目（与 liyuan.config.json 的 agents 段对齐） */
@@ -53,9 +55,11 @@ const BRIDGE_KEYS: Array<{ key: keyof AgentBridge; label: string; hint: string; 
 	{ key: "storyEdit", label: "改写剧情回复", hint: "危险", danger: true },
 	{ key: "queueCommand", label: "触发剧情命令", hint: "危险", danger: true },
 	{ key: "applyStatePatch", label: "修改状态账本", hint: "危险", danger: true },
+	{ key: "tableOps", label: "操作自定义表格", hint: "建表/增删改查", danger: false },
 	{ key: "emitMedia", label: "发送媒体", hint: "", danger: false },
 	{ key: "refreshMaterials", label: "刷新素材", hint: "", danger: false },
 	{ key: "mountCodex", label: "挂载知识库", hint: "", danger: false },
+	{ key: "embedStoryImage", label: "助手生图嵌入正文", hint: "将生成图片嵌入剧情正文", danger: false },
 ];
 
 /** 根据 agentReload 状态生成保存/删除后的提示文案 */
@@ -106,9 +110,11 @@ export function AgentManagerPanel({ onClose, onAgentsChanged, toast }: AgentMana
 		storyEdit: false,
 		queueCommand: false,
 		applyStatePatch: false,
+		tableOps: false,
 		emitMedia: false,
 		refreshMaterials: false,
 		mountCodex: false,
+		embedStoryImage: false,
 	});
 
 	const customAgents = configData?.config?.agents ?? [];
@@ -141,9 +147,11 @@ export function AgentManagerPanel({ onClose, onAgentsChanged, toast }: AgentMana
 			storyEdit: false,
 			queueCommand: false,
 			applyStatePatch: false,
+			tableOps: false,
 			emitMedia: false,
 			refreshMaterials: false,
 			mountCodex: false,
+			embedStoryImage: false,
 		});
 		setMode("create");
 	};
@@ -163,9 +171,11 @@ export function AgentManagerPanel({ onClose, onAgentsChanged, toast }: AgentMana
 			storyEdit: false,
 			queueCommand: false,
 			applyStatePatch: false,
+			tableOps: false,
 			emitMedia: false,
 			refreshMaterials: false,
 			mountCodex: false,
+			embedStoryImage: false,
 			...agent.bridge,
 		});
 		setMode("edit");

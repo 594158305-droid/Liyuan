@@ -258,9 +258,13 @@ export interface CreateAgentHostOptions {
 	toolsAllow?: string[];
 	/** 内置工具白名单（read/bash/edit/write，经 createAgentSession 的 tools 参数生效）；缺省 undefined = 全量内置工具（现状行为） */
 	tools?: string[];
-	/** 显式模型；缺省 null = 跟随剧情模型（syncFollowModel，内置助手现状行为） */
+	/**
+	 * 显式模型；缺省 null = 跟随剧情模型（syncFollowModel）。仅内置助手路径参与跟随判定
+	 * （向后兼容）；自定义 agent 的模型完全由配置 agents[].model 动态决定——面板 setModel
+	 * 写回配置、follows()/agentConfigModel() 实时读盘，此参数在自定义分支不再生效。
+	 */
 	model?: { provider: string; id: string } | null;
-	/** false = 关闭跟随剧情模型（自定义 agent 显式模型时用）；缺省 true */
+	/** false = 关闭跟随剧情模型（仅内置助手路径；自定义 agent 由配置 model 字段决定）；缺省 true */
 	followsStoryModel?: boolean;
 	/**
 	 * 与主聊天共享的模型注册表/认证存储（2026-08-15 修复：会话快照与主会话不一致，
@@ -1897,6 +1901,10 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 
 	type BuildMode = { kind: "new" } | { kind: "continue" } | { kind: "open"; path: string };
 
+	/** 自定义 agent 当前配置里的显式模型（动态读盘：面板选模型写回 agents[].model 后立即生效，无需重建 host；删掉字段即恢复跟随） */
+	const agentConfigModel = (): { provider: string; id: string } | undefined =>
+		loadConfig(cwd).agents?.find((a) => a.id === opts.agentId)?.model;
+
 	const build = async (mode: BuildMode): Promise<AgentSession> => {
 		const agentDir = getAgentDir();
 		const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -1951,9 +1959,10 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 			},
 		} as never);
 
-		// 显式模型：内置助手读 config.assistantModel（现状语义）；自定义 agent 用 opts.model。
+		// 显式模型：内置助手读 config.assistantModel（现状语义）；自定义 agent 动态读配置
+		// agents[].model（与 follows() 同源：运行时可改，配置没写 = 跟随剧情模型）。
 		// 创建后手动应用（applyModelTo），避免污染共享默认模型设置。
-		const explicitModel = isAssistant ? loadConfig(cwd).assistantModel : (opts.model ?? null);
+		const explicitModel = isAssistant ? loadConfig(cwd).assistantModel : (agentConfigModel() ?? null);
 		if (explicitModel) {
 			applyModelTo(s, explicitModel, true);
 		}
@@ -2007,11 +2016,13 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 		});
 	};
 
-	/** 跟随模式判定：显式模型（opts.model）或 followsStoryModel=false → 不跟随；内置助手仅在 config.assistantModel 配置时跟随（现状语义）；自定义 agent 缺省跟随剧情模型 */
+	/** 跟随模式判定：内置助手 = 显式创建参数或 config.assistantModel 存在 → 不跟随（现状语义）；自定义 agent 由配置 agents[].model 动态决定（写 model 字段 → 不跟随；删掉 → 恢复跟随） */
 	const follows = () => {
-		if (opts.model || opts.followsStoryModel === false) return false;
-		if (isAssistant) return !loadConfig(cwd).assistantModel;
-		return true;
+		if (isAssistant) {
+			if (opts.model || opts.followsStoryModel === false) return false;
+			return !loadConfig(cwd).assistantModel;
+		}
+		return !agentConfigModel();
 	};
 
 	const modelInfo = () => {
@@ -2275,13 +2286,30 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 		sessionPath: () => session.sessionFile,
 		async setModel(sel) {
 			if (!isAssistant) {
-				// 自定义 agent：模型是实例级参数（opts.model），setModel 只作用当前会话，
-				// 不写 config.assistantModel（那是内置助手的配置字段）。
-				if (!sel) {
-					syncFollowModel();
+				// 自定义 agent：模型持久化到配置 agents[].model（follows()/新会话初始模型都动态
+				// 读盘，写配置即生效，无需重建 host）。sel 存在 → 校验后写 model 字段并立即应用；
+				// null → 删除 model 字段回到跟随剧情模型。
+				const cfg = loadConfig(cwd);
+				const agents = cfg.agents ?? [];
+				const idx = agents.findIndex((a) => a.id === opts.agentId);
+				if (sel) {
+					applyModelTo(session, sel); // 非法（模型不存在/缺 key）则抛错，不写配置
+					if (idx < 0) return; // 配置无此条目（异常态）：仅会话级生效
+					writeJsonWithBackup(configPath(cwd), {
+						...cfg,
+						agents: agents.map((a, i) => (i === idx ? { ...a, model: { ...sel } } : a)),
+					});
 					return;
 				}
-				applyModelTo(session, sel); // 非法则抛错
+				// 回到跟随：删除 model 字段
+				if (idx >= 0 && agents[idx].model) {
+					const { model: _drop, ...rest } = agents[idx];
+					writeJsonWithBackup(configPath(cwd), {
+						...cfg,
+						agents: agents.map((a, i) => (i === idx ? rest : a)),
+					});
+				}
+				syncFollowModel();
 				return;
 			}
 			const config = loadConfig(cwd);

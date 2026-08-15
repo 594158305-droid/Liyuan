@@ -78,6 +78,7 @@ import {
 	buildAncestryIndex,
 	buildWorldlineView,
 	extractSaves,
+	hasUnsavedStoryAfterSave,
 	loadWorldlineMeta,
 	metaPath,
 	renameWorldline as renameWorldlineMeta,
@@ -2001,7 +2002,9 @@ const restHost: RestHost = {
 		const saves = extractSaves(entries, meta);
 		const leafId = sm.getLeafId();
 		const { branchIdsFromLeaf } = buildAncestryIndex(entries);
-		return buildWorldlineView(saves, meta, branchIdsFromLeaf(leafId), leafId);
+		const view = buildWorldlineView(saves, meta, branchIdsFromLeaf(leafId), leafId);
+		view.currentLeafHasUnsavedStory = hasUnsavedStoryAfterSave(entries, leafId);
+		return view;
 	},
 	deleteWorldlineSave(saveId) {
 		const file = metaPath(cwd, session.sessionId);

@@ -109,6 +109,7 @@ import {
 	extractSaves,
 	findSave,
 	formatWorldlineText,
+	hasUnsavedStoryAfterSave,
 	latestSaveOnBranch,
 	loadWorldlineMeta,
 	metaPath,
@@ -2362,6 +2363,7 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		const { ancestorsOf, branchIdsFromLeaf } = buildAncestryIndex(entries);
 		const branchIds = branchIdsFromLeaf(leafId);
 		const view = buildWorldlineView(saves, meta, branchIds, leafId);
+		view.currentLeafHasUnsavedStory = hasUnsavedStoryAfterSave(entries, leafId);
 		return { meta, entries, saves, leafId, ancestorsOf, branchIds, view };
 	};
 
@@ -2407,20 +2409,43 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 			await waitForScribe();
 			const sm = ctx.sessionManager as {
 				getEntries: () => Array<Record<string, unknown>>;
-				getBranch: () => Array<{ id: string }>;
+				getBranch: () => Array<{ id: string; type?: string; customType?: string }>;
 				getLeafId: () => string | null;
 				getSessionId: () => string;
 			};
-			const { saves, branchIds } = worldlineSnapshot(sm);
+			const { entries, saves, branchIds, ancestorsOf } = worldlineSnapshot(sm);
 			if (saves.length === 0) {
 				notify(ctx, "还没有存档。先用 /store 钉一个点。", "error");
 				return;
 			}
-			const q = (args ?? "").trim();
+			// 跳转保护：/back <存档名> --protect 时，若当前位置有未存档的剧情后续，先钉一个返回点。
+			const protect = /(?:^|\s)--protect(?:\s|$)/i.test(args ?? "");
+			const q = (args ?? "").replace(/\s*--protect\s*/gi, " ").trim();
 			const target = q ? findSave(saves, q) : latestSaveOnBranch(saves, branchIds) ?? saves.sort((a, b) => b.createdAt - a.createdAt)[0];
 			if (!target) {
 				notify(ctx, q ? `找不到存档「${q}」。用 /line 查看列表。` : "找不到可回退的存档。", "error");
 				return;
+			}
+			if (protect) {
+				const leafId = sm.getLeafId();
+				const prev = latestSaveOnBranch(saves, branchIds);
+				const isLeafSave = leafId !== null && saves.some((s) => s.entryId === leafId);
+				const hasUnsavedStory = hasUnsavedStoryAfterSave(entries, leafId);
+				if (!isLeafSave && hasUnsavedStory) {
+					const data = planNewSave({
+						name: `返回点 · ${defaultSaveName()}`,
+						prevOnBranch: prev,
+						branchEntryIds: branchIds,
+						allSaves: saves,
+						ancestorsOf,
+					});
+					data.kind = "return";
+					snapshotState();
+					snapshotPanels();
+					snapshotCodexMounts();
+					pi.appendEntry(RP_SAVE_TYPE, data);
+					notify(ctx, `已在当前位置钉返回点「${data.name}」（${data.worldlineName}）。`);
+				}
 			}
 			const result = await ctx.navigateTree(target.entryId, { summarize: false });
 			if (!result.cancelled) {
