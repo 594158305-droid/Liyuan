@@ -982,8 +982,12 @@ export class ModelRegistry {
 					baseUrl: modelDef.baseUrl ?? config.baseUrl!,
 					reasoning: modelDef.reasoning,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
-					input: modelDef.input as ("text" | "image")[],
-					cost: modelDef.cost,
+					// 与 models.json 加载路径（loadModels 同款默认）：input/cost 缺省会分别触发
+					// openai-completions.ts:1076 `model.input.includes` 与 models.ts:389 `model.cost.input`
+					// 崩（2026-08-15 实测「Cannot read properties of undefined (reading 'input')」——
+					// registerProvider 是梨园 registerUserProviders 与 agent refreshModels 的必经路径）。
+					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
+					cost: modelDef.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					contextWindow: modelDef.contextWindow,
 					maxTokens: modelDef.maxTokens,
 					headers: undefined,

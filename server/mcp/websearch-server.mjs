@@ -226,7 +226,8 @@ const TOOLS = [
 				language: { type: "string", description: "语言（SearXNG 代码），默认 zh" },
 				max_results: { type: "integer", description: "返回条数 1-10，默认 5", minimum: 1, maximum: 10 },
 				time_range: { type: "string", enum: ["day", "month", "year"], description: "可选：只看近期结果" },
-				safesearch: { type: "integer", enum: [0, 1, 2], description: "安全搜索 0关/1中/2严，默认 1" },
+				// 数字 enum 会让 OpenRouter→Gemini 转换丢整个 properties（required 失配 400），改用 min/max 表达
+				safesearch: { type: "integer", minimum: 0, maximum: 2, description: "安全搜索 0关/1中/2严，默认 1" },
 			},
 			required: ["query"],
 		},

@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { attachmentUrl, splitAttachments } from "../attachments.ts";
 import { applyCardSkin } from "../cardSkin.ts";
 import { isFullInterface } from "../htmlEmbed.ts";
@@ -56,11 +57,15 @@ export function ZoomImg({ src, alt, title }: { src: string; alt: string; title?:
 	return (
 		<>
 			<img src={src} alt={alt} title={title} loading="lazy" className="zoomable" onClick={() => setOpen(true)} />
-			{open && (
-				<div className="lightbox" onClick={() => setOpen(false)}>
-					<img src={src} alt={alt} />
-				</div>
-			)}
+			{/* 2026-08-14 修复：消息容器（.list）backdrop-filter 会成为 fixed 层包含块，
+			   预览层被裁剪在消息列表内——Portal 到 body 脱离容器 */}
+			{open &&
+				createPortal(
+					<div className="lightbox" onClick={() => setOpen(false)}>
+						<img src={src} alt={alt} />
+					</div>,
+					document.body,
+				)}
 		</>
 	);
 }

@@ -39,7 +39,7 @@ import {
 	verifyToken,
 	type AccessData,
 } from "../src/access.ts";
-import { loadAgentConfig, normalizeAgentConfig, syncAgentConfigToRuntime } from "../src/agent-config.ts";
+import { listProfiles, loadAgentConfig, loadProfile, normalizeAgentConfig, syncAgentConfigToRuntime } from "../src/agent-config.ts";
 import { streamSimple } from "@liyuan/ai/compat";
 import { loadCardFile } from "../src/card.ts";
 import { buildGreeting } from "../src/greeting.ts";
@@ -1203,12 +1203,73 @@ const branchCommitToTarget = (targetId: string): void => {
 	session.agent.state.messages = ctx.messages;
 };
 
+// ---------- 模型配置归一（2026-08-15） ----------
+// 模型列表 = 用户自己的渠道（配置仓库档案 ∪ 当前启用的 liyuan.agent.json），
+// 而不是 pi 内置 provider 目录（amazon-bedrock 等 1000+ 项）。做法：
+// 把仓库全部档案的渠道（含 apiKey/models）注册进主会话 modelRegistry——
+// 列表里每个渠道都 find 得到、key 判定成立；当前启用配置最后注册（优先级最高）。
+
+/** 用户渠道键集合：配置仓库全部档案 ∪ 当前启用的 liyuan.agent.json */
+function listUserProviders(): Set<string> {
+	const set = new Set<string>();
+	for (const p of listProfiles(cwd)) {
+		const rec = loadProfile(cwd, p.id);
+		if (!rec) continue;
+		for (const k of Object.keys(rec.config.providers ?? {})) set.add(k);
+	}
+	const cur = loadAgentConfig(cwd);
+	for (const k of Object.keys(cur.config?.providers ?? {})) set.add(k);
+	return set;
+}
+
+/** 把配置仓库 + 当前启用的渠道全部注册进主会话 modelRegistry（含 apiKey/models） */
+function registerUserProviders(): void {
+	// 注册前给模型条目补 input 默认值：pi 的 registerProvider 构造模型对象时 input/cost 无默认
+	// （registerProvider 路径 vs loadModels 路径有 ?? ["text"]/?? defaultCost）——缺 input 时
+	// 历史含图片 toolResult 触发 openai-completions.ts:1076 `model.input.includes` 崩
+	// （2026-08-15 实测「生成失败：Cannot read properties of undefined (reading 'includes')」）；
+	// 缺 cost 时流式响应带 usage 触发 models.ts:389 `model.cost.input` 崩（同日晚实测 reading 'input'）。
+	// pi 侧已于 2026-08-15 在 registerProvider 补两处默认（model-registry.ts），此处兜底保留作防御。
+	const fixInput = (pc: Record<string, unknown>): Record<string, unknown> =>
+		Array.isArray(pc.models)
+			? { ...pc, models: pc.models.map((m) => (m && typeof m === "object" ? { ...(m as object), input: (m as { input?: unknown }).input ?? ["text"] } : m)) }
+			: pc;
+
+	const seen = new Set<string>();
+	for (const p of listProfiles(cwd)) {
+		const rec = loadProfile(cwd, p.id);
+		if (!rec) continue;
+		for (const [pk, pc] of Object.entries(rec.config.providers ?? {})) {
+			if (seen.has(pk)) continue;
+			seen.add(pk);
+			try {
+				session.modelRegistry.registerProvider(pk, fixInput(pc as Record<string, unknown>) as never);
+			} catch (err) {
+				console.warn(
+					`[liyuan] 注册配置仓库渠道「${pk}」（档案 ${rec.name}）失败：${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+	}
+	// 当前启用的配置最后注册（优先级最高，覆盖同名档案）
+	const cur = loadAgentConfig(cwd);
+	for (const [pk, pc] of Object.entries(cur.config?.providers ?? {})) {
+		try {
+			session.modelRegistry.registerProvider(pk, fixInput(pc as Record<string, unknown>) as never);
+		} catch (err) {
+			console.warn(`[liyuan] 注册当前渠道「${pk}」失败：${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+}
+
 const restHost: RestHost = {
 	cwd,
 	isStreaming: () => session.isStreaming,
-	listModels: () => ({
-		current: currentModelInfo(),
-		models: session.modelRegistry.getAvailable().map((m) => ({
+	listModels: () => {
+		// models = 已认证（可直选）；allModels = 用户自己的渠道（配置仓库档案 ∪ 当前启用，
+		// 每项带 ready——未配 key 的渠道置灰展示「看得见但用不了」）
+		const userProviders = listUserProviders();
+		const toInfo = (m: { provider: string; id: string; name?: string; reasoning?: boolean; input?: unknown[]; contextWindow?: number; maxTokens?: number }) => ({
 			provider: m.provider,
 			providerName: session.modelRegistry.getProviderDisplayName(m.provider),
 			id: m.id,
@@ -1217,8 +1278,19 @@ const restHost: RestHost = {
 			vision: Array.isArray(m.input) && m.input.includes("image"),
 			contextWindow: m.contextWindow ?? 0,
 			maxTokens: typeof m.maxTokens === "number" && m.maxTokens > 0 ? m.maxTokens : undefined,
-		})),
-	}),
+			ready: session.modelRegistry.hasConfiguredAuth(m as never),
+		});
+		return {
+			current: currentModelInfo(),
+			models: session.modelRegistry.getAvailable().map(toInfo),
+			// 模型配置归一：列表 = 用户自己的渠道（配置仓库档案 ∪ 当前启用），
+			// 不暴露 pi 内置 provider 目录（amazon-bedrock 等未配置渠道）
+			allModels: session.modelRegistry
+				.getAll()
+				.filter((m) => userProviders.has(m.provider))
+				.map(toInfo),
+		};
+	},
 	async selectModel(provider, id) {
 		const m = session.modelRegistry.find(provider, id);
 		if (!m) throw new Error(`模型不存在：${provider}/${id}`);
@@ -1304,7 +1376,12 @@ const restHost: RestHost = {
 			})),
 		};
 	},
-	refreshModels: () => session.modelRegistry.refresh(),
+	refreshModels: () => {
+		// 配置归一（2026-08-15）：刷新前先注册配置仓库的全部渠道——refresh 会重放
+		// registeredProviders（apiKey 随渠道配置走），新档案/新 key 即时生效
+		registerUserProviders();
+		session.modelRegistry.refresh();
+	},
 	async reloadSession() {
 		await session.reload();
 		refreshNamesFromConfig();
@@ -1411,6 +1488,9 @@ const restHost: RestHost = {
 					tools: cfg.tools, // 内置工具白名单：与 stagehand 同清单，两端一起裁剪
 					model: cfg.model ?? null,
 					followsStoryModel: !cfg.model,
+					// 与主聊天共享 modelRegistry/authStorage（2026-08-15，同内置助手）
+					modelRegistry: runtime.services.modelRegistry,
+					authStorage: runtime.services.authStorage,
 					uiContext,
 					onEvent: onAssistantEvent,
 					onError: (text) => broadcast({ type: "error", text }),
@@ -2103,7 +2183,6 @@ try {
 	if (loaded.exists && Object.keys(loaded.config.providers).length > 0) {
 		const cfg = normalizeAgentConfig(loaded.config);
 		syncAgentConfigToRuntime(cwd, getAgentDir(), cfg);
-		session.modelRegistry.refresh();
 		const cur = session.model;
 		if (cur) {
 			const next = session.modelRegistry.find(cur.provider, cur.id);
@@ -2129,6 +2208,10 @@ try {
 		}
 		console.log("[liyuan] 已从 liyuan.agent.json 同步 models.json 与思考档");
 	}
+	// 配置归一（2026-08-15）：无论当前配置是否有 providers，都注册配置仓库全部档案的
+	// 渠道——模型列表（/api/models allModels）显示用户自己的渠道，未启用的档案渠道也能选
+	registerUserProviders();
+	session.modelRegistry.refresh();
 } catch (err) {
 	console.error(`[liyuan] 启动同步 agent 配置失败：${err instanceof Error ? err.message : String(err)}`);
 }
@@ -2915,6 +2998,10 @@ try {
 		cwd,
 		agentId: "assistant",
 		bridge: storyBridge,
+		// 与主聊天共享同一模型注册表/认证存储（2026-08-15）：主会话配置热重载
+		// refreshModels 后助手立即一致，不再有「主聊天能用、助手报缺 key」的快照差
+		modelRegistry: runtime.services.modelRegistry,
+		authStorage: runtime.services.authStorage,
 		uiContext,
 		onEvent: onAssistantEvent,
 		onError: (text) => broadcast({ type: "error", text }),
@@ -2964,6 +3051,9 @@ for (const cfg of agentConfigs) {
 			tools: cfg.tools, // 内置工具白名单：与 stagehand 同清单，两端一起裁剪（与热重建 reloadAgents 一致）
 			model: cfg.model ?? null,
 			followsStoryModel: !cfg.model,
+			// 与主聊天共享 modelRegistry/authStorage（2026-08-15，同内置助手）
+			modelRegistry: runtime.services.modelRegistry,
+			authStorage: runtime.services.authStorage,
 			uiContext,
 			onEvent: onAssistantEvent,
 			onError: (text) => broadcast({ type: "error", text }),
@@ -3283,6 +3373,17 @@ const stage = new StageEngine({
 	getSessionManager: () => session.sessionManager as never,
 	getModel: () => session.model as never,
 	getAuth: async (m) => session.modelRegistry.getApiKeyAndHeaders(m as never),
+	// 旁挂模型（8/14，sideModel 接上台）：台上旁路（评审/场记/压缩）统一走它——
+	// 解析与 backfillSideText 同款（modelRegistry.find，找不到回退剧情模型），配置改动即时生效
+	getSideModel: () => {
+		const sm = loadConfig(cwd).sideModel;
+		if (sm?.provider && sm?.id) {
+			const m = session.modelRegistry.find(sm.provider, sm.id);
+			if (!m) console.warn(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
+			return m ?? undefined;
+		}
+		return undefined;
+	},
 	getThinking: () => session.thinkingLevel,
 	// 场记落盘 → fs.watch 自动广播 state 帧（与扩展/REST 写路径同一条）
 	getStateFile: (sessionId) => join(stateDir, `${sessionId}.json`),
@@ -3596,8 +3697,8 @@ const stage = new StageEngine({
 				}
 			}
 		},
-		trace: traceRecorder,
 	},
+	trace: traceRecorder,
 });
 
 /** 台上或旧循环任一在流式中（守卫共用） */

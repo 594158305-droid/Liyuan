@@ -40,6 +40,7 @@ import type { PanelWriteOutput } from "../src/tools/panels.ts";
 import { regexTools, type RegexDeps } from "../src/tools/regex.ts";
 import { codexTools, type CodexDeps } from "../src/tools/codex.ts";
 import { assistantToolDefs } from "./tool-adapter.ts";
+import { historyHasToolCall, isStagedModel, MINIMAL_STAGEHAND_TOOLS, stagedToolNames } from "../src/tool-staging.ts";
 import { loadCardFile } from "../src/card.ts";
 import {
 	appendCodexEntry,
@@ -1615,6 +1616,40 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 	let session: AgentSession;
 	let unsubscribe: (() => void) | undefined;
 
+	/**
+	 * DSH 双阶段工具暴露（src/tool-staging.ts）：V4 Pro 起步只给 read/bash/return_answer，
+	 * 会话历史出现首次工具调用后放开全量（从持久消息推导，resume/reload 自动恢复）。
+	 * 幂等：目标集与当前激活集一致时不动；setActiveToolsByName 会重建 system prompt，
+	 * 下一轮请求生效（agent-session.ts prepareNextTurn 每轮现读 state.tools）。
+	 */
+	const applyToolStaging = (s: AgentSession): void => {
+		const registryNames = s.getAllTools().map((t) => t.name);
+		const promoted = historyHasToolCall(s.messages);
+		const target = stagedToolNames({
+			modelId: s.model?.id,
+			registryNames,
+			promoted,
+		});
+		const cur = s.getActiveToolNames();
+		if (target) {
+			// 未晋升：收缩到最小集（read/bash/return_answer 与白名单的交集）
+			if (cur.length === target.length && target.every((n) => cur.includes(n))) return;
+			s.setActiveToolsByName(target);
+			return;
+		}
+		// 已晋升（或非目标模型）：若当前仍停在最小集，则放开全量。
+		// 修复「只收缩不恢复」：stagedToolNames 在 promoted 时返回 null 表示无需收缩，
+		// 但此前收缩过的会话不会自动回到全量，导致 v4-pro 的助手/画师永远只有
+		// read/return_answer、无法调用 draw_generate/story_read（配图空转根因）。
+		if (isStagedModel(s.model?.id) && promoted) {
+			const minimal = MINIMAL_STAGEHAND_TOOLS.filter((n) => registryNames.includes(n));
+			const isFull = cur.length === registryNames.length && registryNames.every((n) => cur.includes(n));
+			if (!isFull && minimal.length > 0 && cur.length === minimal.length && minimal.every((n) => cur.includes(n))) {
+				s.setActiveToolsByName(registryNames);
+			}
+		}
+	};
+
 	/** 剧情委托挂起：等 return_answer / 放弃 / 兜底 */
 	let pendingReturn: {
 		resolve: (p: AssistantReturnPayload) => void;
@@ -1927,6 +1962,9 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 		} catch {
 			ensureCardTag(s);
 		}
+		// DSH 双阶段：会话加载即对齐工具目录——resume 时历史已有工具调用 → 恢复全量；
+		// 新会话且模型是目标模型 → 先收成 Minimal（read/bash/return_answer）。
+		applyToolStaging(s);
 		return s;
 	};
 
@@ -1961,7 +1999,12 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 
 	const subscribe = () => {
 		unsubscribe?.();
-		unsubscribe = session.subscribe((event) => onEvent(event));
+		unsubscribe = session.subscribe((event) => {
+			// DSH 双阶段晋升：message_end 时本次工具调用已落历史——同一委托的下一轮
+			// 请求（prepareNextTurn 现读 state.tools）即放开全量工具。
+			applyToolStaging(session);
+			onEvent(event);
+		});
 	};
 
 	/** 跟随模式判定：显式模型（opts.model）或 followsStoryModel=false → 不跟随；内置助手仅在 config.assistantModel 配置时跟随（现状语义）；自定义 agent 缺省跟随剧情模型 */
@@ -2011,10 +2054,14 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 	return {
 		async prompt(t: string) {
 			syncFollowModel();
+			// DSH 双阶段：模型跟随切换后对齐工具目录（目标模型未晋升 → Minimal）
+			applyToolStaging(session);
 			await session.prompt(t, session.isStreaming ? { streamingBehavior: "followUp" } : undefined);
 		},
 		async runTask(t: string) {
 			syncFollowModel();
+			// DSH 双阶段：模型跟随切换后对齐工具目录（目标模型未晋升 → Minimal）
+			applyToolStaging(session);
 			// 已有挂起委托：不应重入
 			if (pendingReturn && !pendingReturn.settled) {
 				return {

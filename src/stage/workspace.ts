@@ -23,6 +23,15 @@ import {
 	type DraftEditItem,
 	type DraftRules,
 } from "../draft.ts";
+import {
+	REVIEW_PREFIX,
+	formatReviewReport,
+	formatReviewViolation,
+	parseReviewResult,
+	reviewEvidenceOf,
+	type ReviewGate,
+	type ReviewIssue,
+} from "./review.ts";
 import { applyPatch, canonicalizeCharacterKeys } from "../state.ts";
 import type { WorldState } from "../types.ts";
 
@@ -87,6 +96,14 @@ export interface TurnWorkspace {
 	lastFixKey: string;
 	/** 已放行的违规批次（判为修不掉/验收误报）：runCheck 对同批次不再拦推进 */
 	bailedFixKey: string;
+	/**
+	 * 本拍语义评审结果（8/14，DESIGN-semantic-review）：封笔后旁路模型评审
+	 * （设定一致性/人物一致性/文风与 AI 味）。major 问题并入 pendingViolations
+	 * （带 [评审· 前缀），修复感知 = 证据引文不在现稿中；minor 只提示不拦。
+	 */
+	semanticIssues: ReviewIssue[];
+	/** 本拍是否已跑过语义评审（seal 自动触发 + draft_review 显式触发共用防重复） */
+	reviewed: boolean;
 	checks: number;
 	/**
 	 * 本拍时间线（思考/工具/正文按**发生顺序**）。
@@ -129,6 +146,8 @@ export function createWorkspace(): TurnWorkspace {
 		stuckFixes: 0,
 		lastFixKey: "",
 		bailedFixKey: "",
+		semanticIssues: [],
+		reviewed: false,
 		checks: 0,
 		timeline: [],
 	};
@@ -262,6 +281,14 @@ export interface WorkspaceDeps {
 	 * 主权检查降档——放行「代写对白」，保留「代述内心」「代做决定」。
 	 */
 	relaxSovereignty?: boolean;
+	/**
+	 * 语义评审（8/14，DESIGN-semantic-review）：封笔后旁路模型评审（独立性：
+	 * 主演对话外的单轮调用）。返回旁路原始文本，或 {error} 形态的失败说明；
+	 * 未注入 = 无评审（draft_seal 不触发、draft_review 工具报未启用）。
+	 */
+	runSemanticReview?: (draft: string) => Promise<string | { error: string }>;
+	/** 拦推进的问题门槛（缺省 major：只拦崩人设/吃设定/明显 AI 味，minor 提示不拦） */
+	reviewGate?: ReviewGate;
 }
 
 /** 已入队 patch 依序套在基准账本上的投影——后续 patch 的验证与定稿看到同一个世界 */
@@ -317,7 +344,15 @@ function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green
 	// 安全阀（8/09）：已放行的违规批次（bailedFixKey，见 draft_edit 分支）不再拦——
 	// seal/append 重跑验收时同批违规原样在场，若再进 pending 就前功尽弃。
 	// 比对用稳定前缀口径（冒号前），与 draft_edit 分支的指纹同源。
-	const pendingList = [...violations, ...sov];
+	// 语义评审项（8/14）：带 [评审· 前缀的项从上一轮**继承**——机械项每次重算，
+	// 评审项保留到「证据引文不在现稿中」（draft_edit 定点改动了该处即视为已修）；
+	// 提取不到证据引文的保守保留；安全阀放行时随整批清空。
+	const reviewList = ws.pendingViolations.filter((v) => {
+		if (!v.startsWith(REVIEW_PREFIX)) return false;
+		const ev = reviewEvidenceOf(v);
+		return ev === null || ws.draft.includes(ev);
+	});
+	const pendingList = [...reviewList, ...violations, ...sov];
 	const pendingKey = pendingList.map((v) => v.split("：")[0]).join("|");
 	ws.pendingViolations = pendingKey === ws.bailedFixKey ? [] : pendingList;
 	// 未封笔：连同 notes 里的「正文 N 字，预设建议上/下限」一并滤掉——
@@ -343,10 +378,32 @@ function runCheck(ws: TurnWorkspace, deps: WorkspaceDeps): { text: string; green
 }
 
 /**
+ * 跑一次语义评审（8/14）：seal 自动触发与 draft_review 显式触发共用。
+ * 旁路调用 → 解析 → 门槛内的 major 问题并入 pendingViolations（拦推进）→
+ * 返回回喂文本。任何失败都降级为提示文本，绝不阻断本拍。
+ */
+async function runReviewOnce(ws: TurnWorkspace, deps: WorkspaceDeps): Promise<string> {
+	if (!deps.runSemanticReview) return "（语义评审未启用。）";
+	if (ws.reviewed) return "（本拍已评审过——验收状态见 draft_check。）";
+	const rr = await deps.runSemanticReview(ws.draft);
+	ws.reviewed = true;
+	if (typeof rr !== "string") return `（语义评审调用失败：${rr.error}——已跳过，本拍照常进行。）`;
+	const parsed = parseReviewResult(rr);
+	if (!parsed) return "（语义评审输出不可解析——已跳过评审。）";
+	ws.semanticIssues = parsed.issues;
+	const gate = deps.reviewGate ?? "major";
+	const blocking = gate === "all" ? parsed.issues : parsed.issues.filter((i) => i.severity === "major");
+	if (blocking.length > 0) {
+		ws.pendingViolations.push(...blocking.map((i) => formatReviewViolation(i)));
+	}
+	return formatReviewReport(parsed, gate);
+}
+
+/**
  * 执行一次写侧工具调用。未知工具/参数缺失都返回可读文本（不抛，不打断本拍）。
  * 读侧（lorebook / memory / world_state_get / table_query）仍走 tools.ts runStageTool。
  */
-export function runWriteTool(
+export async function runWriteTool(
 	ws: TurnWorkspace,
 	deps: WorkspaceDeps,
 	name: string,
@@ -358,7 +415,7 @@ export function runWriteTool(
 	 * 若被门禁拦下，这拍的正文就凭空丢了。只有 engine #agentLoop 传 true。
 	 */
 	internal = false,
-): WriteToolResult {
+): Promise<WriteToolResult> {
 	if (name === "beat_plan") {
 		const raw = args.steps;
 		if (!Array.isArray(raw) || raw.length === 0) {
@@ -481,6 +538,13 @@ export function runWriteTool(
 		if (!ws.draft.trim()) return { text: "工作区还没有稿件——先用 draft_write / draft_append 写正文。", ok: false };
 		ws.sealed = true;
 		const c = runCheck(ws, deps);
+		// 语义评审（8/14）：封笔后旁路评审——机械验收照常先跑（不绿照样报，机械问题
+		// 与评审 major 问题一起拦推进、一次修完）。只在「有戏的一拍」（draft_append
+		// 分段演出）触发；寒暄一次交完（appends=0）不烧调用。
+		let reviewBlock = "";
+		if (ws.appends > 0 && deps.runSemanticReview) {
+			reviewBlock = await runReviewOnce(ws, deps);
+		}
 		// 谢幕导向（8/09 输出形式）：状态栏 = 本拍结束的标志。只点名这一步——
 		// seal 发生即收笔评估已做完，回执不再复述「含 ask/续写」条件（8/09 实弹：
 		// 条件从句会让模型在谢幕轮把续写评估再翻一遍）。
@@ -490,7 +554,7 @@ export function runWriteTool(
 				? `\n剩最后一步：在正文之外直接输出状态栏（${sb.map((t) => `<${t}>`).join(" 或 ")}）等格式块——输出完本拍结束。`
 				: "";
 		return {
-			text: `已封笔。按完整稿验收：\n${c.text}${tail}`,
+			text: `已封笔。按完整稿验收：\n${c.text}${reviewBlock ? `\n\n${reviewBlock}` : ""}${tail}`,
 			activity: c.green ? "封笔 · 验收通过" : "封笔 · 需修改",
 			ok: true,
 		};
@@ -500,6 +564,18 @@ export function runWriteTool(
 		if (!ws.draft.trim()) return { text: "尚无稿件——先用 draft_write 交稿。", ok: false };
 		const c = runCheck(ws, deps);
 		return { text: c.text, activity: c.green ? "验收通过" : "验收未过", ok: true };
+	}
+
+	if (name === "draft_review") {
+		if (!ws.draft.trim()) return { text: "尚无稿件——先用 draft_write / draft_append 写正文，再评审。", ok: false };
+		if (!deps.runSemanticReview) return { text: "语义评审未启用（未注入评审依赖）。", ok: false };
+		const reviewBlock = await runReviewOnce(ws, deps);
+		const body = extractDraftBody(ws.draft).replace(/\s+/g, "").length;
+		return {
+			text: `（正文 ${body} 字）\n${reviewBlock}`,
+			activity: "语义评审",
+			ok: true,
+		};
 	}
 
 	if (name === "draft_edit") {

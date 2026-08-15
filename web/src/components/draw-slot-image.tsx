@@ -30,6 +30,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api.ts";
 import { ZoomImg } from "./Messages.tsx";
 import { InpaintModal } from "./InpaintModal.tsx";
@@ -134,7 +135,10 @@ function TagEditPanelModal({
 		}
 	};
 
-	return (
+	// 2026-08-14 修复：主聊天消息容器（.list）玻璃化带 backdrop-filter——该属性会把
+	// fixed 定位后代的包含块从视口变成该容器，弹窗被裁剪在消息列表内（表现：点了没反应）。
+	// 弹窗一律 Portal 到 body，脱离容器包含块；画廊等非消息容器场景行为不变。
+	return createPortal(
 		<div className="inpaint-modal" role="dialog" aria-modal="true" aria-labelledby="draw-tag-edit-title">
 			<div className="inpaint-dialog draw-tag-edit-dialog">
 				<h3 id="draw-tag-edit-title">编辑 TAG</h3>
@@ -194,7 +198,8 @@ function TagEditPanelModal({
 					</button>
 				</div>
 			</div>
-		</div>
+		</div>,
+		document.body,
 	);
 }
 
@@ -279,7 +284,7 @@ function AiRefineModal({
 		}
 	};
 
-	return (
+	return createPortal(
 		<div className="inpaint-modal" role="dialog" aria-modal="true" aria-labelledby="draw-refine-title">
 			<div className="inpaint-dialog draw-refine-dialog">
 				<h3 id="draw-refine-title">AI 微调</h3>
@@ -347,7 +352,8 @@ function AiRefineModal({
 					</button>
 				</div>
 			</div>
-		</div>
+		</div>,
+		document.body,
 	);
 }
 
@@ -431,21 +437,22 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 		// 后端剥离不生效，前端直接留白兜底）
 		return null;
 	}
-	if (info.failed || (!info.src && info.hasFailed)) {
-		// 失败态（LWB storeFailedPlaceholder）：不显示图，给「保存并重试」
-		const reason = info.failed?.reason || info.failed?.code || "未知错误";
-		return (
-			<span className="draw-slot-wrap">
-				<div className="draw-slot draw-slot-failed">
-					<span className="draw-slot-failed-msg">⚠ 生成失败：{reason}</span>
-					<button type="button" className="act" disabled={busy} onClick={() => void retry()}>
-						保存并重试
-					</button>
-				</div>
-				{notice && <div className="draw-notice">{notice}</div>}
-			</span>
-		);
-	}
+		if (info.failed || (!info.src && info.hasFailed)) {
+			// 失败态（LWB storeFailedPlaceholder）：不显示图，给「保存并重试」
+			const reason = info.failed?.reason || info.failed?.code || "未知错误";
+			return (
+				<span className="draw-slot-wrap">
+					<div className="draw-slot draw-slot-failed">
+						<span className="draw-slot-failed-msg">⚠ 生成失败：{reason}</span>
+						<button type="button" className="act" disabled={busy} onClick={() => void retry()}>
+							保存并重试
+						</button>
+					</div>
+					{/* 瞬时提示同弹窗：portal 到 body（.list backdrop-filter 会困住 fixed 层） */}
+					{notice && createPortal(<div className="draw-notice">{notice}</div>, document.body)}
+				</span>
+			);
+		}
 	if (!info.src) {
 		// 无 src 且非失败态（已清理）：不渲染标记（同用户裁决——失效占位无用）
 		return null;
@@ -667,7 +674,8 @@ export function DrawSlotImage({ slotId }: { slotId: string }) {
 					onClose={() => setRefineOpen(false)}
 				/>
 			)}
-			{notice && <div className="draw-notice">{notice}</div>}
+			{/* 瞬时提示同弹窗：portal 到 body（.list backdrop-filter 会困住 fixed 层） */}
+			{notice && createPortal(<div className="draw-notice">{notice}</div>, document.body)}
 		</span>
 	);
 }

@@ -880,6 +880,7 @@ const CONFIG_EDITABLE = new Set([
 	"language",
 	"scanDepth",
 	"maxLoreInjections",
+	"compactEveryNTurns",
 	"greeting",
 	"greetingIndex",
 	"importStripTags",
@@ -894,6 +895,7 @@ const CONFIG_EDITABLE = new Set([
 	"sideJailbreak",
 	"developerMode",
 	"chatTrace",
+	"semanticReview",
 	"agents",
 	"plugins",
 ]);
@@ -962,6 +964,19 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 	// 开发者开关：只认布尔（false 是合法值，不会被空值删除逻辑清掉）
 	next.developerMode = next.developerMode === true;
 	next.chatTrace = next.chatTrace === true;
+	// 语义评审（8/14）：只认 { enabled: bool, gate: major|all }；非法/空值删除（缺省=默认开启）
+	if (next.semanticReview !== undefined) {
+		const sr = next.semanticReview as Record<string, unknown> | null;
+		if (!sr || typeof sr !== "object" || Array.isArray(sr)) {
+			delete next.semanticReview;
+		} else {
+			const clean: Record<string, unknown> = {};
+			if (sr.enabled === true || sr.enabled === false) clean.enabled = sr.enabled;
+			if (sr.gate === "major" || sr.gate === "all") clean.gate = sr.gate;
+			if (Object.keys(clean).length === 0) delete next.semanticReview;
+			else next.semanticReview = clean;
+		}
+	}
 	// 挂载书：lorebooks 数组优先；兼容旧单本 lorebook
 	const paths = mountedLorebookPaths(next as RpConfig);
 	Object.assign(next, setMountedLorebooks(next as RpConfig, paths));

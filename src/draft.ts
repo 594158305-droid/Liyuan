@@ -242,8 +242,30 @@ function normalizePunct(s: string): string {
 		.replace(/[ 　  ]/g, " ");
 }
 
+/**
+ * 空白折叠：连续空白（空格/换行/全角空格等）折叠为单个空格，并记录折叠后每个字符的原文区间。
+ * 仅供 locateEdit 第四级（flex）匹配用——折叠后命中下标经 spans 映射回原文，不改原始文本。
+ */
+function foldWhitespace(s: string): { text: string; spans: Array<[number, number]> } {
+	let out = "";
+	const spans: Array<[number, number]> = [];
+	for (let i = 0; i < s.length; ) {
+		if (/\s/.test(s[i]!)) {
+			const st = i;
+			while (i < s.length && /\s/.test(s[i]!)) i++;
+			out += " ";
+			spans.push([st, i]);
+		} else {
+			out += s[i]!;
+			spans.push([i, i + 1]);
+			i++;
+		}
+	}
+	return { text: out, spans };
+}
+
 /** 定位命中级别——非精确命中要在 toolResult 里说明，模型才知道自己引得不准 */
-export type EditMatchLevel = "exact" | "trimmed" | "punct";
+export type EditMatchLevel = "exact" | "trimmed" | "punct" | "flex";
 
 export interface EditLocation {
 	start: number;
@@ -298,12 +320,27 @@ export function locateEdit(text: string, old: string): { ok: true; at: EditLocat
 		return { ok: false, error: `old（标点归一后）在现稿中出现 ${hits.length} 处——请扩大引用范围使其唯一。` };
 	}
 
+	// 四级：标点归一 + 空白折叠（换行/空格/全角空格互认）。引文把空白压平过
+	// （8/14 实弹：半角引号在段首，模型按压平后的空格复制 old，实际是换行，三级全灭——
+	// 白白猜了几千字引号字符）；此处折叠后双向容忍，命中下标经 spans 映射回原文。
+	const flexText = foldWhitespace(normalizePunct(text));
+	const flexOld = foldWhitespace(normalizePunct(trimmed));
+	hits = findAll(flexText.text, flexOld.text);
+	if (hits.length === 1) {
+		const start = flexText.spans[hits[0]!]![0];
+		const end = flexText.spans[hits[0]! + flexOld.text.length - 1]![1];
+		return { ok: true, at: { start, end, level: "flex" } };
+	}
+	if (hits.length > 1) {
+		return { ok: false, error: `old（忽略空白与标点后）在现稿中出现 ${hits.length} 处——请扩大引用范围使其唯一。` };
+	}
+
 	return {
 		ok: false,
 		// 回显模型自己声称的 old（对标 Codex lib.rs:790）——让它自己看出幻觉
 		error:
 			`old 在现稿中找不到。你引用的是：\n「${trimmed.slice(0, 80)}${trimmed.length > 80 ? "…" : ""}」\n` +
-			`须与现稿逐字一致。用 draft_search 取回精确原文，或 draft_read 通读现稿后重试。`,
+			`须与现稿逐字一致。用 draft_search 取回精确原文（引文里换行显示为 ⏎——复制 old 时把 ⏎ 还原成真正的换行），或 draft_read 通读现稿后重试。`,
 	};
 }
 
@@ -376,7 +413,13 @@ export function applyDraftEdits(text: string, edits: DraftEditItem[]): DraftEdit
 
 	for (const { at, item, idx } of located) {
 		const lvl =
-			at.level === "exact" ? "" : at.level === "trimmed" ? "（按忽略首尾空白匹配）" : "（按标点归一匹配）";
+			at.level === "exact"
+				? ""
+				: at.level === "trimmed"
+					? "（按忽略首尾空白匹配）"
+					: at.level === "punct"
+						? "（按标点归一匹配）"
+						: "（按标点归一+空白折叠匹配）";
 		const from = item.old.trim();
 		details.push(
 			`第 ${idx + 1} 处${lvl}：${from.slice(0, 24)}${from.length > 24 ? "…" : ""} → ` +
@@ -386,11 +429,19 @@ export function applyDraftEdits(text: string, edits: DraftEditItem[]): DraftEdit
 	return { ok: true, text: out, details };
 }
 
-/** 命中处的上下文引用（±pad 字，空白压平）——draft_search 与验收报告共用 */
+/**
+ * 命中处的上下文引用（±pad 字）——draft_search 与验收报告共用。
+ * 水平空白压平为单空格，换行转 ⏎ 可见标记：8/14 实弹里引号在段首（前是换行），
+ * 压平成空格后模型复制的 old 永远匹配不上（白烧几千 token 猜引号字符）。
+ */
 const ctxQuote = (text: string, idx: number, len: number, pad = 8): string => {
 	const from = Math.max(0, idx - pad);
 	const to = Math.min(text.length, idx + len + pad);
-	return `${from > 0 ? "…" : ""}${text.slice(from, to).replace(/\s+/g, " ")}${to < text.length ? "…" : ""}`;
+	const slice = text
+		.slice(from, to)
+		.replace(/[^\S\r\n]+/g, " ")
+		.replace(/\r?\n/g, "⏎");
+	return `${from > 0 ? "…" : ""}${slice}${to < text.length ? "…" : ""}`;
 };
 
 /** draft_search：在现稿中定位文字，返回 ±24 字上下文引用（供 draft_edit 取精确原文） */

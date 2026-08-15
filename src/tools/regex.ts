@@ -490,7 +490,8 @@ export const regexManage: ToolSpec<RegexDeps> = {
 			cardRuleKey: { type: "string", description: "scope=card 时编辑卡内嵌规则：规则键（ruleKey=id/name/source）；update=写覆盖，delete=还原删除覆盖（均不改卡文件）" },
 			group: { type: "number", description: "组 index（缺省 0=未分组）" },
 			rule: { type: "number", description: "规则 index（缺省=操作整个组；scope=card 的 toggle 时引用卡内嵌规则 index）" },
-			moveDelta: { type: "number", enum: [-1, 1], description: "move 时移动方向：-1=上移 / 1=下移" },
+			// 数字 enum 会让 OpenRouter→Gemini 转换丢整个 properties（required 失配 400），改用 min/max 表达；取值仍由 run 校验
+			moveDelta: { type: "number", minimum: -1, maximum: 1, description: "move 时移动方向：-1=上移 / 1=下移（仅 -1/1 合法）" },
 			name: { type: "string", description: "组名或规则名" },
 			findRegex: { type: "string", description: "正则（可带 /pattern/flags 或裸串；创建/更新/试运行用 parseFindRegex 校验）" },
 			replace: { type: "string", description: "替换串（支持 $1/$n、$&、$<name>、{{match}}、{{char}}/{{user}} 宏）" },
@@ -498,7 +499,7 @@ export const regexManage: ToolSpec<RegexDeps> = {
 			trimStrings: { type: "array", items: { type: "string" }, description: "替换前从捕获值中逐个剔除的子串（可含 {{char}}/{{user}}）" },
 			placement: { type: "array", items: { type: "number" }, description: "作用范围：1=用户输入/2=AI输出/3=快捷命令/5=世界信息/6=推理" },
 			runOnEdit: { type: "boolean", description: "编辑消息时运行（存储字段，显示层不生效）" },
-			substituteRegex: { type: "number", enum: [0, 1, 2], description: "查找时宏档位：0=不替换 1=raw 2=escaped（缺省=escaped 历史行为）" },
+			substituteRegex: { type: "number", minimum: 0, maximum: 2, description: "查找时宏档位：0=不替换 1=raw 2=escaped（仅 0/1/2 合法，缺省=escaped 历史行为）" },
 			minDepth: { type: ["number", "null"], description: "深度下限（null=不限；存储字段，显示层不生效）" },
 			maxDepth: { type: ["number", "null"], description: "深度上限（null=不限；存储字段，显示层不生效）" },
 			markdownOnly: { type: "boolean", description: "仅格式显示（存储透传）" },

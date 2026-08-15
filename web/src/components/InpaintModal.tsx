@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 const BRUSH_WIDTH = 30;
 const BRUSH_DOT_R = BRUSH_WIDTH / 2;
@@ -154,7 +155,9 @@ export function InpaintModal({
 		onConfirm(b64);
 	};
 
-	return (
+	// 2026-08-14 修复：主聊天消息容器（.list）backdrop-filter 会成为 fixed 弹窗的包含块，
+	// 弹窗被裁剪在消息列表内（表现：点了没反应）。Portal 到 body 脱离容器。
+	return createPortal(
 		<div className="inpaint-modal" role="dialog" aria-modal="true" aria-labelledby="inpaint-title">
 			<div className="inpaint-dialog">
 				<h3 id="inpaint-title">局部重绘</h3>
@@ -182,6 +185,7 @@ export function InpaintModal({
 					</button>
 				</div>
 			</div>
-		</div>
+		</div>,
+		document.body,
 	);
 }

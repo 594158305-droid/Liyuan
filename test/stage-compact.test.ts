@@ -102,6 +102,46 @@ test("rebuildHistory：锚点丢失（异常树）时退守到摘要条目之前
 	assert.equal(history.length, 0, "退守 = 摘要之前全覆盖");
 });
 
+// ---------------- 8/15：压缩落树后 reroll，摘要挂在焦点分支外 ----------------
+
+test("activeSummary：摘要条目不在焦点分支上，锚点在分支上仍生效（传 allEntries）", () => {
+	const branch = beats(5);
+	// 全树里一条摘要挂在焦点分支外的旁支（压缩后 reroll 的典型场景），锚点 a-2 在焦点分支上
+	const allEntries: BranchEntryLike[] = [
+		...branch,
+		{
+			id: "off-branch",
+			type: "custom",
+			customType: SUMMARY_ENTRY_TYPE,
+			data: { summary: "前情摘要。", coversThroughId: "a-2" },
+		},
+	];
+	const active = activeSummary(branch, allEntries);
+	assert.ok(active);
+	assert.equal(active.summary, "前情摘要。");
+	assert.equal(active.cut, 4, "锚点 a-2 在焦点分支 index 3 → cut=4");
+	// 不传 allEntries（旧调用方）行为不变：焦点分支上没有摘要 = null
+	assert.equal(activeSummary(branch), null);
+});
+
+test("rebuildHistory：摘要挂在焦点分支外，传全树后按锚点折叠历史", () => {
+	const branch = beats(4);
+	const allEntries: BranchEntryLike[] = [
+		...branch,
+		{ id: "off-branch", type: "custom", customType: SUMMARY_ENTRY_TYPE, data: { summary: "旁支摘要。", coversThroughId: "a-2" } },
+	];
+	const { history, summary } = rebuildHistory(branch, allEntries);
+	assert.equal(summary, "旁支摘要。");
+	const text = history.map((m) => m.text).join("\n");
+	assert.ok(!text.includes("第 1 拍"), "锚点前的第 1 拍折叠");
+	assert.ok(!text.includes("第 2 拍"), "锚点前的第 2 拍折叠");
+	assert.ok(text.includes("第 3 拍") && text.includes("第 4 拍"), "锚点后的拍保留");
+	// 不传 allEntries：焦点分支上没有摘要 → 历史照旧全在（旧行为）
+	const { history: h2, summary: s2 } = rebuildHistory(branch);
+	assert.equal(s2, undefined);
+	assert.equal(h2.length, 8);
+});
+
 test("无摘要的分支：summary 为 undefined，历史照旧全在", () => {
 	const { history, summary } = rebuildHistory(beats(2));
 	assert.equal(summary, undefined);

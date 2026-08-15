@@ -37,6 +37,42 @@ export interface StageTool {
 	parameters: Record<string, unknown>;
 }
 
+/**
+ * 装配期 schema 自检（8/14 防回归）：递归校验全部工具 schema——MCP 透传的也在此列。
+ * 1) required 引用的字段必须存在于同层 properties；
+ * 2) enum 值必须全是字符串——**数字 enum 会让 OpenRouter→Gemini 转换丢整个 properties**，
+ *    Google 侧报「required[0]: property is not defined」400（web_search safesearch 实测踩中）。
+ * 发现即 console.warn，不阻塞装配。
+ */
+export function validateStageToolSchemas(tools: Array<{ name: string; parameters: Record<string, unknown> }>): void {
+	const bad: string[] = [];
+	for (const t of tools) walk(t.name, t.parameters);
+	function walk(name: string, params: Record<string, unknown> | undefined, path = ""): void {
+		if (!params || typeof params !== "object") return;
+		const props = (params.properties ?? {}) as Record<string, unknown>;
+		const req = Array.isArray(params.required) ? (params.required as unknown[]) : [];
+		for (const r of req) {
+			if (typeof r === "string" && !(r in props)) {
+				bad.push(`${name}${path}: required[${r}] 不在 properties（现有：${Object.keys(props).join(",") || "空"}）`);
+			}
+		}
+		for (const [k, v] of Object.entries(props)) {
+			if (!v || typeof v !== "object") continue;
+			const sub = v as Record<string, unknown>;
+			if (Array.isArray(sub.enum) && sub.enum.some((e) => typeof e !== "string")) {
+				bad.push(`${name}${path}.${k}: enum 含非字符串值（${JSON.stringify(sub.enum)}）——OpenRouter→Gemini 会丢整个 properties`);
+			}
+			if (sub.items && typeof sub.items === "object") walk(name, sub.items as Record<string, unknown>, `${path}.${k}.items`);
+			if (sub.properties && typeof sub.properties === "object") {
+				walk(name, { properties: sub.properties, required: sub.required } as Record<string, unknown>, `${path}.${k}`);
+			}
+		}
+	}
+	if (bad.length > 0) {
+		console.warn(`[stage] 工具 schema 自检发现问题（${bad.length} 处）：\n` + bad.map((b) => `  - ${b}`).join("\n"));
+	}
+}
+
 /** 命中形（M-D1/M-D3 起由统一工具层定义，此处再导出保持既有引用不变） */
 export type { LoreHitLike, MemoryHitLike };
 
@@ -255,6 +291,13 @@ export function writeTools(language: string): StageTool[] {
 			description:
 				"对当前稿运行验收（代码判：字数/禁词/格式/主权红线），返回报告。" +
 				"draft_write 收稿与 draft_edit 改稿时都已自动验收；此工具用于额外复验。全绿即可定稿。",
+			parameters: { type: "object", properties: {}, required: [] },
+		},
+		{
+			name: "draft_review",
+			description:
+				"对当前稿运行语义评审（旁路模型判：设定一致性/人物一致性/文风与AI味），返回问题清单（每条含证据引文与可执行改法）。" +
+				"封笔时已自动评审；此工具用于额外复验。major 问题会拦推进，用 draft_edit 定点修。",
 			parameters: { type: "object", properties: {}, required: [] },
 		},
 		{
