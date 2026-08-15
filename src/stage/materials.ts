@@ -44,6 +44,11 @@ import {
 } from "../preset-split.ts";
 import { enabledBlocks, normalizeRpPreset, type PresetBlock, type RpPreset } from "../preset.ts";
 import { resolveConfigPath } from "../paths.ts";
+import {
+	loadStyleBaselineFile,
+	resolveStyleBaseline,
+	type StyleBaselineCard,
+} from "../style-baseline.ts";
 import { DEFAULT_CONFIG, type CharacterCard, type LorebookEntry, type RpConfig } from "../types.ts";
 
 /**
@@ -60,6 +65,8 @@ export interface StageMaterials {
 	preset: RpPreset | null;
 	/** 拆层表（内置命中；null＝未知预设走四类兜底）——engine 对 postHistory 每拍复用 */
 	splitTable: PresetSplitTable | null;
+	/** 文风卡（DESIGN-style-baseline §2）：本场唯一文风来源，按拆层表 key 选卡 */
+	styleBaseline: StyleBaselineCard;
 	/** 轮次卡模板（assets/flow/round-cards.json + 配置 flowTemplates 覆盖，DESIGN-flow-config §2） */
 	roundCards: RoundCardTemplate[];
 	/** 流程配置加载警告（非法正则跳过等；engine 按内容去重播报一次） */
@@ -197,6 +204,10 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 	const allEnabledNames = preset ? preset.blocks.filter((b) => b.enabled).map((b) => b.name) : [];
 	const splitTable = preset ? findSplitTable(allEnabledNames, splitTables) : null;
 
+	// 文风卡（DESIGN-style-baseline）：与拆层表同 key 选卡；未知预设回落默认卡。
+	// 文风唯一来源——harness 只引用本卡，不定义文风。
+	const styleBaseline = resolveStyleBaseline(loadStyleBaselineFile(cwd), config.styleBaseline, splitTable?.key);
+
 	const presetResidentA: PresetBlock[] = [];
 	const presetResidentB: string[] = [];
 	const presetResidentC: string[] = [];
@@ -282,6 +293,7 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 		entries,
 		preset,
 		splitTable,
+		styleBaseline,
 		roundCards,
 		flowWarnings,
 		presetResidentA,

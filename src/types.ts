@@ -319,6 +319,51 @@ export interface RpConfig {
 	 * 预留接口，未挂进回合流程），仅声明字段与 factory 支持，为将来激活而设。
 	 */
 	intentRegex?: IntentRegexConfig;
+	/**
+	 * 语义评审（2026-08-14，DESIGN-semantic-review）：封笔后由旁路模型做一次
+	 * 设定一致性/人物一致性/文风与 AI 味评审，major 问题并入修复门禁
+	 * （主演 draft_edit 定点修，与机械违规同一通道）。
+	 * 缺省开启（enabled=true, gate=major）；成本敏感可 enabled=false 关闭。
+	 */
+	semanticReview?: SemanticReviewConfig;
+	/**
+	 * 文风卡覆盖（2026-08-15，DESIGN-style-baseline）：assets/flow/style-baseline.json
+	 * 之上按 key 覆盖——default 键替换默认卡；presets 内同名键替换预设卡，未提供的继承。
+	 * 文风卡是本场唯一文风来源；harness 只引用它，不定义文风。
+	 */
+	styleBaseline?: StyleBaselineConfig;
+}
+
+/** 文风卡（DESIGN-style-baseline §2）：唯一文风来源，四要素齐全才算合法 */
+export interface StyleBaselineCard {
+	/** 声音：叙述者是谁、对谁说，一句话 */
+	voice: string;
+	/** 参考系：一个可替换的文风方向（单选，不叠加） */
+	reference: string;
+	/** 正例：目标声音的一段完整示范 */
+	positive: string;
+	/** 反例：三个跑偏原型（分镜腔 / 散文腔 / 流水账腔），不是穷举清单 */
+	negatives: {
+		shot: string;
+		prose: string;
+		ledger: string;
+	};
+	/** 自检问题：落笔前后各问一次 */
+	check: string;
+}
+
+/** 文风卡配置覆盖（DESIGN-style-baseline §4）：default 盖默认卡，presets 按 key 盖预设卡 */
+export interface StyleBaselineConfig {
+	default?: StyleBaselineCard;
+	presets?: Record<string, StyleBaselineCard>;
+}
+
+/** 语义评审配置（2026-08-14，DESIGN-semantic-review §配置） */
+export interface SemanticReviewConfig {
+	/** 总开关（缺省 true：封笔后有戏的一拍自动评审一次） */
+	enabled?: boolean;
+	/** 拦推进的问题门槛（缺省 major：只拦崩人设/吃设定/明显 AI 味，minor 提示不拦） */
+	gate?: "major" | "all";
 }
 
 /** 轮次卡模板（DESIGN-flow-config §2）：key 为程序判定键，title 含【】卡名，body 含占位符 */

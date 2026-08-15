@@ -77,6 +77,7 @@ import {
 	soundFxToolNames,
 	soundFxTools,
 	stageTools,
+	validateStageToolSchemas,
 	writeTools,
 	writingGuideTool,
 	type MemoryHitLike,
@@ -110,6 +111,8 @@ import {
 	type TurnWorkspace,
 	type WorkspaceDeps,
 } from "./workspace.ts";
+import { buildReviewPrompt } from "./review.ts";
+import { isStagedModel, minimalStageTools, TOOL_STAGED_ENTRY_TYPE } from "../tool-staging.ts";
 
 // ---------------- 依赖面（结构类型，不引 @liyuan/agent-runtime） ----------------
 
@@ -206,6 +209,12 @@ export interface StageEngineDeps {
 	getSessionManager: () => StageSessionManager;
 	getModel: () => StageModelLike | undefined;
 	getAuth: (model: StageModelLike) => Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+	/**
+	 * 旁挂模型（8/14，config.sideModel 接上台）：台上旁路（语义评审/场记/压缩摘要）
+	 * 统一「旁挂模型 → 剧情模型」回退。由宿主解析（modelRegistry.find，找不到回退）；
+	 * 未注入 = 全部旁路跟随剧情模型（getModel()）。
+	 */
+	getSideModel?: () => StageModelLike | undefined;
 	/** 会话当前思考档（用户自由，引擎透传） */
 	getThinking?: () => string | undefined;
 	/** 账本磁盘缓存路径（.liyuan-state/<sessionId>.json）；给出则场记落盘（fs.watch → state 帧） */
@@ -305,8 +314,12 @@ const thinkingTextOf = (m: AssistantMsgLike | null | undefined): string =>
 /** 模型展示名（provider/id；主聊天跟踪元信息用） */
 const modelIdOf = (m: StageModelLike): string => `${m.provider}/${m.id}`;
 
+/** DSH 双阶段：分支上是否已有晋升标记（rp-tool-staged 协议条目）——resume/fork 后按条目推导，永不回退 */
+const toolStagedOnBranch = (branch: BranchEntryLike[]): boolean =>
+	branch.some((e) => e.type === "custom" && e.customType === TOOL_STAGED_ENTRY_TYPE);
+
 /** 写侧草稿工具（主聊天跟踪 draft 事件：交稿全文 + 验收报告） */
-const DRAFT_TOOLS = new Set(["draft_write", "draft_append", "draft_edit", "draft_seal", "draft_check"]);
+const DRAFT_TOOLS = new Set(["draft_write", "draft_append", "draft_edit", "draft_seal", "draft_check", "draft_review"]);
 
 /**
  * 轮次卡（P1 注入层）：按工作区状态给出「你现在在第几步」的显式信号。
@@ -543,6 +556,9 @@ export class StageEngine {
 			ev.onNotify?.("error", "尚未配置剧情模型——请先在「连接」面板选择模型。");
 			return { aborted: false, error: "no-model" };
 		}
+		// 旁挂模型（8/14，config.sideModel）：台上旁路（评审/场记/压缩）统一用它，
+		// 回退剧情模型。每拍解析一次（宿主侧读盘，与素材现读同节奏）。
+		const sideModel = this.#deps.getSideModel?.() ?? model;
 
 		// 主聊天跟踪：会话头（角色卡/预设/模型/时间等元信息，只写一次）+ 回合开始
 		if (traceOn) {
@@ -562,10 +578,10 @@ export class StageEngine {
 			sm.appendMessage(nowMsg(userText));
 		}
 
-		// 上下文 = f(分支)
+		// 上下文 = f(分支)；全树条目兜底：摘要挂在焦点分支外时仍按覆盖锚点生效（8/15 压缩挂错分支修复）
 		const branch = sm.getBranch() as BranchEntryLike[];
 		const state = this.#effectiveState(branch);
-		const { history, lastUserText, lastNarrativeText, summary } = rebuildHistory(branch);
+		const { history, lastUserText, lastNarrativeText, summary } = rebuildHistory(branch, sm.getEntries());
 		if (!history.some((m) => m.role === "user")) {
 			ev.onNotify?.("error", "没有可开演的用户输入。");
 			return { aborted: false, error: "no-user-input" };
@@ -659,6 +675,15 @@ export class StageEngine {
 			...(assistantTool ? [assistantTool] : []),
 			...mcpTools,
 		];
+		// 装配期 schema 自检：required 失配 / 数字 enum 都可能导致 Gemini 侧 400（OpenRouter 转换）
+		validateStageToolSchemas(tools);
+		// DSH 双阶段工具暴露（src/tool-staging.ts）：会话未晋升时首轮只给读侧+规划工具——
+		// V4 Pro 强依赖可见工具目录选轨迹，小目录让它先侦查/规划再放开（首次工具调用后的
+		// 下一轮请求即全量）。晋升标记 = 会话树 rp-tool-staged 协议条目（rp-summary 同款
+		// CustomEntry，不进送模流不进历史）；null = 不启用（非目标模型/已晋升，现状全量）。
+		const stagedTools = isStagedModel(model.id) && !toolStagedOnBranch(branch)
+			? minimalStageTools(tools, readDeps)
+			: null;
 		const ws = createWorkspace();
 		const wsDeps: WorkspaceDeps = {
 			rules: extractDraftRules(
@@ -669,12 +694,35 @@ export class StageEngine {
 			charName: card.name,
 			baseState: state,
 			...(materials.sovereigntyRelaxed ? { relaxSovereignty: true } : {}),
+			// 语义评审（8/14，DESIGN-semantic-review）：封笔后旁路模型评审设定/人物/文风
+			// 一致性——补机械验收判不了的人格漂移盲区。材料自包含（评审提示词独立于
+			// 主演上下文）；失败降级为提示，绝不阻断本拍。
+			reviewGate: config.semanticReview?.gate === "all" ? "all" : "major",
+			...(config.semanticReview?.enabled !== false
+				? {
+						runSemanticReview: async (draft) => {
+							const m = sideModel;
+							if (!m) return { error: "尚未配置剧情模型" };
+							const auth = await this.#deps.getAuth(m);
+							const { systemPrompt, userText } = buildReviewPrompt({
+								draft,
+								persona: card.personality ?? "",
+								presetA: materials.presetResidentA.map((b) => b.content),
+								styleBaseline: materials.styleBaseline,
+								worldState: formatState(state),
+								language: config.language,
+							});
+							return this.#sideText(m, systemPrompt, userText, auth, 4096, "review", traceOn);
+						},
+					}
+				: {}),
 		};
 
 		const systemPrompt = buildStageSystemPrompt({
 			card,
 			config,
 			constantLore: constantLoreOf(materials),
+			styleBaseline: materials.styleBaseline,
 			presetResident: {
 				aBlocks: materials.presetResidentA,
 				styleTexts: materials.presetResidentB,
@@ -776,18 +824,23 @@ export class StageEngine {
 			};
 		}
 
+		// 首轮工具目录 = 双阶段裁剪后的清单（未启用时全量）
+		const firstTools = stagedTools ?? tools;
+		// 本拍是否出现过工具调用（DSH 晋升触发：turn 收尾时据此落 rp-tool-staged 标记）
+		let turnToolUsed = false;
+
 		// 主聊天跟踪：本拍送模完整上下文（system + messages + tools 全文）
 		if (traceOn) {
 			trace!.record(sessionId, {
 				kind: "prompt",
 				systemPrompt,
 				messages,
-				tools,
+				tools: firstTools,
 				...(thinking ? { reasoning: thinking } : {}),
 			});
 		}
 
-		const s = this.#deps.streamFn(model, { systemPrompt, messages, tools }, options);
+		const s = this.#deps.streamFn(model, { systemPrompt, messages, tools: firstTools }, options);
 		let final: AssistantMsgLike | null = null;
 		let errored: string | undefined;
 		let text = "";
@@ -828,6 +881,7 @@ export class StageEngine {
 				messages,
 				first: final,
 				tools,
+				stagedTools,
 				ws,
 				wsDeps,
 				roundCards: materials.roundCards,
@@ -840,6 +894,7 @@ export class StageEngine {
 			if (turn.errored) errored = turn.errored;
 			text += turn.text;
 			loopTail = turn.tailText ?? turn.text;
+			turnToolUsed = turn.toolUsed;
 		}
 
 		const aborted = final?.stopReason === "aborted";
@@ -849,7 +904,7 @@ export class StageEngine {
 		// 不封笔的稿从未按完整稿验收过——此处程序化补一次，让字数/模块/主权
 		// 与一次性交稿走同一口径；报告只进日志，不再回喂模型（本拍已谢幕）。
 		if (ws.appends > 0 && !ws.sealed && ws.draft.trim()) {
-			runWriteTool(ws, wsDeps, "draft_seal", {});
+			await runWriteTool(ws, wsDeps, "draft_seal", {});
 		}
 
 		// 定稿 = 工作区稿（工件）；工作区空（中断半拍/循环认栽）退回直出正文
@@ -897,6 +952,14 @@ export class StageEngine {
 			sm.flush();
 		}
 
+		// DSH 双阶段晋升落树（rp-summary 同款 CustomEntry，不进送模流不进历史）：
+		// 本拍出现过工具调用 → 会话升级为全量工具，此后所有拍直接全量（目录只变一次）。
+		// 条件里的 stagedTools 非 null 保证只在「启用且未晋升」时落（非目标模型绝不写）。
+		if (turnToolUsed && stagedTools) {
+			sm.appendCustomEntry(TOOL_STAGED_ENTRY_TYPE, { model: modelIdOf(model), at: Date.now() });
+			sm.flush();
+		}
+
 		if (errored && !aborted) {
 			ev.onNotify?.("error", `生成失败：${errored}`);
 			endTrace(false, errored);
@@ -924,7 +987,7 @@ export class StageEngine {
 				const r = await runScribeTurn(
 					{
 						// 4096：tables-only 时输出全为表格 JSON（19 表每轮维护），2048 实测可能截断出半截 JSON（8/03）
-						sideText: (sp, ut) => this.#sideText(model, sp, ut, { apiKey, headers }, 4096, "scribe", traceOn),
+						sideText: (sp, ut) => this.#sideText(sideModel, sp, ut, { apiKey, headers }, 4096, "scribe", traceOn),
 						getLeafId: () => sm.getLeafId(),
 						onActivity: (d) => ev.onActivity?.(d),
 					},
@@ -969,7 +1032,7 @@ export class StageEngine {
 		// 放在谢幕前的最后一步——记账已落，摘要能读到最新账本；叶守卫在 runCompaction 内。
 		// 压缩失败/未到期都只是跳过，下一拍会再判一次。
 		if (entryId && !aborted && finalText) {
-			await this.#compact(model, { apiKey, headers }, config.compactEveryNTurns ?? 30);
+			await this.#compact(sideModel, { apiKey, headers }, config.compactEveryNTurns ?? 30);
 		}
 		endTrace(aborted);
 		return { aborted, entryId };
@@ -983,7 +1046,8 @@ export class StageEngine {
 	 */
 	async compactNow(): Promise<CompactOutcome> {
 		if (this.#busy) return { kind: "skipped", reason: "busy" };
-		const model = this.#deps.getModel();
+		// 手动压缩同口径：旁挂模型 → 剧情模型回退
+		const model = this.#deps.getSideModel?.() ?? this.#deps.getModel();
 		if (!model) return { kind: "failed", error: "尚未配置剧情模型" };
 		this.#busy = true;
 		try {
@@ -1071,6 +1135,8 @@ export class StageEngine {
 		messages: unknown[];
 		first: AssistantMsgLike;
 		tools: StageTool[];
+		/** DSH 双阶段：非 null 时未晋升的轮次只给该 Minimal 目录（读侧+规划），首次工具调用后放开全量 */
+		stagedTools: StageTool[] | null;
 		ws: TurnWorkspace;
 		wsDeps: WorkspaceDeps;
 		/** 轮次卡模板（assets/flow/round-cards.json + 配置覆盖，每拍素材现读） */
@@ -1083,7 +1149,7 @@ export class StageEngine {
 		directText: string;
 		/** 主聊天跟踪（本拍开关，调用方按 config.chatTrace 现读） */
 		traceOn: boolean;
-	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string; tailText?: string }> {
+	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string; tailText?: string; toolUsed: boolean }> {
 		const ev = this.#deps.events ?? {};
 		const readDeps = o.readDeps;
 		const trace = this.#deps.trace;
@@ -1123,6 +1189,8 @@ export class StageEngine {
 		// P1 注入层：轮次卡去重——只在工作区状态跨卡类型切换时注入，历史不累积。
 		// 首轮（规划卡）已在装配时随 tailText 送达，这里从「开工」状态起跟踪。
 		let lastCard = o.ws.plan.length > 0 ? "open" : "plan";
+		// DSH 双阶段：本拍是否已出现工具调用（首次调用后的下一轮请求起放开全量）
+		let promoted = false;
 
 		for (let round = 0; round < MAX_ROUNDS; round++) {
 			lastConsumed = text.length; // 本轮之前的累计文本
@@ -1130,6 +1198,10 @@ export class StageEngine {
 				(c): c is { type: string; id?: string; name?: string; arguments?: Record<string, unknown> } =>
 					c.type === "toolCall",
 			);
+
+			// DSH 双阶段晋升：检测到工具调用（含首轮模型直调）即置位——本轮的请求
+			// 就是「首次工具调用后的下一请求」，此后每轮都放开全量目录。
+			if (calls.length > 0) promoted = true;
 
 			if (calls.length === 0) {
 				// 模型停手：有稿即谢幕——但先确认它不是「还打算写尾巴」。
@@ -1154,6 +1226,27 @@ export class StageEngine {
 									text:
 										`你用 draft_append 续写了 ${o.ws.appends} 段但还没封笔。` +
 										`正文写完了就调用 draft_seal 按完整稿验收（字数/禁词/格式/主权全量判定）；还没写完就接着续写。`,
+								},
+							],
+							timestamp: Date.now(),
+						});
+						continue;
+					}
+					// 长大纲/多路标：还有未演完的路标时，模型空手停住也不能谢幕——
+					// 否则会像 8/15 实弹那样：思考里已经决定写第 3 条，下一轮却空手，
+					// 引擎没拦，直接走谢幕把后半截大纲丢了。这里点名剩余路标，催它继续。
+					if (o.ws.appends > 0 && !o.ws.sealed && o.ws.plan.some((s) => !s.done)) {
+						const left = o.ws.plan.filter((s) => !s.done).length;
+						const next = o.ws.plan.find((s) => !s.done)?.text ?? "";
+						convo.push(last);
+						convo.push({
+							role: "user",
+							content: [
+								{
+									type: "text",
+									text:
+										`路标还剩 ${left} 条没演完（下一条：${next}）。` +
+										`用 draft_append 接着演下一条，禁止停在半路；全部演完后再 draft_seal 收笔。`,
 								},
 							],
 							timestamp: Date.now(),
@@ -1199,10 +1292,20 @@ export class StageEngine {
 				} else {
 				const direct = `${o.directText}${text}`.trim();
 				if (direct) {
-					// 宽进严出：直出正文代收为 draft_write（已流式外发过，不重复上屏）。
+					// 宽进严出：直出正文代收（已流式外发过，不重复上屏）。
+					// 有计划 = 这拍有戏：代收为 draft_append（第一段）而不是 draft_write——
+					// draft_write 全量交稿即天然封笔，会在大纲/路标只演到第一段时提前 sealed，
+					// 后续 draft_append 被【谢幕】卡截停，大纲后半截被丢下（8/15 实弹）。
 					// internal=true 跳过门禁——代收是兜底，被拦下就等于把这拍正文丢了。
-					const r = runWriteTool(o.ws, o.wsDeps, "draft_write", { content: direct }, true);
-					ev.onActivity?.("直出正文已代收为 draft_write");
+					const asAppend = o.ws.plan.length > 0;
+					const r = await runWriteTool(
+						o.ws,
+						o.wsDeps,
+						asAppend ? "draft_append" : "draft_write",
+						asAppend ? { segment: direct } : { content: direct },
+						true,
+					);
+					ev.onActivity?.(asAppend ? "直出正文已代收为 draft_append（第 1 段）" : "直出正文已代收为 draft_write");
 					// 有计划 = 这拍有戏（8/09 实弹：列了 3 条路标却 385 字一次直出，代收全绿
 						// 静默放行，又短又糙还没状态栏）——即使全绿也喂一轮让模型自决续/收
 						if ((o.ws.lastGreen && o.ws.plan.length === 0) || nudged) break;
@@ -1214,11 +1317,12 @@ export class StageEngine {
 							{
 								type: "text",
 								text:
-									`你的正文已被代收为 draft_write（正文本应经此工具提交）。验收报告：\n${r.text}\n` +
-									(o.ws.plan.length > 0
-											? `你列了路标却把整拍一次直出——已代收，不推倒重来。接下来自决：` +
-												`戏还没演完就用 draft_append 接着演；演完了就输出状态栏等格式块（若本卡定义）收场。`
-											: `如需修改请调用 draft_write 重新提交完整正文；无需修改则直接结束。`),
+									(asAppend
+										? `你的正文已被代收为 draft_append（第 1 段，正文应经此工具提交）。验收报告：\n${r.text}\n` +
+											`你列了路标却把第一段直出——已代收，不推倒重来。接下来：` +
+											`戏还没演完就用 draft_append 接着演，演完 draft_seal 收笔。`
+										: `你的正文已被代收为 draft_write（正文本应经此工具提交）。验收报告：\n${r.text}\n` +
+											`如需修改请调用 draft_write 重新提交完整正文；无需修改则直接结束。`),
 							},
 						],
 						timestamp: Date.now(),
@@ -1370,9 +1474,8 @@ export class StageEngine {
 						r = {
 							text:
 								`未收段。你上一轮没有思考就直接落笔——路标只说「发生什么」，` +
-								`这一段的**戏与文笔**要在落笔前想清楚：镜头从哪开、动作怎么拆、` +
-								`感官细节（光线/声音/气味/触感）、人物此刻的状态与神态、` +
-								`节奏松紧与对白语气、有没有一个细节立住这一段。` +
+								`这一段要在落笔前想清楚：发生什么、动作怎么推进、人物此刻的状态与反应、` +
+								`有没有一个细节立住这一段（文风按 \`# 文风基准\` 执行）。` +
 								`回看刚写下的，承接路标把这一段写好，想好了再交。`,
 							activity: "零思考落笔被拦下（需承接路标）",
 							ok: false,
@@ -1453,7 +1556,7 @@ export class StageEngine {
 										)
 						: READ_TOOLS.has(name)
 						? await this.#runReadTool(o, readDeps, name, call.arguments ?? {})
-						: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
+						: await runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
 					// 主聊天跟踪：工具执行结果（含耗时）+ 写侧草稿动作（交稿全文与验收）
 					if (o.traceOn) {
 						trace?.record(sessionId, {
@@ -1518,7 +1621,11 @@ export class StageEngine {
 			// 安全阀最后一轮撤掉工具：模型只能收笔（触阀后以现稿/直出定稿）
 			const lastRound = round >= MAX_ROUNDS - 1;
 			const ctx: Record<string, unknown> = { systemPrompt: o.systemPrompt, messages: convo };
-			if (!lastRound) ctx.tools = o.tools;
+			if (!lastRound) {
+				// DSH 双阶段：未晋升时每轮只给 Minimal 目录（读侧+规划）；首次工具调用后的
+				// 下一轮请求起放开全量。末轮安全阀撤工具逻辑不变。
+				ctx.tools = o.stagedTools && !promoted ? o.stagedTools : o.tools;
+			}
 			else {
 				// 8/09：撤工具的同时必须告知收场（实弹：轮次耗尽后模型不明所以干想一轮
 				// 散场，状态栏没了）——点名输出格式块，这一轮产出走 text 通道拼进定稿。
@@ -1572,11 +1679,11 @@ export class StageEngine {
 			const fwd = this.#draftForwarder();
 			// thinking_delta 入时间线（思考→工具→正文全链）。零思考门禁的判定
 			// 看 last.content 是否含 thinking 块（见 append 拦截处），不在流式层统计。
-			for await (const e of s) {
-				if (e.type === "done") final = e.message ?? null;
-				else if (e.type === "error") {
-					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text, tailText: tailOf() };
-				} else if (e.type === "text_delta" && e.delta) {
+				for await (const e of s) {
+					if (e.type === "done") final = e.message ?? null;
+					else if (e.type === "error") {
+						return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text, tailText: tailOf(), toolUsed: promoted };
+					} else if (e.type === "text_delta" && e.delta) {
 					text += e.delta;
 					// 稿已存在后的正文外产出（状态栏/catsay 等格式尾巴）入时间线按序记档；
 					// 定稿时由 finalTimeline 吸收进稿段（内容以 mergeFinalText 为准）。
@@ -1594,11 +1701,11 @@ export class StageEngine {
 				const t = thinkingTextOf(final);
 				if (t) trace?.record(sessionId, { kind: "thinking", round: round + 1, text: t });
 			}
-			if (!final) return { final: last, text, tailText: tailOf() };
+			if (!final) return { final: last, text, tailText: tailOf(), toolUsed: promoted };
 			last = final;
 			if (final.stopReason === "aborted") break;
 		}
-		return { final: last, text, tailText: tailOf() };
+		return { final: last, text, tailText: tailOf(), toolUsed: promoted };
 	}
 
 	/**

@@ -160,7 +160,8 @@ test("system prompt：字节稳定、宏替换、主权红线随预设让位", (
 	const b = buildStageSystemPrompt(opts);
 	assert.equal(a, b, "同素材两次装配必须逐字节一致");
 	assert.ok(a.includes("沈舟的同门师姐"), "{{user}} 宏应替换");
-	assert.ok(a.includes("绝不替 沈舟 说话、行动"), "无预设：harness 兜底纪律在场（叙事与文风节）");
+	assert.ok(a.includes("文风基准"), "无预设：文风卡常驻（harness 不再自造文风纪律）");
+	assert.ok(a.includes("看落日把海面烧成一片滚烫的金"), "默认文风卡的散文腔反例在场");
 	assert.ok(a.includes("state1"), "状态栏格式线索在场");
 	assert.ok(a.includes("停在 沈舟 可以接话"), "演完即停是 harness 缺省（正面祈使句）");
 	assert.ok(a.includes("一场长篇沉浸式角色扮演"), "舞台只声明角色扮演（不抢预设身份工作）");
@@ -174,7 +175,7 @@ test("system prompt：字节稳定、宏替换、主权红线随预设让位", (
 			boundaryTexts: ["不替用户做重大决定。"],
 		},
 	});
-	assert.ok(withPreset.includes("扮演规范以用户预设为准"), "预设在场：扮演规范让位");
+	assert.ok(withPreset.includes("预设约定优先"), "预设在场：扮演规范让位（预设约定优先）");
 	assert.ok(!withPreset.includes("用户主权"), "让位后 harness 不重复立规");
 	assert.ok(withPreset.includes("破限框架原文。"), "A 类原文进场（预设指令段）");
 	assert.ok(withPreset.includes("文风块：要生动。"), "B 类进「文风与写法」节");
@@ -190,10 +191,11 @@ test("system prompt：构思成清单 + 最小稿纸循环，其他工具仍由 
 		assert.ok(p.includes("角色扮演"), "先说清在做什么");
 		// P2：删「始终思考剧情的发展走向」越权句，全貌思考不再合法化到每一轮
 		assert.ok(!p.includes("始终思考剧情"), "不把全貌思考合法化到每一轮");
-		assert.ok(p.includes("资深作家"), "身份激活：把自己当成资深作家");
+		assert.ok(!p.includes("资深作家"), "harness 去文风化：不再做「资深作家」身份激活");
+		assert.ok(!p.includes("职业作家"), "harness 去文风化：不再做「职业作家」身份激活");
+		assert.ok(!p.includes("倾尽所有的去构思"), "harness 去文风化：不再给写作强度上限祈使");
+		assert.ok(p.includes("按 `# 文风基准` 写这一段"), "写作过程引用文风卡，不藏文风");
 		assert.ok(p.includes("你需要读懂本拍处境"), "第 1 轮祈使句");
-		assert.ok(p.includes("发挥自己职业作家的水平"), "每轮开始祈使句（身份激活）");
-		assert.ok(p.includes("倾尽所有的去构思"), "写作过程中祈使句（强度上限）");
 		assert.ok(p.includes("以注入为准"), "具体步骤以每轮注入的轮次卡为准");
 		assert.ok(p.includes("重新评估"), "写完后评估（ask/重拟/seal）");
 		for (const tool of ["writing_guide", "draft_write", "lorebook_search"]) {

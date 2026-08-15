@@ -17,7 +17,7 @@ const makeStage = () => {
 		join(cwd, "card.json"),
 		JSON.stringify({ data: { name: "云澜", description: "{{user}}的师姐", first_mes: "你来了。" } }),
 	);
-	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟" }));
+	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟", semanticReview: { enabled: false } }));
 	mkdirSync(join(cwd, ".liyuan"), { recursive: true });
 	const sm = SessionManager.create(cwd, join(cwd, "sessions"));
 	return { cwd, sm };
@@ -196,7 +196,7 @@ const addBannedWordPreset = (cwd: string) => {
 			samplers: {},
 		}),
 	);
-	wf(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟", preset: "preset.json" }));
+	wf(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟", semanticReview: { enabled: false }, preset: "preset.json" }));
 };
 
 test("引擎循环：违禁直出→代收+报告喂回→模型 draft_write 重交→定稿（精修可见化）", async () => {
@@ -405,7 +405,7 @@ const addLorebook = (cwd: string) => {
 	);
 	wf(
 		join(cwd, "liyuan.config.json"),
-		JSON.stringify({ card: "card.json", userName: "沈舟", lorebooks: ["lore.json"] }),
+		JSON.stringify({ card: "card.json", userName: "沈舟", semanticReview: { enabled: false }, lorebooks: ["lore.json"] }),
 	);
 };
 
@@ -458,6 +458,7 @@ test("引擎工具：查设定 → 结果回喂 → 续演正文；工具装配�
 			"draft_check",
 			"draft_edit",
 			"draft_read",
+			"draft_review",
 			"draft_seal",
 			"draft_search",
 			"draft_write",
@@ -884,7 +885,7 @@ test("引擎工具：不查资料的一拍零额外调用（工具是可选的�
 const setCompactEvery = (cwd: string, everyNTurns: number) =>
 	writeFileSync(
 		join(cwd, "liyuan.config.json"),
-		JSON.stringify({ card: "card.json", userName: "沈舟", compactEveryNTurns: everyNTurns }),
+		JSON.stringify({ card: "card.json", userName: "沈舟", semanticReview: { enabled: false }, compactEveryNTurns: everyNTurns }),
 	);
 
 test("引擎压缩：攒够拍数后自管落 rp-summary，被覆盖的正文不再进上下文", async () => {
@@ -1214,7 +1215,7 @@ test("程序化谢幕：卡定义状态栏、模型 seal 后停手不输出 → 
 			},
 		}),
 	);
-	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟" }));
+	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟", semanticReview: { enabled: false } }));
 	mkdirSync(join(cwd, ".liyuan"), { recursive: true });
 	const sm = SessionManager.create(cwd, join(cwd, "sessions"));
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
@@ -1400,7 +1401,7 @@ test("直出代收不静默放行：有计划=有戏，代收全绿也喂一轮�
 		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
 		await engine.performTurn("开始吧。");
 
-		assert.ok(nudgeCtx.includes("列了路标却把整拍一次直出"), "代收后喂回去向提示，不因全绿静默放行");
+		assert.ok(nudgeCtx.includes("你列了路标却把第一段直出"), "代收后喂回去向提示，不因全绿静默放行（8/15 起有计划直出按第一段代收，不天然封笔）");
 		const branchText = JSON.stringify(sm.getBranch());
 		assert.ok(branchText.includes("一气呵成"), "直出正文仍代收落树（不推倒）");
 	} finally {
@@ -1545,6 +1546,74 @@ test("ask：用户停止 → 本拍收束，已写正文不丢（引擎兜底封
 		assert.ok(ended && !ended.aborted && ended.entryId, "有稿时仍落树定稿");
 		const flat = JSON.stringify(sm.getBranch());
 		assert.ok(flat.includes("第一段已经写好了"), "停止后已写的正文仍保留");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("语义评审（8/14）：封笔后旁路评审，major 问题并入修复门禁，draft_edit 改掉证据处后放行", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		let postSealCtx = "";
+		reg.setResponses([
+			fauxAssistantMessage([fauxToolCall("beat_plan", { steps: ["推门"] })], { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				[fauxThinking("演第一段。"), fauxToolCall("draft_append", { segment: "他推门进屋，炉火将熄。" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" }),
+			// seal 执行时消费：评审旁路返回 major 问题（证据 = 现稿原文）
+			fauxAssistantMessage(
+				JSON.stringify({
+					issues: [
+						{
+							dimension: "人物一致性",
+							severity: "major",
+							evidence: "他推门进屋，炉火将熄。",
+							problem: "云澜不会不叩门就进——行为与设定不符",
+							suggestion: "改为先叩门再进屋",
+						},
+					],
+				}),
+			),
+			// edit 轮：捕获输入 ctx（应含 seal toolResult 的评审报告 + 修复卡）
+			(ctx) => {
+				postSealCtx = JSON.stringify((ctx as { messages?: unknown[] }).messages ?? []);
+				return fauxAssistantMessage(
+					[
+						fauxThinking("按评审意见修。"),
+						fauxToolCall("draft_edit", { edits: [{ old: "炉火将熄", new: "烛火摇曳" }] }),
+					],
+					{ stopReason: "toolUse" },
+				);
+			},
+			fauxAssistantMessage(""),
+			fauxScribeEmpty(),
+		]);
+		// 本测试显式开启语义评审（makeStage 默认关）
+		writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟", semanticReview: { enabled: true } }));
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		await engine.performTurn("你先进去。");
+
+		// seal 的 toolResult 带评审报告；评审 major 问题进修复门禁（edit 轮注入修复卡）
+		assert.ok(postSealCtx.includes("【语义评审】"), "封笔验收报告后追加语义评审段");
+		assert.ok(postSealCtx.includes("[评审·人物一致性]"), "评审问题带维度前缀进入修复清单");
+		assert.ok(postSealCtx.includes("【修复】"), "评审 major 问题触发修复卡");
+
+		// draft_edit 改掉证据处（炉火将熄 → 烛火摇曳）→ 证据引文不在现稿 → 评审项视为已修
+		const branch = sm.getBranch() as Array<{
+			type: string;
+			message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
+		}>;
+		const lastMsg = [...branch].reverse().find((e) => e.type === "message" && e.message?.role === "assistant");
+		const treeText = (lastMsg?.message?.content ?? [])
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("");
+		assert.ok(treeText.includes("烛火摇曳"), "修复后的正文落树");
+		assert.ok(!treeText.includes("炉火将熄"), "被评审点名的原文已改掉");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

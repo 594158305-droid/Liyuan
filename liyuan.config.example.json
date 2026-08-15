@@ -39,6 +39,20 @@
 		"wantsStory": ["继续", "续写"],
 		"pureOps": ["改配置", "换模型"]
 	},
+	"styleBaseline": {
+		"_exampleNote": "文风卡覆盖（DESIGN-style-baseline §4）：assets/flow/style-baseline.json 之上按 key 覆盖——default 键替换默认卡；presets 内同名键替换预设卡（如 liyuan-custom）。卡四要素：voice（声音，一句话）/ reference（参考系，单选）/ positive（正例）/ negatives.shot|prose|ledger（三个跑偏原型）/ check（自检问题）。删除本段 = 用内置文风卡。",
+		"default": {
+			"voice": "你是在给读者讲一个故事：连续的、有人味的叙述，让读者觉得在读小说，而不是分镜脚本、散文诗或流水账。",
+			"reference": "成熟中文网文 / 通俗小说叙事（单选，不叠加）",
+			"positive": "凯尔推开店门，门铃叮当一响。千束正踮着脚往架子上挂新滤纸，听见声音也不回头，先喊了一句“欢迎光临”，等转过身看清是他，那声招呼的尾音往上挑了挑。",
+			"negatives": {
+				"shot": "镜头推到咖啡厅门口。门铃响。千束回头。她笑。",
+				"prose": "看落日把海面烧成一片滚烫的金。",
+				"ledger": "他先去咖啡厅，再去事务所。下午去港区。五天后回到房间。"
+			},
+			"check": "这段读完，读者会觉得在读小说，还是在看分镜 / 散文 / 账本？"
+		}
+	},
 	"agents": [
 		{
 			"id": "director",

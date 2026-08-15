@@ -17,8 +17,9 @@ import { applyDraftOps, type DraftMsgLike } from "../draft.ts";
 import { cleanAssistantText } from "../postprocess.ts";
 import { formatState, defaultState } from "../state.ts";
 import { isBackstageText } from "../stance.ts";
+import { DEFAULT_STYLE_BASELINE, renderStyleBaseline } from "../style-baseline.ts";
 import type { PresetBlock } from "../preset.ts";
-import type { CharacterCard, LorebookEntry, MacroContext, RpConfig, WorldState } from "../types.ts";
+import type { CharacterCard, LorebookEntry, MacroContext, RpConfig, StyleBaselineCard, WorldState } from "../types.ts";
 
 // ---------------- 分支 → 历史 ----------------
 
@@ -104,8 +105,16 @@ const summaryDataOf = (e: BranchEntryLike): RpSummaryData | null => {
  * 分支上生效的前情摘要 = **最后一条**摘要条目（每次压缩都把上一份合并进来，故后者全覆盖前者）。
  * 兼容旧会话里 pi 写的 `compaction` 条目：覆盖边界取 firstKeptEntryId 的前一条。
  * 返回 cut = 需要从历史里去掉的条目数（分支前缀长度）。
+ *
+ * 8/15 兜底：摘要条目可能不在焦点分支上（压缩落树后 reroll/rewind 把焦点拉到
+ * user 重新生成，摘要挂在旧叶链下）——但摘要的语义是「coversThroughId 之前的
+ * 条目折叠成前情」，只要覆盖锚点在这条分支上就该生效。传入 allEntries（全树）
+ * 时做第二遍扫描，找锚点在焦点分支上的最后一条摘要。
  */
-export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut: number } | null {
+export function activeSummary(
+	branch: BranchEntryLike[],
+	allEntries?: BranchEntryLike[],
+): { summary: string; cut: number } | null {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const e = branch[i];
 		const data = summaryDataOf(e);
@@ -125,6 +134,15 @@ export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut
 			return { summary: legacy.summary, cut: keptAt >= 0 ? keptAt : i };
 		}
 	}
+	// 兜底：摘要条目不在焦点分支上，但覆盖锚点在这条分支上（压缩后 reroll 的典型场景）
+	if (allEntries) {
+		for (let i = allEntries.length - 1; i >= 0; i--) {
+			const data = summaryDataOf(allEntries[i]);
+			if (!data) continue;
+			const at = branch.findIndex((x) => x.id === data.coversThroughId);
+			if (at >= 0) return { summary: data.summary, cut: at + 1 };
+		}
+	}
 	return null;
 }
 
@@ -135,9 +153,10 @@ export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut
  * 相邻同角色文本合并（API 安全）。
  *
  * M4：有 rp-summary 时，被覆盖的早期条目整段不进历史，改由 summary 字段回读为【前情提要】。
+ * allEntries（全树）可选：摘要条目挂在焦点分支外时仍按覆盖锚点生效（8/15 兜底）。
  */
-export function rebuildHistory(branch: BranchEntryLike[]): RebuiltHistory {
-	const active = activeSummary(branch);
+export function rebuildHistory(branch: BranchEntryLike[], allEntries?: BranchEntryLike[]): RebuiltHistory {
+	const active = activeSummary(branch, allEntries);
 	const live = active ? branch.slice(active.cut) : branch;
 
 	// 1) 取叙事相关条目为 MsgLike 流（保留 rp-draft-op 供补丁函数消费）
@@ -245,6 +264,8 @@ export interface StageSystemOptions {
 	card: CharacterCard;
 	config: RpConfig;
 	constantLore: LorebookEntry[];
+	/** 文风卡（DESIGN-style-baseline）：本场唯一文风来源，装配进 system 常驻分节 */
+	styleBaseline?: StyleBaselineCard;
 	/** M-C：system 通道的预设常驻内容（拆层产物） */
 	presetResident?: PresetResidentContent;
 	/** writing_guide 可用主题（skill 包非空才有；空＝工具未挂，只字不提） */
@@ -288,6 +309,7 @@ export function buildStageSystemPrompt({
 	card,
 	config,
 	constantLore,
+	styleBaseline,
 	presetResident,
 	skillTopics,
 	presetActive,
@@ -324,19 +346,16 @@ export function buildStageSystemPrompt({
 
 	sections.push(
 		`# 叙事与文风
-${
-	presetActive
-		? `- **扮演规范以用户预设为准**：人称视角、代言/抢话边界、文风、篇幅、节奏等一律按预设执行；预设未提及的按角色卡与上下文自然处理。`
-		: `- 以 ${card.name} 的视角行动和说话；动作、神态与场景描写用 *斜体*，对白用引号。
-- 【硬边界·用户主权】绝不替 ${config.userName} 说话、行动或代述内心想法——${config.userName} 的一切由用户本人书写。
-- 用具体的感官细节（光线、声音、气味、触感、温度）落实场景，不抽象概括情绪。
-- 每拍至少推进一小步（新信息、新动作、环境或情绪转折）；不原地兜圈，不复读前文。
-- ${card.name} 是有自我的人物：有欲望、恐惧、底线与秘密，会拒绝、犹豫、犯错、撒娇或撒谎，不做有求必应的客服。
-- 忌 AI 腔：不总结升华、不说教、不加免责声明；避免万能句式（如反复的"眼中闪过一丝……"）。`
-}
-- 【语言】无论角色卡、开场白或世界书原文是什么语言，你的叙事与对白一律使用${config.language}（人名、地名等专有名词可保留原文）。
+- 文风与写法以 \`# 文风基准\` 为准；用户预设另有约定时，预设约定优先。
+- 【语言】无论角色卡、开场白或世界书原文是什么语言，你的叙事与对白一律使用${config.language}（人名、地名等专有名词可保留原文）。`,
+	);
 
-# 输出结构
+	if (styleBaseline ?? DEFAULT_STYLE_BASELINE.default) {
+		sections.push(`# 文风基准（本场唯一文风来源）\n${renderStyleBaseline(styleBaseline ?? DEFAULT_STYLE_BASELINE.default)}`);
+	}
+
+	sections.push(
+		`# 输出结构
 1. **正文**：纯剧情叙事与对白。不要把正文包进 \`<content>\` 之类的分析标签，不要写 HTML 注释式导演旁注。篇幅：有用户预设则跟预设；无预设时可见正文约 800–1500 字（短打约 400）。
 2. **状态栏**：${
 			statusBarFormats && statusBarFormats.length > 0
@@ -348,13 +367,11 @@ ${
 	if (tools !== false) {
 		sections.push(
 			`# 怎么演这一拍
-把自己当成一位资深作家，发挥你强大的剧情构思能力，肆意展现你的文笔，为用户提供最好的扮演体验。
-
 第 1 轮：你需要读懂本拍处境，探索拿不准的信息，列出这一拍的路标，用 \`beat_plan\` 记下每一步发生什么。
 
-每一轮开始：你需要回看刚写下的段落，发挥自己职业作家的水平去构思这一段的剧情走向。
+每一轮开始：你需要回看刚写下的段落，决定下一段发生什么。
 
-写作过程中：你需要承接路标，倾尽所有的去构思这一段怎么写得精彩——镜头、动作、感官细节、神态情绪、节奏、点睛，把这一段写好再落笔，力求为用户提供最好的体验。
+写作过程中：按 \`# 文风基准\` 写这一段——思考只定「这段发生什么、落在哪个动作或对白上」，具体措辞落笔时执行，不在思考里起草正文。
 
 写完后：你需要重新评估——剧情到岔路就用 \`ask\` 问用户，路标不成立就重拟 \`beat_plan\`，戏到停点就 \`draft_seal\` 收笔。
 
