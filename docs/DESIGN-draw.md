@@ -473,3 +473,29 @@ image_gen:
 | Q11 | skill 定位与合规 | skill 双用途（管线提示词素材 + 自定义 agent 文档）；轻量合规（硬上限截断 + 场景分级校验） |
 | Q12 | 画廊/归档 | 精简：画廊=版本网格+Lightbox；不做 zip 导入导出；不做自定义目录 |
 | Q13 | 交付物 | `docs/DESIGN-draw.md` + 试跑 Act 2（Codex 对抗评审） |
+
+---
+
+## 9. 画师 agent 生图规范约定（2026-08-16 落地）
+
+> 本节记录**画师 agent 生图规范**的约定变更（POV / 构图多样化 / 特殊构图 / NSFW 关键 tag）。规范本体在 `.liyuan-skills/*.md`（画师实读，每拍素材现读、下一拍生效），此处是变更索引 + 跨文件对应，不带系统架构改动（架构见 §0-8）。
+
+### 触发背景
+自定义 agent「画师」生图有此系列问题：不用 POV / 单人脸部特写（尤其多人）、倾向把所有人物全带上、view 只有 side view、构图单一乏味；NSFW 下不补 penis/pussy 关键部位 tag、不明确用性交/体位 tag。
+
+### 规范载体与对应
+| 文件 | 管什么 |
+|---|---|
+| `.liyuan-skills/moment-capture.md` | 何时出/几张/等级/体位/打不打特殊构图标记 + **构图多样化规划** |
+| `.liyuan-skills/novelai-draw.md` | POV 三要素用法 + POV 挂点不进人物栏 + X-ray/横截面/分镜写法 + 特写强制表 + 区域限制豁免 + **NSFW 关键 tag 必写** |
+| `liyuan.config.json` → `agents[].id=illustrator.prompt` | 画师执行纪律硬规则 |
+
+### 约定要点
+1. **POV 三要素**（novelai-draw「视角构图」）：挂点（`pov: [角色名]`）·出镜（焦点对准具体对象）·景深（DOF/前后景分离）。POV=机位归属，close-up=景别远近，可叠加。
+2. **POV 挂点角色不进 characters（强制）**：镜头所在不出镜的角色（如凯尔 POV 的凯尔）不写进人物栏，scene 用 `pov: [角色名]` 记录归属。
+3. **POV 与多人共存**：多人 POV 不要求全员入镜，可另出 wide/group 补全员信息；区域限制从「人数禁 close-up」改为「限景别上限、不禁 POV/特写」。
+4. **构图多样化（多图强制）**：景别穿插 + 视角轮换 + pov，禁「全前侧全景侧视图」单一模板；附 2/3/4 张组合模板。
+5. **多人 POV 配额**：在场 ≥3 且多图 → 至少 1 张 POV/单人特写；对话/对望/情绪凝视优先 POV。
+6. **特殊构图（X-ray/横截面/分镜）**：moment-capture「出图策略标记」触发，每场性行为最多 1 次，优先级 分镜>横截面>X-ray；触发判据 = 内部吸收/交合剖面/连续过程。X-ray 例（吞精吸收·精液注入子宫）：`x-ray` + 保留三轴/体位 + `semen in uterus`/`cum inflation`/`gobbling up semen`；X-ray 角色照常进 characters、可豁免特写强制表。
+7. **NSFW 关键 tag 必写（与视角无关）**：nsfw 时刻无论视角都写齐 `sex`(或 fellatio/vaginal) + 体位 tag + 双方性器官 `penis/pussy`。有档案角色不能省（appear 只管外貌、不豁免性器官 tag）。根因=旧规范把性器官 tag 放 apply「仅未知角色」栏致有档案角色缺失。
+8. **Q5 挂钩（moment-capture）**：判 nsfw 即须带关键 tag，捕捉阶段标注。

@@ -2642,7 +2642,23 @@ const storyBridgeBase: StoryBridge = {
 				await stage.rescribeTurn(userText, text);
 			}
 
-			// 6. 全端刷新（照 scriptEditMessage 收尾，让前端看到新叶与标记）
+			// 6. 内存消息对齐（2026-08-16 修复）：改稿只写了会话树（rp-edited-reply），
+			//    必须重建 agent.state.messages（= session.messages，story_read/story_search
+			//    的数据源），否则 story_read 仍读到改稿前楼层——工具侧停在旧楼、UI（getBranch
+			//    实时读树）却已显示新楼，重启后才追平。与 /compact /rewind /scriptEditMessage
+			//    改造树后重建 messages（本文件 1999/3904 行）同一模式；禁用侧边日志对照 4c。
+			try {
+				session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
+				const syncedFloorS = buildStoryFloors(session.agent.state.messages as unknown[]);
+				console.log(
+					`[liyuan-trace] [storyEdit] afterMessagesSync leaf=${session.sessionManager.getLeafId()?.slice(0, 8) ?? "?"} floors=${syncedFloorS.length}`,
+				);
+			} catch (errSync) {
+				// 对齐失败不阻断改稿；下次树导航/重启会按树重建
+				console.error("[liyuan-trace] [storyEdit] 内存消息对齐失败", errSync);
+			}
+
+			// 7. 全端刷新（照 scriptEditMessage 收尾，让前端看到新叶与标记）
 			resyncAll();
 			return { ok: true };
 		} catch (err) {
