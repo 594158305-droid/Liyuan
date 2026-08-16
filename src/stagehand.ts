@@ -230,17 +230,20 @@ export function buildStoryFloors(messages: unknown[], view: "display" | "raw" = 
 	const out: StoryFloor[] = [];
 	let floor = 0;
 	let inBackstage = false;
-	/** 最近一个用户楼层在 out 中的下标（rp-edited-reply 替换同轮回复用） */
-	let lastUserOutIdx = -1;
+	/** 最近一次用户消息后的 out 起点：区分「同轮叙事窗口」。场外/幕后用户不占楼层，
+	 *  但它仍是新叙事轮的边界——rp-edited-reply 只能替换自己这一轮内的回复，
+	 *  不能越过场外指令回跳去替换上一轮的回复 */
+	let turnStartOutIdx = 0;
 	for (const m of messages) {
 		if (!m || typeof m !== "object") continue;
 		const msg = m as MsgLike;
 		const text = textOf(msg.content).trim();
 		if (msg.role === "user") {
 			inBackstage = isBackstageText(text);
+			// 任何用户消息都开启新叙事轮（场外指令不占楼层，但仍是轮边界）
+			turnStartOutIdx = out.length;
 			if (inBackstage || !text) continue;
 			out.push({ floor: ++floor, kind: "用户", text });
-			lastUserOutIdx = out.length - 1;
 			continue;
 		}
 		if (msg.role === "assistant") {
@@ -269,13 +272,21 @@ export function buildStoryFloors(messages: unknown[], view: "display" | "raw" = 
 			continue;
 		}
 		if (msg.role === "custom" && msg.customType === "rp-edited-reply") {
-			if (inBackstage || !text) continue;
+			// 显式改稿（story_edit/用户手改）是真实叙事正文，必须始终可读——
+			// 不能被前一条「场外/幕后」导演指令（(…) // 等，isBackstageText 命中）连坐吞掉：
+			// 之前 inBackstage 会整层跳过，导致 story_edit 后助手楼层数掉一层（#80→只剩#79）。
+			// 与 wire/toWireMsg 同语义：rp-edited-reply 无条件上屏（不作为 backstage 处理，见 wire.ts:643）。
+			if (!text) continue;
 			const shown = view === "raw" ? text : displayAssistantText(text) || text;
 			if (!shown) continue;
-			// 改稿覆盖：替换同轮（最近用户楼之后）最后一个「回复」楼层——与前端 foldTurnNarratives
-			// 同语义（2026-08-12 修复：此前 rp-edited-reply 不显示，助手看不到改稿后的最新叙事 → 配图摘错楼层）
+			// 改稿覆盖：替换「本叙事轮」（turnStartOutIdx 之后）最后一个「回复」楼层——
+			// 与前端 foldTurnNarratives 同语义（2026-08-12 修复：此前 rp-edited-reply 不显示，
+			// 助手看不到改稿后的最新叙事 → 配图摘错楼层）。用 turnStartOutIdx 而非 lastUserOutIdx
+			// 兜住「被删回复的场外指令轮」：story_edit 的 sm.branch 会切掉原回复，改稿挂在
+			// 前一条用户指令下，若该指令是场外文本不占楼层，lastUserOutIdx 仍指更早楼层，
+			// 会回跳替换错误楼层——turnStartOutIdx 把窗口锁在当前叙事轮。
 			let replaced = -1;
-			for (let i = out.length - 1; i > lastUserOutIdx; i--) {
+			for (let i = out.length - 1; i >= turnStartOutIdx; i--) {
 				if (out[i].kind === "回复") {
 					replaced = i;
 					break;
@@ -286,6 +297,9 @@ export function buildStoryFloors(messages: unknown[], view: "display" | "raw" = 
 			} else {
 				out.push({ floor: ++floor, kind: "回复", text: shown });
 			}
+			// 显式改稿代表真实叙事轮的落地，退出幕后状态——后续正常叙事消息不应再被前一条
+			// 场外指令的 inBackstage 连坐吞掉（与 wire 逐条判定语义对齐）。
+			inBackstage = false;
 			continue;
 		}
 	}

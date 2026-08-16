@@ -186,3 +186,28 @@ test("楼层视图：rp-edited-reply 无同轮回复时追加为回复楼层", (
 	);
 	assert.ok(floors[1].text.includes("直接改稿的回复"));
 });
+
+test("楼层视图：场外导演指令后的 rp-edited-reply 不被 inBackstage 吞掉（2026-08-16 修复）", () => {
+	// 复现故障：story_edit 提交时 sm.branch 切掉原回复，改稿成为前一条（场外/幕后）用户指令的子节点。
+	// 旧逻辑 inBackstage 从该指令连坐过来，把 rp-edited-reply 整层跳过 → 助手楼层数掉一层（#80→只剩#79）。
+	const msgs = [
+		{ role: "user", content: "张三" },
+		{ role: "assistant", content: "凯尔先去洗了个澡。" },
+		{ role: "user", content: "（编撰者幕后：把这段收尾收掉）" },
+		{ role: "custom", customType: "rp-edited-reply", content: "凯尔快速冲了个澡，披上浴袍回到客厅。", display: true },
+	];
+	const floors = buildStoryFloors(msgs);
+	// 改稿层必须保留为「回复」楼，楼层数不掉
+	assert.deepEqual(
+		floors.map((f) => [f.floor, f.kind]),
+		[
+			[1, "用户"],
+			[2, "回复"],
+			[3, "回复"],
+		],
+	);
+	const last = floors[floors.length - 1];
+	assert.ok(last.kind === "回复");
+	assert.ok(last.text.includes("披上浴袍回到客厅"), "改稿全文应可被助手读到");
+	assert.ok(!last.text.includes("场外"), "不应是后台指令文本");
+});

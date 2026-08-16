@@ -46,7 +46,11 @@ import { buildGreeting } from "../src/greeting.ts";
 import { StageEngine, type AssistantMsgLike, type StageStreamFn } from "../src/stage/engine.ts";
 import { isSoundFxName } from "../src/stage/tools.ts";
 import { TraceRecorder } from "../src/stage/trace.ts";
+import { configureDebug, debug } from "../src/debug.ts";
 import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
+import { buildStoryFloors } from "../src/stagehand.ts";
+import { CONVERGE_TAIL } from "../src/router-core.ts";
+import { mapPiEventsToSt } from "./script-events.ts";
 import {
 	activePanels,
 	closePanel as closePanelInMap,
@@ -62,8 +66,8 @@ import {
 	resolveConfigPath,
 	takeAgentMergeLog,
 } from "../src/paths.ts";
-import { applyPatch, applyTableOperation, loadState, saveState, stateHasTableData } from "../src/state.ts";
-import { loadTemplate, materializeTemplate } from "../src/templates.ts";
+import { applyPatch, loadState, saveState, stateHasTableData } from "../src/state.ts";
+import { buildTableDescription, loadTemplate, type TableTemplateDef } from "../src/templates.ts";
 import { runTableBackfill } from "../src/table-backfill.ts";
 import { parseStChat, cleanChat, DEFAULT_STRIP_TAGS } from "../src/chatlog.ts";
 import { replayFloors, type ReplayFloor } from "../src/import-raw.ts";
@@ -346,18 +350,52 @@ setTimeout(() => void runUpdateCheck(false).catch(() => {}), 3000);
 
 // ---------- 会话统计与世界状态（右栏信息面板的数据源） ----------
 
+// 会话统计（2026-08-16 重构）：直接走会话树计算，不再依赖 pi runtime 的 getSessionStats——
+// ① StageEngine 直连 streamFn 驱动主剧情，pi runtime 的 state.messages 是空壳，数字恒为 0；
+// ② 迁移导入的 assistant 消息缺 usage 会让 getSessionStats 抛 TypeError（曾致 stats 整条 null、
+//    前端统计栏/上下文进度条消失）。树侧计算对两者都免疫：
+//    - 消息数 = 当前分支实际条目（user/assistant）；
+//    - tokens/cost = 树内 assistant.usage 容错求和；
+//    - contextTokens = 最近一条 assistant 的 usage.input（API 实测的上一轮 prompt 侧占用，
+//      比 pi 的估算准），percent = input / contextWindow。
 const safeStats = (): WireStats | null => {
 	try {
-		const s = session.getSessionStats();
-		const cu = s.contextUsage;
+		const branch = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
+		let userMessages = 0;
+		let assistantMessages = 0;
+		let totalTokens = 0;
+		let cost = 0;
+		let lastPromptTokens: number | null = null;
+		for (const e of branch) {
+			if (e.type !== "message") continue;
+			const m = e.message as
+				| { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } }
+				| undefined;
+			if (!m || typeof m !== "object") continue;
+			if (m.role === "user") userMessages++;
+			else if (m.role === "assistant") {
+				assistantMessages++;
+				const u = m.usage ?? {};
+				totalTokens += (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+				cost += u.cost?.total ?? 0;
+				// openai-completions 语义：input 只含未命中部分，缓存命中的 prompt 在 cacheRead——
+				// 上下文占用 = input + cacheRead（取最近一条，= 上一轮实际装进窗口的 prompt 量）
+				if (typeof u.input === "number" || typeof u.cacheRead === "number") {
+					lastPromptTokens = (u.input ?? 0) + (u.cacheRead ?? 0);
+				}
+			}
+		}
+		const contextWindow = session.model?.contextWindow ?? null;
+		const contextPercent =
+			lastPromptTokens !== null && contextWindow && contextWindow > 0 ? (lastPromptTokens / contextWindow) * 100 : null;
 		return {
-			userMessages: s.userMessages,
-			assistantMessages: s.assistantMessages,
-			totalTokens: s.tokens.total,
-			cost: s.cost,
-			contextPercent: cu?.percent ?? null,
-			contextTokens: cu?.tokens ?? null,
-			contextWindow: cu?.contextWindow ?? session.model?.contextWindow ?? null,
+			userMessages,
+			assistantMessages,
+			totalTokens,
+			cost,
+			contextPercent,
+			contextTokens: lastPromptTokens,
+			contextWindow,
 		};
 	} catch {
 		return null;
@@ -366,6 +404,17 @@ const safeStats = (): WireStats | null => {
 
 const stateDir = dir(cwd, "state");
 mkdirSync(stateDir, { recursive: true });
+
+// 统一调试接口（src/debug.ts）：日志文件固定落 .liyuan-state/debug.log；控制台/file 通道
+// 随 config.debugLog 现读（host 侧每回合/每请求同步，主聊天主演走 engine 注入面，两处都 sync）。
+configureDebug({ filePath: join(stateDir, "debug.log") });
+/** 把 config.debugLog 同步进统一调试接口（开发者模式可关打印；每回合/每请求现读） */
+const syncDebugConfig = (config: RpConfig): void => {
+	configureDebug({
+		console: config.debugLog?.console !== false,
+		file: config.debugLog?.file !== false,
+	});
+};
 /**
  * 展示用账本。权威是会话树（R4：世界 = f(分支)）——swipe/rewind/切世界线后
  * 磁盘缓存仍是旧分支的账本，只有树快照能给出当前分支的正确值。
@@ -610,6 +659,12 @@ const helloFrame = (): ServerFrame => {
 
 /** 全量重放（斜杠命令 / 树导航 / 压缩后：让所有端与会话文件对齐） */
 const resyncAll = () => {
+	// SQL 化（DESIGN-tables-sql §7）：树导航/全量重放后，把表格物化重建为焦点分支（带跳过保护）
+	try {
+		stage.replayTables();
+	} catch {
+		// 表格服务异常不阻断全量重放
+	}
 	const frame = helloFrame();
 	// 诊断日志（正文嵌入链路）：hello 帧含占位符文本时打印——确认前端重放时服务端发出的内容
 	try {
@@ -1199,7 +1254,7 @@ const branchCommitToTarget = (targetId: string): void => {
 	const from = sm.getLeafId();
 	sm.branch(targetId);
 	// 2026-08-12 排查日志：story_edit / embedStoryImage / regenerateSwipe 等所有 sm.branch 调用点经此记录
-	console.log(`[liyuan] branchCommit: ${from?.slice(0, 8) ?? "?"} → ${targetId.slice(0, 8)}`);
+	console.log(`[liyuan-trace] [leafSwitch] ${from?.slice(0, 8) ?? "none"} → ${targetId.slice(0, 8)}`);
 	const ctx = sm.buildSessionContext();
 	session.agent.state.messages = ctx.messages;
 };
@@ -1260,6 +1315,118 @@ function registerUserProviders(): void {
 		} catch (err) {
 			console.warn(`[liyuan] 注册当前渠道「${pk}」失败：${err instanceof Error ? err.message : String(err)}`);
 		}
+	}
+}
+
+// ---- 表格 SQL 字面量/列类型 helper（applyTableOp 与模板物化共用；SQL 化 2026-08-16）----
+const tableEsc = (v: string): string => v.replace(/'/g, "''");
+const tableLit = (v: unknown, type?: string): string => {
+	if (v === null || v === undefined) return "NULL";
+	const t = type ?? "text";
+	if (t === "number" || t === "integer" || t === "real") {
+		const n = Number(v);
+		return Number.isFinite(n) ? String(n) : "NULL";
+	}
+	if (t === "boolean") return v === true || v === 1 || v === "1" ? "1" : "0";
+	return `'${tableEsc(String(v))}'`;
+};
+const tableColType = (meta: { columns?: Array<{ name: string; type?: string }> }, name: string): string =>
+	meta.columns?.find((c) => c.name === name)?.type ?? "text";
+
+/**
+ * SQL 化模板物化（2026-08-16）：模板表建进 SQLite（旧 materializeTemplate 写
+ * state.tables 快照，剧情侧不可见）。幂等：表已存在 → 增量加列 + 覆写说明；初始行可填。
+ */
+async function materializeTemplateToSql(def: TableTemplateDef): Promise<{ applied: string[]; warnings: string[] }> {
+	const svc = stage.tablesService();
+	const applied: string[] = [];
+	const warnings: string[] = [];
+	for (const t of def.tables) {
+		const r = svc.createTable({
+			name: t.name,
+			auto: !!t.auto,
+			description: buildTableDescription(t),
+			columns: (t.columns ?? []).map((c) => ({
+				name: c.name,
+				type: (c.type ?? "text") as "text" | "number" | "integer" | "real" | "boolean",
+				description: c.description,
+			})),
+		});
+		if (!r.ok) {
+			warnings.push(`表「${t.name}」：${r.error}`);
+			continue;
+		}
+		applied.push(`表「${t.name}」已就绪`);
+		if (t.rows?.length) {
+			let inserted = 0;
+			for (const row of t.rows) {
+				const cols = Object.keys(row).filter((k) => (t.columns ?? []).some((c) => c.name === k));
+				if (cols.length === 0) continue;
+				const sql = `INSERT INTO "${t.name}" (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${cols.map((c) => tableLit(row[c])).join(", ")})`;
+				const ir = svc.execWrite(sql);
+				if (ir.ok) inserted++;
+				else warnings.push(`表「${t.name}」初始行：${ir.error}`);
+			}
+			if (inserted) applied.push(`表「${t.name}」填充初始数据 ${inserted} 行`);
+		}
+	}
+	return { applied, warnings };
+}
+
+// -*- 编辑正文 / 树操作 / 记账的可观测日志（DESIGN-story-edit + 方案 B 加固，2026-08-16） -*-
+// 统一 [liyuan-trace] 前缀：叶切换 / 记账(rp-state 落账) / 回滚(replayTables) / 写表(落树) /
+// 编辑槽复用 / 旁路重记账 / 助手写表 —— 全部打点，服务器端后台可见，方便跟踪。
+export const tlog = (...args: unknown[]): void => {
+	console.log("[liyuan-trace]", ...args);
+};
+
+/**
+ * 编辑正文（rp-edited-reply 槽复用，方案 B 2026-08-16）：
+ * 对同一目标楼，复用其下已存在的一条 rp-edited-reply 槽（原位 setEntryContent 覆写，
+ * 旧值进槽 details.history 留档可回滚），而非每次 append 新叶——树不膨胀、账本 f(分支) 稳定。
+ */
+function writeEditReplySlot(
+	sm: { getChildren(id: string): Array<Record<string, unknown>>; appendCustomMessageEntry(...a: unknown[]): unknown; setEntryContent?(id: string, content: unknown, details?: unknown): boolean },
+	mode: string,
+	targetId: string,
+	text: string,
+): string | null {
+	try {
+		const children = (sm.getChildren(targetId) ?? []).filter(
+			(e) => (e as { customType?: string }).customType === "rp-edited-reply",
+		);
+		const slot = children[0] as
+			| { id?: string; content?: unknown; details?: { history?: Array<{ at: number; text: string }> } }
+			| undefined;
+		// 槽复用仅当底层 sessionManager 真的支持原位覆写（setEntryContent）才走——
+		// api 的 runtime session manager（packages/agent harness）没有 setEntryContent，
+		// 只有 appendCustomMessageEntry。若强行调用会抛「setEntryContent is not a function」，
+		// 而此刻叶已被 branchCommitToTarget 切到目标前驱，槽写入失败=不注入任何回复
+		// → 最新楼层被删（真实日志 floors=84→83，尾部停在「用户」楼）。
+		// 该场景改为「追加新槽」兜底（等价改动前行为，楼层保留、原文留旧槽可回滚）。
+		if (slot?.id && typeof sm.setEntryContent === "function") {
+			const cur =
+				Array.isArray(slot.content)
+					? (slot.content as Array<{ type?: string; text?: string }>)
+							.map((c) => (typeof c?.text === "string" ? c.text : ""))
+							.join("\n")
+					: typeof slot.content === "string"
+						? slot.content
+						: "";
+			const history = Array.isArray(slot.details?.history) ? slot.details!.history!.slice() : [];
+			history.push({ at: Date.now(), text: cur });
+			const ok = sm.setEntryContent(slot.id, [{ type: "text", text }], { history, source: mode });
+			tlog(`[editReply] ${mode} 覆写槽 ${slot.id?.slice(0, 8)} -> 目标 ${targetId.slice(0, 8)} history=${history.length + 1} ok=${ok}`);
+			return slot.id;
+		}
+		// 首次建槽 / 或槽复用不可用（pi sessionManager 无 setEntryContent）时追加新槽：
+		// 追加一定能注入正文，绝不静默失败导致楼层被删。
+		const id = sm.appendCustomMessageEntry("rp-edited-reply", [{ type: "text", text }], true, { source: mode });
+		tlog(`[editReply] ${mode} ${slot?.id && typeof sm.setEntryContent !== "function" ? "槽复用不可用，追加" : "首次建槽"} ${typeof id === "string" ? id.slice(0, 8) : "?"} -> 目标 ${targetId.slice(0, 8)}`);
+		return typeof id === "string" ? id : null;
+	} catch (err) {
+		tlog(`[editReply] ${mode} 槽写入异常：${err instanceof Error ? err.message : String(err)}`);
+		return null;
 	}
 }
 
@@ -1533,8 +1700,8 @@ const restHost: RestHost = {
 		// sm.branch 是同步叶指针移动（无 session_tree 事件、无 editor 副作用）；entry 不存在会抛错（REST 层兜底 400）。
 		branchCommitToTarget(resolved.targetId);
 		if (input.op === "edit" && input.text) {
-			// 与扩展 /editreply 一致：注入 rp-edited-reply，上下文钩子会转成 assistant 给 LLM
-			await session.sendCustomMessage({ customType: "rp-edited-reply", content: input.text, display: true });
+			// 编辑正文（方案 B：槽复用——同楼多次编辑复用同一条 rp-edited-reply，不新增叶）
+			writeEditReplySlot(session.sessionManager as never, "scriptEditMessage", resolved.targetId, input.text);
 		}
 		// op=delete：只导航到前驱（目标回复退出当前分支），不注入任何内容
 		resyncAll();
@@ -1652,43 +1819,95 @@ const restHost: RestHost = {
 		syncStoryStateFromDisk();
 		return { applied: r.applied, warnings: r.warnings };
 	},
-	// ---- 自定义表格操作（DESIGN-custom-tables §7）：与 applyStatePatch 同源落盘 + 收编进树 ----
+	// ---- 自定义表格操作（SQL 化，DESIGN-tables-sql）：旧 TableOp 接口翻译成 SQL 走 TablesService。
+	// 旧实现写 WorldState.tables 磁盘缓存——与剧情侧（SQLite）脱节，助手写表「返回成功但剧情看不到」。
 	async applyTableOp(op) {
-		const file = join(stateDir, `${session.sessionId}.json`);
-		const r = applyTableOperation(loadState(file), op);
-		if (!r.ok) return { ok: false, error: r.error };
-		saveState(file, r.state!); // fs.watch 自动广播 state 帧
-		syncStoryStateFromDisk();
-		return { ok: true, applied: r.applied };
+		const opKey = `${op.kind}:${"name" in op ? op.name : op.kind === "query" || op.kind === "insert" || op.kind === "update" || op.kind === "delete" ? op.table : ""}`;
+		try {
+			const svc = stage.tablesService();
+			tlog(`[tableOp] ${opKey} 开始`);
+
+			if (op.kind === "create") {
+				const r = svc.createTable({
+					name: op.name,
+					auto: !!op.auto,
+					description: op.description ?? "",
+					columns: (op.columns ?? []).map((c) => ({
+						name: c.name,
+						type: (c.type ?? "text") as "text" | "number" | "integer" | "real" | "boolean",
+						description: c.description,
+					})),
+				});
+				return r.ok ? { ok: true, applied: [`表 ${op.name} 已创建`] } : { ok: false, error: r.error };
+			}
+			if (op.kind === "drop") {
+				const r = svc.dropTable(op.name);
+				return r.ok ? { ok: true, applied: [`表 ${op.name} 已删除`] } : { ok: false, error: r.error };
+			}
+			if (op.kind === "setAuto") {
+				const meta = svc.getMeta(op.table);
+				if (!meta) return { ok: false, error: `表 ${op.table} 不存在` };
+				meta.auto = op.auto;
+				const r = svc.updateMeta(meta);
+				return r.ok ? { ok: true, applied: [`表 ${op.table} auto=${op.auto}`] } : { ok: false, error: r.error };
+			}
+			if (op.kind === "insert") {
+				const meta = svc.getMeta(op.table);
+				if (!meta) return { ok: false, error: `表 ${op.table} 不存在` };
+				const cols = Object.keys(op.row ?? {});
+				if (cols.length === 0) return { ok: false, error: "insert 需要 row" };
+				const sql = `INSERT INTO "${op.table}" (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${cols.map((c) => tableLit(op.row[c], tableColType(meta, c))).join(", ")})`;
+				const r = svc.execWrite(sql);
+				return r.ok ? { ok: true, applied: [`表 ${op.table} 插入 1 行`] } : { ok: false, error: r.error };
+			}
+			if (op.kind === "update") {
+				const meta = svc.getMeta(op.table);
+				if (!meta) return { ok: false, error: `表 ${op.table} 不存在` };
+				const sets = Object.entries(op.changes ?? {}).map(([k, v]) => `"${k}" = ${tableLit(v, tableColType(meta, k))}`);
+				const wheres = Object.entries(op.match ?? {}).map(([k, v]) => `"${k}" = ${tableLit(v, tableColType(meta, k))}`);
+				if (sets.length === 0) return { ok: false, error: "update 需要 changes" };
+				if (wheres.length === 0) return { ok: false, error: "update 需要 match（WHERE 定位）" };
+				const sql = `UPDATE "${op.table}" SET ${sets.join(", ")} WHERE ${wheres.join(" AND ")}`;
+				const r = svc.execWrite(sql);
+				return r.ok ? { ok: true, applied: [`表 ${op.table} 更新 ${r.changes} 行`] } : { ok: false, error: r.error };
+			}
+			if (op.kind === "delete") {
+				const meta = svc.getMeta(op.table);
+				if (!meta) return { ok: false, error: `表 ${op.table} 不存在` };
+				const wheres = Object.entries(op.match ?? {}).map(([k, v]) => `"${k}" = ${tableLit(v, tableColType(meta, k))}`);
+				if (wheres.length === 0) return { ok: false, error: "delete 需要 match（WHERE 定位）" };
+				const sql = `DELETE FROM "${op.table}" WHERE ${wheres.join(" AND ")}`;
+				const r = svc.execWrite(sql);
+				return r.ok ? { ok: true, applied: [`表 ${op.table} 删除 ${r.changes} 行`] } : { ok: false, error: r.error };
+			}
+			if (op.kind === "query") {
+				const meta = svc.getMeta(op.table);
+				if (!meta) return { ok: false, error: `表 ${op.table} 不存在` };
+				const where = op.filter
+					? ` WHERE ${Object.entries(op.filter).map(([k, v]) => `"${k}" = ${tableLit(v, tableColType(meta, k))}`).join(" AND ")}`
+					: "";
+				// ORDER BY rowid DESC：最新写入的行在前——此前 LIMIT 100 取前 100 行全是旧行，
+				// 助手全表查「看不到刚写的行」→ 误判未落盘（2026-08-16 实测闭环验证）。
+				const r = svc.execRead(`SELECT * FROM "${op.table}"${where} ORDER BY rowid DESC LIMIT 100`);
+				return r.ok ? { ok: true, rows: r.rows } : { ok: false, error: r.error };
+			}
+			return { ok: false, error: `未知表操作：${String((op as { kind?: string }).kind ?? "")}` };
+		} catch (e) {
+			return { ok: false, error: e instanceof Error ? e.message : String(e) };
+		}
 	},
-	// ---- 自定义表格模板物化（DESIGN-template-system §5）：把模板的表建进当前聊天 state（幂等） ----
+	// ---- 自定义表格模板物化（DESIGN-template-system §5；SQL 化 2026-08-16）：建 SQLite 表（幂等） ----
 	async applyTemplate(name) {
 		const def = loadTemplate(cwd, name);
 		if (!def) return { ok: false, error: `模板 ${name} 不存在` };
-		const file = join(stateDir, `${session.sessionId}.json`);
-		const state = loadState(file);
-		const r = materializeTemplate(state, def);
-		saveState(file, state); // fs.watch 自动广播 state 帧
-		syncStoryStateFromDisk();
+		const r = await materializeTemplateToSql(def);
 		return { ok: true, applied: r.applied, warnings: r.warnings };
 	},
-	// ---- 表格历史回填（DESIGN-table-backfill §3）：从当前分支历史楼层提取数据填充表（旁路 LLM，耗时较长）----
+	// ---- 表格历史回填（DESIGN-table-backfill §3）：已停用（SQL 化 2026-08-16）----
+	// 旧实现从历史楼层提取数据写 state.tables（剧情侧不可见）；SQL 化后表格维护由
+	// 场记代理按各表【维护规则】自主完成，回填通道不再必要。
 	async applyTableBackfill(name) {
-		const file = join(stateDir, `${session.sessionId}.json`);
-		const state = loadState(file);
-		const r = await runTableBackfill({
-			branchEntries: session.sessionManager.getBranch() as BranchEntryLike[],
-			state,
-			tableName: name,
-			userName: names.userName,
-			charName: names.charName,
-			sideText: backfillSideText,
-			onProgress: (msg) => console.log(`[backfill] ${msg}`),
-		});
-		if (!r.ok) return { ok: false, error: r.error };
-		saveState(file, state); // fs.watch 自动广播 state 帧
-		syncStoryStateFromDisk(); // 同步 roleplay 内存 state + 树快照
-		return { ok: true, rows: r.rows, chunks: r.chunks };
+		return { ok: false, error: "表格回填已停用（SQL 化后场记代理按各表维护规则自主维护表格；如需补历史数据，可让助手按表说明用 sql_write 写入）" };
 	},
 	// ---- 原始导入（DESIGN-import-raw §2）：逐层回放 ST 聊天记录到新会话（旁路 LLM 场记，可中断）----
 	async importRaw(input) {
@@ -1722,16 +1941,13 @@ const restHost: RestHost = {
 				}
 			}
 		}
-		// 4) 模板物化（可选；与 restHost.applyTemplate 同逻辑：loadTemplate → materializeTemplate → 落盘 + 收编）
+		// 4) 模板物化（可选；SQL 化 2026-08-16：建 SQLite 表，与 restHost.applyTemplate 同逻辑）
 		const templateName = (input.templateName ?? "").trim();
 		if (templateName) {
 			const def = loadTemplate(cwd, templateName);
 			if (!def) return { ok: false, error: `模板 ${templateName} 不存在` };
-			const tfile = join(stateDir, `${session.sessionId}.json`);
-			const tstate = loadState(tfile);
-			materializeTemplate(tstate, def);
-			saveState(tfile, tstate);
-			syncStoryStateFromDisk();
+			const mr = await materializeTemplateToSql(def);
+			if (mr.warnings.length > 0) console.warn(`[import-raw] 模板物化警告：${mr.warnings.join("；")}`);
 		}
 		// 5) 工作状态（与 applyStatePatch 同源）
 		const file = join(stateDir, `${session.sessionId}.json`);
@@ -1774,63 +1990,10 @@ const restHost: RestHost = {
 			resyncAll();
 			return { ok: false, error: r.error, aborted: r.aborted };
 		}
-		// 6.5) 表多时逐表回填（配置 tableBackfillThreshold，缺省 6）：auto 表数超过阈值时，
-		// 单次场记建账塞不下所有表——回放完成后改为每表独立 LLM 提取链回填（复用 table-backfill
-		// 通道：分块直读楼层、增量式）。表少（≤ 阈值）时靠场记建账顺手填充即可。
-		// 失败跳过该表继续；signal 表粒度可中断（已回填的表已落盘不丢）。
-		const autoTables = Object.values(state.tables ?? {}).filter((t) => t.auto);
-		const backfillThreshold = loadConfig(cwd).tableBackfillThreshold ?? 6;
-		if (autoTables.length > backfillThreshold) {
-			let filled = 0;
-			for (let i = 0; i < autoTables.length; i++) {
-				if (input.signal?.aborted) break;
-				const t = autoTables[i]!;
-				broadcast({
-					type: "activity",
-					activity: {
-						kind: "note",
-						name: "import-raw",
-						detail: JSON.stringify({
-							stage: `回填表 ${i + 1}/${autoTables.length}（${t.name}）`,
-							current: r.floors,
-							total: r.floors,
-							scribeCalls: r.scribeCalls,
-						}),
-					},
-				});
-				const br = await runTableBackfill({
-					branchEntries: session.sessionManager.getBranch() as BranchEntryLike[],
-					state,
-					tableName: t.name,
-					userName: names.userName,
-					charName: names.charName,
-					sideText: backfillSideText,
-					onProgress: (msg) => console.log(`[import-raw] ${msg}`),
-				});
-				if (!br.ok) {
-					console.log(`[import-raw] 表「${t.name}」回填失败：${br.error}`);
-					continue;
-				}
-				filled += br.rows;
-				// 每表完成即落盘 + 广播（中断时已回填的表不丢）
-				saveState(file, state);
-				syncStoryStateFromDisk();
-			}
-			console.log(`[import-raw] 逐表回填完成：${autoTables.length} 张表，应用 ${filled} 行`);
-			broadcast({
-				type: "activity",
-				activity: {
-					kind: "note",
-					name: "import-raw",
-					detail: JSON.stringify({
-						stage: `逐表回填完成（应用 ${filled} 行）`,
-						current: r.floors,
-						total: r.floors,
-						scribeCalls: r.scribeCalls,
-					}),
-				},
-			});
-		}
+		// 6.5) 逐表回填：已停用（SQL 化 2026-08-16）——旧 table-backfill 通道写
+		// state.tables（剧情侧不可见）。SQL 化后每拍场记代理按各表【维护规则】自主
+		// 查/写 SQLite 表，导入回放后的表维护由后续拍次自然完成。
+		// （旧实现：auto 表数 > tableBackfillThreshold 时逐表 LLM 提取回填。）
 		// 7) 收尾：flush + 对齐 agent 内存消息 + 全量重放（前端会话列表/消息刷新）
 		sm.flush();
 		session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
@@ -2248,6 +2411,14 @@ const storyBridgeBase: StoryBridge = {
 	}),
 	queueStoryCommand: (text) => restHost.queueCommand(text),
 	worldState: () => currentState(),
+	/** 表格实时清单（SQLite；assistant world_read 表格段用——旧 state.tables 快照已停用） */
+	listTables: () => {
+		try {
+			return stage.tablesService().listTables().map((t) => ({ name: t.name, auto: t.auto, rowCount: t.rowCount }));
+		} catch {
+			return [];
+		}
+	},
 	applyStatePatch: (patch) => restHost.applyStatePatch(patch),
 	applyTableOp: (op) => restHost.applyTableOp(op),
 	applyTemplate: (name) => restHost.applyTemplate(name),
@@ -2403,9 +2574,20 @@ const storyBridgeBase: StoryBridge = {
 			// 3. sm.branch 直钉（绝不用 session.navigateTree——它对 user/assistant 目标有副作用语义，
 			//    实测导致分支回退到开场白、改写丢失）；append-only：原回复保留在树里
 			const beforeLeaf = session.sessionManager.getLeafId();
+			{
+				try {
+					const beforeFloor = buildStoryFloors(session.messages as unknown[]);
+					console.log(
+						`[liyuan-trace] [storyEdit] BEFORE target=${lastRoleIndex} leaf=${beforeLeaf?.slice(0, 8) ?? "?"} floors=${beforeFloor.length}`,
+					);
+				} catch {
+					// 诊断日志不阻断
+				}
+			}
 			branchCommitToTarget(resolved.targetId);
-			// 4. 注入改后全文（rp-edited-reply：上下文钩子会转成 assistant 给 LLM，带「已改写」标记）
-			await session.sendCustomMessage({ customType: "rp-edited-reply", content: text, display: true });
+			// 4. 注入改后全文（方案 B：编辑槽复用——同目标楼复用一条 rp-edited-reply，不新增叶；
+			//    上下文钩子会把该槽转成 assistant 给 LLM，带「已改写」标记；旧值进槽 history 可回滚）
+			writeEditReplySlot(session.sessionManager as never, "storyEdit", resolved.targetId, text);
 			// 4b. 叶校验（2026-08-12 防御）：注入后目标前驱必须仍在分支——否则说明叶被外部移动到
 			//     预期外位置（历史 bug：story_edit 改稿挂错楼层），记录告警供排查
 			{
@@ -2414,6 +2596,32 @@ const storyBridgeBase: StoryBridge = {
 					console.error(
 						`[liyuan] story_edit 叶校验失败：目标前驱 ${resolved.targetId.slice(0, 8)} 不在注入后分支（叶 ${beforeLeaf?.slice(0, 8) ?? "?"} → ${session.sessionManager.getLeafId()?.slice(0, 8) ?? "?"}）`,
 					);
+				}
+			}
+
+			// 4c. 排查日志（story_edit 改稿后楼层投影的诊断锚点）：改稿后 session.messages 的形状
+			//     与 buildStoryFloors 的楼层结果直接影响阅读侧能否读到改稿层。此日志把注入后的
+			//     message 序列（role/customType）与楼层数固化下来，便于复现「改稿后丢一层」。
+			{
+				try {
+					const shapeOf = (m: unknown): string =>
+						m && typeof m === "object"
+							? (m as { customType?: unknown }).customType
+								? `custom:${(m as { customType?: unknown }).customType}`
+								: String((m as { role?: unknown }).role ?? "?")
+							: "?";
+					const msgShape = (session.messages as unknown[]).map(shapeOf).join(",");
+					const afterFloor = buildStoryFloors(session.messages as unknown[]);
+					// 树侧真实条目尾迹（含被切掉的楼层），与 message 序列对照
+					const branchTail = (session.sessionManager.getBranch() as Array<Record<string, unknown>>)
+						.slice(-6)
+						.map((e) => `${String(e.type)}:${(e as { customType?: string }).customType ?? (e as { message?: { role?: string } }).message?.role ?? ""}`)
+						.join("|");
+					console.log(
+						`[liyuan-trace] [storyEdit] target=${lastRoleIndex} leaf=${beforeLeaf?.slice(0, 8) ?? "?"}→${session.sessionManager.getLeafId()?.slice(0, 8) ?? "?"} branchTail=[${branchTail}] messages=[${msgShape}] floors=${afterFloor.length} tail=${JSON.stringify(afterFloor.slice(-4).map((f) => [f.floor, f.kind, f.text.slice(0, 24)]))}`,
+					);
+				} catch (err2) {
+					console.error("[liyuan-trace] [storyEdit] 诊断日志失败", err2);
 				}
 			}
 
@@ -2429,7 +2637,9 @@ const storyBridgeBase: StoryBridge = {
 				}
 			}
 			if (userText.trim() && !isBackstageText(userText)) {
-				await scribeGate.scribeTurnOnceExported(userText, text);
+				// SQL 化旁路重记账（2026-08-16）：走 engine 的 runScribeTurn 全链路
+				//（顶层兜底 + 表格维护代理写 SQLite），不再走旧 roleplay 网关（旧账本路径）。
+				await stage.rescribeTurn(userText, text);
 			}
 
 			// 6. 全端刷新（照 scriptEditMessage 收尾，让前端看到新叶与标记）
@@ -2567,8 +2777,10 @@ const storyBridgeBase: StoryBridge = {
 
 			// 6) 经 storyEdit 通道（rp-edited-reply 分支注入）写入：
 			//    改后全文作为最新叙事版本（带「已改写」标记、原文旁支可回滚），
-			//    渲染走 RichContent（无 rp-draft-op 补丁的 timeline 快照问题）
-			const r = await editEntryViaStoryChannel(targetId, newText);
+			//    渲染走 RichContent（无 rp-draft-op 补丁的 timeline 快照问题）。
+			//    skipScribe（2026-08-16 用户裁决）：占位符非叙事内容，插画不改变剧情——
+			//    不触发重记账，账本/表格继承原回复（润色才需要重算，见 storyEdit）。
+			const r = await editEntryViaStoryChannel(targetId, newText, { skipScribe: true });
 			if (!r.ok) return { ok: false, error: r.error };
 			// 6b. 叶校验（2026-08-12 防御）：注入后目标必须仍在分支——否则说明叶被外部移动到
 			//     预期外位置（历史 bug：改稿/嵌入挂错楼层），记录告警供排查
@@ -2643,7 +2855,8 @@ async function editEntryViaStoryChannel(
 			return { ok: false, error: reason };
 		}
 		branchCommitToTarget(entryId);
-		await session.sendCustomMessage({ customType: "rp-edited-reply", content: newText, display: true });
+		// 编辑正文（方案 B：槽复用——同目标楼复用一条 rp-edited-reply，不新增叶；旧值进槽 history）
+		writeEditReplySlot(session.sessionManager as never, "storyChannel", entryId, newText);
 		// 旁路重记账（与 storyEdit 同款）：取目标前一条 user 文本 + 改后全文
 		let userText = "";
 		for (let i = idx - 1; i >= 0; i--) {
@@ -2722,6 +2935,8 @@ const syncAllAgentStories = async (): Promise<void> => {
 
 /** 生成按 name 路由的委托实现（网关注册表保证 name 已注册，这里兜底用 host 执行 runTask） */
 const buildAgentRunner = (agentId: string): AssistantRunner => async (req) => {
+	// 统一调试接口：右栏助手/自定义 agent 请求按 config.debugLog 现读同步通道（开发者模式可关打印）
+	syncDebugConfig(loadConfig(cwd));
 	const host = agentHosts.get(agentId);
 	const label = agentId === "assistant" ? "助手" : `agent「${agentId}」`;
 	if (!host) {
@@ -2842,6 +3057,12 @@ const onAssistantEvent = (event: unknown) => {
 			});
 			break;
 		case "auto_retry_start":
+			// 调试增强：助手 LLM 请求失败触发自动重试——统一接口打 ERROR
+			debug.error("assistant", "助手模型请求失败，自动重试", {
+				attempt: ev.attempt,
+				maxAttempts: ev.maxAttempts,
+				errorMessage: (ev as { errorMessage?: string }).errorMessage,
+			});
 			broadcast({
 				type: "notify",
 				level: "warning",
@@ -2864,18 +3085,14 @@ const promptAssistant = async (host: AssistantHost, text: string) => {
 // 模型解析优先级：settings.llm（draw 局部配置）→ sideModel（全局旁挂模型）→ 剧情模型（session.model）。
 // systemPrompt 最前拼破甲（sideJailbreak，2026-08-10 用户裁决）。
 registerPlannerCaller(async (prompt, llm) => {
+	// 统一调试接口：生图规划旁路按 config.debugLog 现读同步通道（开发者模式可关打印）
+	syncDebugConfig(loadConfig(cwd));
 	const model = (() => {
 		if (llm?.provider && llm?.model) {
 			const m = session.modelRegistry.find(llm.provider, llm.model);
 			if (m) return m as never;
 		}
-		const sm = loadConfig(cwd).sideModel;
-		if (sm?.provider && sm?.id) {
-			const m = session.modelRegistry.find(sm.provider, sm.id);
-			if (m) return m as never;
-			console.warn(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
-		}
-		return session.model as never;
+		return resolveSideModel(loadConfig(cwd), session.model as never);
 	})();
 	if (!model) throw new Error("尚无可用模型（未配置剧情模型）");
 	// 必须 await：getApiKeyAndHeaders 返回 Promise<ResolvedRequestAuth>，缺 await 会解构到
@@ -2886,7 +3103,8 @@ registerPlannerCaller(async (prompt, llm) => {
 	const s = streamSimple(
 		model,
 		{
-			systemPrompt: sideJailbreakPrefix() + prompt.system,
+			// 破甲最前 → 规划提示词 → router 收敛尾注（DESIGN-router §3 B 类）
+			systemPrompt: sideJailbreakPrefix() + prompt.system + routerConvergeTailOf(),
 			messages: [{ role: "user", content: [{ type: "text", text: prompt.user }], timestamp: Date.now() }],
 		},
 		{
@@ -2900,14 +3118,28 @@ registerPlannerCaller(async (prompt, llm) => {
 	let final: AssistantMsgLike | null = null;
 	for await (const e of s) {
 		if (e.type === "done") final = e.message ?? null;
-		else if (e.type === "error") throw new Error(e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`);
+		else if (e.type === "error") {
+			const msg = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
+			// 调试增强：生图规划旁路返回 provider 错误——统一接口打 ERROR
+			debug.error("side-text", "生图规划旁路 LLM 返回 provider 错误", {
+				model: String((model as { id?: string }).id ?? ""),
+				error: msg,
+			});
+			throw new Error(msg);
+		}
 	}
-	if (!final) throw new Error("规划 LLM 流未产出最终消息");
+	if (!final) {
+		debug.error("side-text", "生图规划旁路 LLM 流未产出最终消息", { model: String((model as { id?: string }).id ?? "") });
+		throw new Error("规划 LLM 流未产出最终消息");
+	}
 	const text = (final.content ?? [])
 		.filter((p) => p?.type === "text")
 		.map((p) => String((p as { text?: string }).text ?? ""))
 		.join("");
-	if (!text.trim()) throw new Error("规划 LLM 最终消息无文本");
+	if (!text.trim()) {
+		debug.warning("side-text", "生图规划旁路 LLM 最终消息无文本", { model: String((model as { id?: string }).id ?? "") });
+		throw new Error("规划 LLM 最终消息无文本");
+	}
 	return text;
 });
 
@@ -2922,6 +3154,35 @@ function sideJailbreakPrefix(): string {
 	return jb ? `${jb}\n\n` : "";
 }
 
+/**
+ * 旁挂模型解析（DESIGN-router §3 B 类旁路收敛）：config.sideModel → 剧情模型兜底。
+ * 取代 registerPlannerCaller / backfillSideText / StageEngine.getSideModel 各自拷贝。
+ */
+function resolveSideModel(config: RpConfig, fallback: unknown): unknown {
+	const sm = config.sideModel;
+	if (sm?.provider && sm?.id) {
+		const m = session.modelRegistry.find(sm.provider, sm.id);
+		if (m) return m;
+		console.warn(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
+	}
+	return fallback;
+}
+
+/**
+ * 旁路收敛尾注（DESIGN-router §3：信息完备即产出，防旁路飘）。
+ * 默认开（用户拍板）；router.enabled=false 时零变化（不加尾注）。
+ */
+function routerConvergeTailOf(): string {
+	try {
+		const r = loadConfig(cwd).router;
+		if (r?.enabled === false) return "";
+		if (r?.side?.convergeTail === false) return "";
+	} catch {
+		return "";
+	}
+	return CONVERGE_TAIL;
+}
+
 // 表格历史回填（DESIGN-table-backfill §3）/ 原始导入（DESIGN-import-raw §2）：旁路文本调用，
 // 与场记/压缩/规划同款 streamSimple 通道。模型：旁挂模型（sideModel）→ 剧情模型兜底；
 // systemPrompt 最前拼破甲（sideJailbreak）；失败返回 {error}——调用方跳过该块继续。
@@ -2931,15 +3192,11 @@ async function backfillSideText(
 	userText: string,
 	signal?: AbortSignal,
 ): Promise<string | { error: string }> {
+	// 统一调试接口：旁路请求按 config.debugLog 现读同步通道（开发者模式可关打印）
+	syncDebugConfig(loadConfig(cwd));
 	try {
-		// 旁挂模型优先（modelRegistry 找不到回退剧情模型）
-		let model: unknown = null;
-		const sm = loadConfig(cwd).sideModel;
-		if (sm?.provider && sm?.id) {
-			model = session.modelRegistry.find(sm.provider, sm.id);
-			if (!model) console.warn(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
-		}
-		model = model ?? (session.model as never);
+		// 旁挂模型优先（找不到回退剧情模型，收敛自 resolveSideModel）
+		const model = resolveSideModel(loadConfig(cwd), session.model as never);
 		if (!model) return { error: "尚无可用模型（未配置剧情模型）" };
 		// 必须 await：getApiKeyAndHeaders 返回 Promise，缺 await 会解构到 Promise 实例（同 registerPlannerCaller 坑）
 		const auth = await session.modelRegistry.getApiKeyAndHeaders(model as never);
@@ -2948,7 +3205,8 @@ async function backfillSideText(
 			model as never,
 			{
 				// 破甲固定在最前（2026-08-10 用户裁决：绕过模型限制；除每轮剧情场记外所有旁路生效）
-				systemPrompt: sideJailbreakPrefix() + systemPrompt,
+				// + router 收敛尾注（DESIGN-router §3 B 类；默认开）
+				systemPrompt: sideJailbreakPrefix() + systemPrompt + routerConvergeTailOf(),
 				messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
 			},
 			{
@@ -2967,17 +3225,37 @@ async function backfillSideText(
 		let final: AssistantMsgLike | null = null;
 		for await (const e of s) {
 			if (e.type === "done") final = e.message ?? null;
-			else if (e.type === "error") return { error: e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}` };
+			else if (e.type === "error") {
+				const msg = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
+				// 调试增强：旁路（回填/导入）返回 provider 错误——统一接口打 ERROR
+				debug.error("side-text", "旁路（回填/导入）LLM 返回 provider 错误", {
+					model: String((model as { id?: string }).id ?? ""),
+					error: msg,
+				});
+				return { error: msg };
+			}
 		}
-		if (!final) return { error: "旁路 LLM 流未产出最终消息" };
+		if (!final) {
+			debug.error("side-text", "旁路（回填/导入）LLM 流未产出最终消息", {
+				model: String((model as { id?: string }).id ?? ""),
+			});
+			return { error: "旁路 LLM 流未产出最终消息" };
+		}
 		const text = (final.content ?? [])
 			.filter((p) => p?.type === "text")
 			.map((p) => String((p as { text?: string }).text ?? ""))
 			.join("");
-		if (!text.trim()) return { error: "旁路 LLM 最终消息无文本" };
+		if (!text.trim()) {
+			debug.warning("side-text", "旁路（回填/导入）LLM 最终消息无文本", {
+				model: String((model as { id?: string }).id ?? ""),
+			});
+			return { error: "旁路 LLM 最终消息无文本" };
+		}
 		return text;
 	} catch (e) {
-		return { error: e instanceof Error ? e.message : String(e) };
+		const msg = e instanceof Error ? e.message : String(e);
+		debug.error("side-text", "旁路（回填/导入）LLM 调用异常", { error: msg });
+		return { error: msg };
 	}
 }
 
@@ -3152,8 +3430,81 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 	});
 }
 
-async function handleAccessApi(req: IncomingMessage, res: ServerResponse, url: string): Promise<void> {
-	const json = (code: number, body: unknown, token?: string | null) => {
+/**
+ * SQL 表格 REST（DESIGN-tables-sql P5）：表清单/元数据/建删表/行数据/行写入。
+ * UI 表编辑器与外部调用共用；SQL 由 UI/调用方构造，经 TablesService 校验执行。
+ */
+async function handleTablesApi(req: IncomingMessage, res: ServerResponse, urlPath: string): Promise<void> {
+	const json = (code: number, body: unknown) => {
+		res.writeHead(code, { "content-type": "application/json" });
+		res.end(JSON.stringify(body));
+	};
+	const readBody = async (): Promise<Record<string, unknown>> => {
+		const chunks: Buffer[] = [];
+		for await (const c of req) chunks.push(c as Buffer);
+		try {
+			return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
+		} catch {
+			return {};
+		}
+	};
+	try {
+		const svc = stage.tablesService();
+		if (req.method === "GET" && urlPath === "/api/tables") {
+			const list = svc.listTables();
+			const metas: Record<string, unknown> = {};
+			for (const t of list) metas[t.name] = svc.getMeta(t.name);
+			json(200, { tables: list, metas });
+			return;
+		}
+		if (req.method === "GET" && urlPath === "/api/tables/rows") {
+			const u = new URL(req.url ?? "/", "http://x");
+			const table = u.searchParams.get("table") ?? "";
+			if (!/^[A-Za-z0-9_\u4e00-\u9fff]{1,32}$/.test(table)) {
+				json(400, { error: "表名不合法" });
+				return;
+			}
+			const offset = Math.max(0, Number(u.searchParams.get("offset") ?? 0) || 0);
+			const limit = Math.min(200, Math.max(1, Number(u.searchParams.get("limit") ?? 50) || 50));
+			// rowid 供前端行编辑定位（UPDATE/DELETE WHERE rowid = N）
+			const r = svc.execRead(`SELECT rowid AS __rowid, * FROM "${table}" LIMIT ${limit} OFFSET ${offset}`);
+			json(r.ok ? 200 : 400, r.ok ? { rows: r.rows } : { error: r.error });
+			return;
+		}
+		if (req.method === "POST" && urlPath === "/api/tables") {
+			const body = await readBody();
+			const action = String(body.action ?? "");
+			if (action === "create") {
+				const r = svc.createTable(body.def as never);
+				json(r.ok ? 200 : 400, r.ok ? { ok: true } : { error: r.error });
+				return;
+			}
+			if (action === "drop") {
+				const r = svc.dropTable(String(body.name ?? ""));
+				json(r.ok ? 200 : 400, r.ok ? { ok: true } : { error: r.error });
+				return;
+			}
+			if (action === "updateMeta") {
+				const r = svc.updateMeta(body.def as never);
+				json(r.ok ? 200 : 400, r.ok ? { ok: true } : { error: r.error });
+				return;
+			}
+			json(400, { error: "未知 action（create/drop/updateMeta）" });
+			return;
+		}
+		if (req.method === "POST" && urlPath === "/api/tables/rows") {
+			const body = await readBody();
+			const r = svc.execWrite(String(body.sql ?? ""));
+			json(r.ok ? 200 : 400, r.ok ? { ok: true, changes: r.changes } : { error: r.error });
+			return;
+		}
+		json(404, { error: "unknown" });
+	} catch (e) {
+		json(500, { error: e instanceof Error ? e.message : String(e) });
+	}
+}
+
+async function handleAccessApi(req: IncomingMessage, res: ServerResponse, url: string): Promise<void> {	const json = (code: number, body: unknown, token?: string | null) => {
 		if (token !== undefined) setAccessCookie(res, token);
 		res.writeHead(code, { "content-type": "application/json" });
 		res.end(JSON.stringify(body));
@@ -3217,6 +3568,10 @@ async function handleAccessApi(req: IncomingMessage, res: ServerResponse, url: s
 const httpServer = createServer((req, res) => {
 	void (async () => {
 		const urlPath = (req.url ?? "/").split("?")[0];
+		if (urlPath.startsWith("/api/tables")) {
+			await handleTablesApi(req, res, urlPath);
+			return;
+		}
 		if (urlPath.startsWith("/api/access/")) {
 			await handleAccessApi(req, res, urlPath);
 			return;
@@ -3377,16 +3732,8 @@ const stage = new StageEngine({
 	getModel: () => session.model as never,
 	getAuth: async (m) => session.modelRegistry.getApiKeyAndHeaders(m as never),
 	// 旁挂模型（8/14，sideModel 接上台）：台上旁路（评审/场记/压缩）统一走它——
-	// 解析与 backfillSideText 同款（modelRegistry.find，找不到回退剧情模型），配置改动即时生效
-	getSideModel: () => {
-		const sm = loadConfig(cwd).sideModel;
-		if (sm?.provider && sm?.id) {
-			const m = session.modelRegistry.find(sm.provider, sm.id);
-			if (!m) console.warn(`[side-model] 旁挂模型 ${sm.provider}/${sm.id} 未找到，回退剧情模型`);
-			return m ?? undefined;
-		}
-		return undefined;
-	},
+	// 解析收敛自 resolveSideModel（modelRegistry.find，找不到回退剧情模型），配置改动即时生效
+	getSideModel: () => resolveSideModel(loadConfig(cwd), undefined) ?? undefined,
 	getThinking: () => session.thinkingLevel,
 	// 场记落盘 → fs.watch 自动广播 state 帧（与扩展/REST 写路径同一条）
 	getStateFile: (sessionId) => join(stateDir, `${sessionId}.json`),
@@ -3521,7 +3868,14 @@ const stage = new StageEngine({
 	select: uiContext.select,
 	streamFn: streamSimple as unknown as StageStreamFn,
 	events: {
-		onTurnStart: () => broadcast({ type: "agent", state: "start" }),
+		onTurnStart: () => {
+			broadcast({ type: "agent", state: "start" });
+			// JS Runner 事件桥（断链修复 2026-08-16）：台上回合开始 → ST GENERATION_STARTED。
+			// 经 script-events.ts 映射表发射（该模块此前零调用）；前端投影无 GENERATION_STARTED，零双发。
+			for (const f of mapPiEventsToSt({ name: "turn_start", data: {} })) {
+				broadcast({ type: "ext_event", name: f.name, args: f.args });
+			}
+		},
 		onDelta: (kind, delta, draft, reset) =>
 			broadcast({ type: "delta", kind, delta, ...(draft ? { draft: true } : {}), ...(reset ? { reset: true } : {}) }),
 		onDraftResync: (segments) => broadcast({ type: "draft_resync", segments }),
@@ -3825,6 +4179,11 @@ const handlePrompt = async (text: string) => {
 			type: "message",
 			message: { channel: "user", name: names.userName, text: trimmed },
 		});
+		// JS Runner 事件桥（断链修复 2026-08-16）：用户消息受理 → ST MESSAGE_SENT。
+		// 前端投影明确不给 user 通道发事件，此处经 script-events.ts 映射补上，零双发。
+		for (const f of mapPiEventsToSt({ name: "message_end", data: { message: { role: "user", content: trimmed } } })) {
+			broadcast({ type: "ext_event", name: f.name, args: f.args });
+		}
 		// 流式中送达的输入由引擎排队到本拍结束（RP 语境：不打断正在进行的叙事）
 		await stage.performTurn(trimmed);
 		return;
@@ -4414,13 +4773,30 @@ wss.on("connection", (ws, req) => {
 									signal: controller.signal,
 								},
 							);
+							let emitted = false;
+							let gotErr = "";
 							for await (const e of s) {
 								if (e.type === "text_delta") {
+									emitted = true;
 									broadcast({ type: "ext_gen", reqId, kind: "delta", delta: e.delta });
 								} else if (e.type === "done") {
+									// 调试增强：JS Runner 旁路流结束但没有任何文本 delta（非预期）——统一接口打 WARNING
+									if (!emitted && !gotErr) {
+										debug.warning("side-text", "ext_generate 旁路流结束但未产出文本", {
+											reqId,
+											model: String((model as { id?: string }).id ?? ""),
+										});
+									}
 									broadcast({ type: "ext_gen", reqId, kind: "end" });
 								} else if (e.type === "error") {
-									broadcast({ type: "ext_gen", reqId, kind: "error", error: e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}` });
+									gotErr = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
+									// 调试增强：JS Runner 旁路返回 provider 错误——统一接口打 ERROR
+									debug.error("side-text", "ext_generate 旁路 LLM 返回 provider 错误", {
+										reqId,
+										model: String((model as { id?: string }).id ?? ""),
+										error: gotErr,
+									});
+									broadcast({ type: "ext_gen", reqId, kind: "error", error: gotErr });
 								}
 							}
 						} finally {
