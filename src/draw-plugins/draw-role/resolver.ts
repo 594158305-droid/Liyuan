@@ -4,7 +4,14 @@
  *
  * 依赖方向：插件 A → 底座（wardrobe.ts 服装档案 / draw/novelai.ts 的 CharacterPrompt 结构）。
  * 零 pi 依赖。worldState 由调用方传入（REST 侧 RestHost 无 worldState getter，传 undefined
- * 时 currentOutfit 缺省回退 defaultOutfit——见 rest.ts 路由注释）。
+ * 时 currentOutfit 缺省回退 outfits 第一套）。
+ *
+ * 穿着优先级的现状（2026-08-16 检修后）：
+ *   生图穿着的权威源是「在场角色表」的当前穿搭/上装/下装列（剧情引擎每拍维护，中文白描），
+ *   而非服装档案的静态 defaultOutfit——后者被误设成「裸体」时会把生图带歪。
+ *   为此：draw_generate 允许调用方经 sceneOutfits[name] 传「覆盖穿着 tags」，用于替换档案 outfit
+ *   （画师从在场角色表读出穿着后转英文 tag 传入）；worldState.characters[name].outfit 保留账本语义，
+ *   仅作第二级回退。defaultOutfit 已在 wardrobe.ts 废弃（不再参与解析），只保留 outfits 清单。
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -51,8 +58,11 @@ function naiTypeOf(c: { type?: string }): string {
 /**
  * 解析角色特征：
  * - names 里的名字逐一到服装档案（loadWardrobe(cwd, cardPath)）查角色
- * - 当前穿着优先级：worldState.characters[name].outfit → 档案 defaultOutfit → 第一套（复用 wardrobe.ts resolveOutfit）
- * - tag 组装：appearanceTags + danbooruTag（useDanbooruTag!==false 时）+ outfit.tags + 角色选中组 tags（getRoleGroupTags）
+ * - 当前穿着优先级：sceneOutfits[name]（调用方从「在场角色表」读出的覆盖穿着 tags）
+ *     → worldState.characters[name].outfit（账本）→ outfits 第一套（档案 defaultOutfit 已废弃）
+ * - sceneOutfits：覆盖穿着优先。画师把在场角色表的当前穿搭/上装/下装转成英文 tag 传入，
+ *     生图即按此穿着，摆脱服装档案静态默认（这是「穿着以剧情/在场角色表为准」的入口）。
+ * - tag 组装：appearanceTags + danbooruTag（useDanbooruTag!==false 时）+ 穿着 tags(sceneOutfits 或 outfit.tags) + 角色选中组 tags（getRoleGroupTags）
  * - uc：角色 negativeTags（非空才输出）
  * - 参考图读文件转 base64（直接返回 raw base64，底座 buildGenerateBody 会 stripDataPrefix 处理）
  * - unknown：档案里没有的角色名
@@ -62,6 +72,7 @@ export function resolveCharacterTags(
 	cardPath: string,
 	names: string[],
 	worldState?: { characters?: Record<string, { outfit?: string }> },
+	sceneOutfits?: Record<string, string>,
 ): ResolveResult {
 	const wb = loadWardrobe(cwd, cardPath);
 	const characters: ResolvedCharacter[] = [];
@@ -75,12 +86,14 @@ export function resolveCharacterTags(
 			unknown.push(name);
 			continue;
 		}
+		// 穿着主源：sceneOutfits 显式覆盖 > 档案 resolved outfit（defaultOutfit 已废弃）
+		const outfitTags = sceneOutfits?.[name]?.trim() || outfit?.tags || "";
 		const roleGroupTags = getRoleGroupTags(cwd, name, character.selectedGroupId);
 		const parts = [
 			character.useDanbooruTag !== false && character.danbooruTag ? danbooruToNai(character.danbooruTag) : "",
 			naiTypeOf(character),
 			character.appearanceTags,
-			outfit?.tags ?? "",
+			outfitTags,
 			roleGroupTags,
 		]
 			.filter(Boolean)

@@ -36,7 +36,6 @@ import {
 	upsertCharacter,
 	addOutfit,
 	removeOutfit,
-	setDefaultOutfit,
 	resolveOutfit,
 	wardrobeKey,
 } from "../src/wardrobe.ts";
@@ -304,15 +303,15 @@ test("wardrobe: CRUD 往返", () => {
 	wb = setAppearanceTagsPublic(wb, "青梧", "long silver hair");
 	wb = addOutfit(wb, "青梧", { id: "o1", name: "青色长裙", tags: "cheongsam, green dress" });
 	wb = addOutfit(wb, "青梧", { id: "o2", name: "便服", tags: "casual, t-shirt" });
-	wb = setDefaultOutfit(wb, "青梧", "o1");
 	saveWardrobe(dir, wb);
 
 	const loaded = loadWardrobe(dir, card);
 	assert.equal(loaded.characters.length, 1);
 	assert.equal(loaded.characters[0]!.outfits.length, 2);
-	assert.equal(loaded.characters[0]!.defaultOutfit, "o1");
+	// defaultOutfit 已废弃（2026-08-16 检修）：落盘不再读/写该字段
+	assert.equal((loaded.characters[0] as Record<string, unknown>).defaultOutfit, undefined);
 
-	// 当前穿着指定 → 命中；否则回退默认
+	// 当前穿着指定 → 命中；否则回退第一套（defaultOutfit 不再参与）
 	const r1 = resolveOutfit(loaded, "青梧", "o2");
 	assert.equal(r1.outfit!.id, "o2");
 	const r2 = resolveOutfit(loaded, "青梧", undefined);
@@ -320,9 +319,10 @@ test("wardrobe: CRUD 往返", () => {
 	// 未知角色
 	assert.equal(resolveOutfit(loaded, "路人", undefined).outfit, null);
 
-	// 删除默认服装 → 回退第一套
+	// 删除某套服装后仍回退剩余第一套
 	wb = removeOutfit(loaded, "青梧", "o1");
-	assert.equal(wb.characters[0]!.defaultOutfit, "o2");
+	assert.equal(wb.characters[0]!.outfits.length, 1);
+	assert.equal(wb.characters[0]!.outfits[0]!.id, "o2");
 });
 
 test("wardrobe: 卡路径哈希稳定且无非法字符", () => {

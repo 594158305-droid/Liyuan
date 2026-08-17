@@ -28,8 +28,6 @@ export interface WardrobeCharacter {
 	/** 基础外观 tag（发型/瞳色/体型，非服装） */
 	appearanceTags: string;
 	outfits: Outfit[];
-	/** 默认穿着（无当前穿着状态时回退） */
-	defaultOutfit?: string;
 	/** 别名（检出用；正文含别名即算在场） */
 	aliases?: string[];
 	/** 角色类型（NAI 形象类型：girl/boy/man/woman，角色管理 UI 类型选项；生图时进角色 tag 串开头） */
@@ -106,7 +104,6 @@ export function loadWardrobe(cwd: string, cardPath: string): WardrobeFile {
 							name,
 							appearanceTags: typeof co.appearanceTags === "string" ? co.appearanceTags : "",
 							outfits,
-							...(typeof co.defaultOutfit === "string" && co.defaultOutfit ? { defaultOutfit: co.defaultOutfit } : {}),
 							...(Array.isArray(co.aliases)
 								? {
 										aliases: co.aliases.filter((a): a is string => typeof a === "string" && a.trim() !== ""),
@@ -161,7 +158,6 @@ export function upsertCharacter(wb: WardrobeFile, name: string, fields: UpsertCh
 		name: n,
 		appearanceTags: "",
 		outfits: [],
-		defaultOutfit: undefined,
 	};
 	if (Array.isArray(fields.aliases) && fields.aliases.length > 0) base.aliases = [...fields.aliases];
 	if (typeof fields.type === "string" && fields.type) base.type = fields.type;
@@ -213,20 +209,13 @@ export function removeOutfit(wb: WardrobeFile, name: string, outfitId: string): 
 		characters: wb.characters.map((c) => {
 			if (c.name !== name) return c;
 			const outfits = c.outfits.filter((o) => o.id !== outfitId);
-			const defaultOutfit = c.defaultOutfit === outfitId ? (outfits[0]?.id ?? undefined) : c.defaultOutfit;
-			return { ...c, outfits, defaultOutfit };
+			return { ...c, outfits };
 		}),
 	};
 }
 
-export function setDefaultOutfit(wb: WardrobeFile, name: string, outfitId: string): WardrobeFile {
-	return {
-		...wb,
-		characters: wb.characters.map((c) => (c.name === name ? { ...c, defaultOutfit: outfitId } : c)),
-	};
-}
-
-/** 取角色实际穿着：优先指定/账本状态，回退默认，再回退第一套 */
+/** 取角色实际穿着：优先账本状态（worldState.characters[name].outfit，随世界线回档），
+ * 其次回退第一套（defaultOutfit 已废弃，不再参与解析）。 */
 export function resolveOutfit(
 	wb: WardrobeFile,
 	name: string,
@@ -234,11 +223,7 @@ export function resolveOutfit(
 ): { outfit: Outfit | null; character: WardrobeCharacter | null } {
 	const character = wb.characters.find((c) => c.name === name) ?? null;
 	if (!character) return { outfit: null, character: null };
-	const outfit =
-		character.outfits.find((o) => o.id === currentOutfitId) ??
-		character.outfits.find((o) => o.id === character.defaultOutfit) ??
-		character.outfits[0] ??
-		null;
+	const outfit = character.outfits.find((o) => o.id === currentOutfitId) ?? character.outfits[0] ?? null;
 	return { outfit, character };
 }
 

@@ -83,7 +83,7 @@ test("detect：空正文 / 空 knownNames → 空数组", () => {
 
 // ---------- 3. resolver ----------
 
-/** 造临时服装档案：角色 A（appearanceTags + 两套 outfit，defaultOutfit=B，B 带参考图） */
+/** 造临时服装档案：角色 A（appearanceTags + 两套 outfit，B 带参考图且排第一——defaultOutfit 已废弃，回退取第一套） */
 function makeWardrobe(cwd: string): { card: string; wb: WardrobeFile } {
 	const card = "assets/cards/test.json";
 	const wb: WardrobeFile = {
@@ -95,10 +95,9 @@ function makeWardrobe(cwd: string): { card: string; wb: WardrobeFile } {
 				name: "伊利亚斯",
 				appearanceTags: "blond_hair blue_eyes",
 				outfits: [
-					{ id: "A", name: "日常", tags: "casual shirt" },
 					{ id: "B", name: "礼服", tags: "dress formal", referenceImage: ".liyuan-wardrobe/refs/x.png" },
+					{ id: "A", name: "日常", tags: "casual shirt" },
 				],
-				defaultOutfit: "B",
 			},
 		],
 	};
@@ -108,7 +107,7 @@ function makeWardrobe(cwd: string): { card: string; wb: WardrobeFile } {
 	return { card, wb };
 }
 
-test("resolver：无 worldState 时用 defaultOutfit 的 tags", () => {
+test("resolver：无 worldState 时用第一套服装的 tags", () => {
 	const cwd = tmpCwd();
 	const { card } = makeWardrobe(cwd);
 	const r = resolveCharacterTags(cwd, card, ["伊利亚斯"]);
@@ -138,6 +137,14 @@ test("resolver：unknown 正确；未知角色 tags 为空", () => {
 	const r = resolveCharacterTags(cwd, card, ["伊利亚斯", "不存在的角色"]);
 	assert.equal(r.characters.length, 1);
 	assert.deepEqual(r.unknown, ["不存在的角色"]);
+});
+
+test("resolver：sceneOutfits 覆盖穿着（在场角色表优先，defaultOutfit 已废弃）", () => {
+	const cwd = tmpCwd();
+	const { card } = makeWardrobe(cwd);
+	// 画师从在场角色表读出「白色修女袍 + 黑披风」转英文 tag，经 sceneOutfits 覆盖档案第一套
+	const r = resolveCharacterTags(cwd, card, ["伊利亚斯"], undefined, { 伊利亚斯: "white robe, black cape" });
+	assert.equal(r.characters[0].tags, "blond_hair blue_eyes white robe, black cape");
 });
 
 test("resolver：档案里无外观 tag 且无服装 → tags 空串", () => {

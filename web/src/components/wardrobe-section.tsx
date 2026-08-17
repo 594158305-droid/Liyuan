@@ -24,7 +24,6 @@ interface WardrobeCharacter {
 	name: string;
 	appearanceTags: string;
 	outfits: WardrobeOutfit[];
-	defaultOutfit?: string;
 	/** 批次 3 字段扩展（LWB {aliases[], type, negativeTags, danbooruTag, useDanbooruTag, hidden, selectedGroupId, id} 对齐） */
 	id?: string;
 	aliases?: string[];
@@ -311,7 +310,7 @@ export function WardrobeSection({
 						<div className="sp-empty">还没有建档角色。输入角色名新建，或点上方按钮建档当前角色。</div>
 					)}
 					{wardrobe.data.wardrobe.characters.map((c) => {
-						const wornId = wornMap[c.name] !== undefined ? wornMap[c.name] : c.defaultOutfit ?? null;
+						const wornId = wornMap[c.name] !== undefined ? wornMap[c.name] : c.outfits[0]?.id ?? null;
 						// 角色卡「选中标签组」下拉：绑定该角色的组；当前选中组不在列表时补入保证回显
 						const charSelectableGroups = (() => {
 							const bound = (tagGroups.data?.groups ?? []).filter((g) => g.characterId === c.name);

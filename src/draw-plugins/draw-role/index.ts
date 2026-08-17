@@ -19,7 +19,6 @@ import {
 	removeOutfit,
 	saveWardrobe,
 	setAppearanceTags,
-	setDefaultOutfit,
 	updateOutfit,
 	upsertCharacter,
 	type Outfit as WardrobeOutfit,
@@ -100,7 +99,6 @@ export const tools: PluginToolDef[] = [
 			for (const c of wb.characters) {
 				lines.push(`\n【${c.name}】`);
 				lines.push(`外观 tag：${c.appearanceTags || "（无）"}`);
-				lines.push(`默认穿着：${c.defaultOutfit ?? "（未设）"}`);
 				if (c.outfits.length === 0) {
 					lines.push("服装：无");
 					continue;
@@ -112,7 +110,7 @@ export const tools: PluginToolDef[] = [
 					);
 				}
 			}
-			lines.push("\n（当前穿着需经面板设置——本工具不读账本）");
+			lines.push("\n本工具只列服装档案定义，不含剧情当前穿着。要确定角色此刻穿什么，请用 table_list + table_query 读「在场角色表」的当前穿搭/上装/下装/内衣列（剧情每拍维护），把它转成英文 tag 传 draw_generate 的 costume 覆盖穿着。");
 			return text(lines.join("\n"));
 		},
 	},
@@ -120,7 +118,7 @@ export const tools: PluginToolDef[] = [
 		name: "wardrobe_update",
 		label: "维护服装档案",
 		description:
-			"维护角色卡服装档案（不改剧情正文）：upsert 建角色 / remove 删角色 / setAppearance 设外观 tag / addOutfit 加服装 / updateOutfit 改服装 / removeOutfit 删服装 / setDefault 设默认穿着。当前穿着写账本走 POST /api/wardrobe/current（面板/接口），本工具不写账本。",
+			"维护角色卡服装档案（不改剧情正文）：upsert 建角色 / remove 删角色 / setAppearance 设外观 tag / addOutfit 加服装 / updateOutfit 改服装 / removeOutfit 删服装。当前穿着写账本走 POST /api/wardrobe/current（面板/接口），剧情当前穿着以「在场角色表」为准（经 draw_generate 的 costume 传入覆盖），本工具不写账本。",
 		parameters: Type.Object({
 			card: Type.Optional(Type.String({ description: "角色卡路径（相对 cwd），缺省用当前卡" })),
 			character: Type.String({ description: "角色名" }),
@@ -131,7 +129,6 @@ export const tools: PluginToolDef[] = [
 				Type.Literal("addOutfit"),
 				Type.Literal("updateOutfit"),
 				Type.Literal("removeOutfit"),
-				Type.Literal("setDefault"),
 			]),
 			outfit: Type.Optional(
 				Type.Object({
@@ -142,7 +139,7 @@ export const tools: PluginToolDef[] = [
 					notes: Type.Optional(Type.String({ description: "备注" })),
 				}),
 			),
-			outfitId: Type.Optional(Type.String({ description: "服装 id（removeOutfit/setDefault 用）" })),
+			outfitId: Type.Optional(Type.String({ description: "服装 id（removeOutfit 用）" })),
 			appearanceTags: Type.Optional(Type.String({ description: "外观 tag（setAppearance 用）" })),
 		}),
 		async execute(params) {
@@ -195,11 +192,6 @@ export const tools: PluginToolDef[] = [
 				case "removeOutfit": {
 					if (!(params.outfitId ?? "").toString().trim()) return text("removeOutfit 需要 outfitId", true);
 					wb = removeOutfit(wb, name, (params.outfitId as string).toString());
-					break;
-				}
-				case "setDefault": {
-					if (!(params.outfitId ?? "").toString().trim()) return text("setDefault 需要 outfitId", true);
-					wb = setDefaultOutfit(upsertCharacter(wb, name), name, (params.outfitId as string).toString());
 					break;
 				}
 				default:

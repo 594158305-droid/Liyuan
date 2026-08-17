@@ -181,7 +181,12 @@ export function illustrateTargetObstruction(
 	if (idx === -1) return null; // 目标不在分支：调用方先做存在性校验
 	for (let i = idx + 1; i < branch.length; i++) {
 		const t = branch[i];
-		if (t.type === "custom_message") return "custom_message";
+		if (t.type === "custom_message") {
+			// 编辑槽复用（方案 B 2026-08-16）：rp-edited-reply 槽是该楼的改写覆盖位，
+			// 允许多次覆写复用（不新增叶）；其余自定义消息（如新改稿层/其他）才阻塞。
+			if (t.customType === "rp-edited-reply") continue;
+			return "custom_message";
+		}
 		if (t.type === "message") return t.message?.role === "user" ? "user" : "reply";
 	}
 	return null;

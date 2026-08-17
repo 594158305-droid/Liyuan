@@ -536,10 +536,18 @@ test("illustrateTargetObstruction：目标后 user 消息 → user（新回合�
 	assert.equal(illustrateTargetObstruction(branch, "a1"), "user");
 });
 
-test("illustrateTargetObstruction：目标后改稿覆盖 → custom_message", () => {
+test("illustrateTargetObstruction：目标后 rp-edited-reply 槽 → 放行（编辑槽复用，方案 B）", () => {
 	const branch = [
 		{ id: "a1", type: "message", message: { role: "assistant" } },
 		{ id: "e1", type: "custom_message", customType: "rp-edited-reply" },
+	];
+	assert.equal(illustrateTargetObstruction(branch, "a1"), null);
+});
+
+test("illustrateTargetObstruction：目标后其他 custom_message（非编辑槽）→ 阻塞", () => {
+	const branch = [
+		{ id: "a1", type: "message", message: { role: "assistant" } },
+		{ id: "x1", type: "custom_message", customType: "other-note" },
 	];
 	assert.equal(illustrateTargetObstruction(branch, "a1"), "custom_message");
 });
