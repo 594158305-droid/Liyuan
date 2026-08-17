@@ -62,6 +62,9 @@ import {
 	type StorySnapshot,
 } from "../src/stagehand.ts";
 import { isAssistantDelegateActive } from "../src/assistant-gateway.ts";
+import { debug } from "../src/debug.ts";
+import { agentPersonaFor, isFlashModel } from "../src/router-core.ts";
+import { loadRouterFile, resolveRouterConfig } from "../src/router-config.ts";
 import { harvestLocalMediaPaths } from "../src/media-paths.ts";
 import { formatState, type TableOp } from "../src/state.ts";
 import { listTemplates, saveTemplate } from "../src/templates.ts";
@@ -95,6 +98,8 @@ export interface StoryBridge {
 	queueStoryCommand(text: string): boolean;
 	/** 世界状态（当前剧情会话的账本） */
 	worldState(): WorldState;
+	/** 表格实时清单（SQLite；world_read 的表格段用——旧 state.tables 快照已停用） */
+	listTables(): Array<{ name: string; auto: boolean; rowCount: number }>;
 	/** 账本补丁（落盘 + await statesync） */
 	applyStatePatch(patch: Record<string, unknown>): Promise<{ applied: string[]; warnings: string[] }>;
 	/** 自定义表格操作（DESIGN-custom-tables §6）：写操作经领域层 applyTableOperation 落盘 + 收编进树 */
@@ -447,8 +452,13 @@ function createStagehandTools(
 			async execute(_id, params) {
 				const abandoned = params.abandoned === true;
 				const ok = abandoned ? false : params.ok !== false;
+				const answer = params.answer.trim() || (abandoned ? "（已放弃）" : "（无摘要）");
+				// 调试增强：助手 return_answer 交回空摘要（非预期，正文可能在别处）——统一接口打 WARNING
+				if (!params.answer.trim() && !abandoned) {
+					debug.warning("assistant", `${displayName} 经 return_answer 交回空摘要`, { agentId });
+				}
 				const settled = hooks.settleReturn({
-					summary: params.answer.trim() || (abandoned ? "（已放弃）" : "（无摘要）"),
+					summary: answer,
 					ok,
 					abandoned,
 					viaReturnTool: true,
@@ -713,7 +723,18 @@ function createStagehandTools(
 			parameters: Type.Object({}),
 			async execute() {
 				const state = bridge.worldState();
-				return text(`${formatState(state)}\n\nRAW:\n${JSON.stringify(state)}`);
+				// SQL 化（2026-08-16）：state.tables 是旧快照（不再随引擎更新）——剥掉，
+				// 换成 SQLite 实时清单；具体行用 table_query 查（否则对账看到旧值误判「未落盘」）。
+				const s = { ...(state ?? ({} as WorldState)) };
+				delete (s as Record<string, unknown>).tables;
+				const list = bridge.listTables();
+				const tableLine =
+					list.length > 0
+						? `\n\n自定义表格（SQLite 实时；具体行用 table_query 查）：${list
+								.map((t) => `${t.name}（${t.rowCount} 行${t.auto ? "，auto" : ""}）`)
+								.join("、")}`
+						: "\n\n（本会话没有自定义表格）";
+				return text(`${formatState(s)}\n\nRAW:\n${JSON.stringify(s)}${tableLine}`);
 			},
 		}),
 		defineTool({
@@ -840,7 +861,10 @@ function createStagehandTools(
 								name: Type.Optional(Type.String({ description: "角色名（有服装档案时填，自动套档案；无名配角可省略）" })),
 								type: Type.Optional(Type.String({ description: "身份（仅无档案/无名角色）：girl / boy / woman / man / other" })),
 								appear: Type.Optional(Type.String({ description: "外貌 tag（仅无档案角色；英文 Danbooru tag，如 black hair, purple eyes）" })),
-								costume: Type.Optional(Type.String({ description: "服装 tag（无档案角色必填；英文 Danbooru tag）" })),
+								costume: Type.Optional(Type.String({
+									description:
+										"服装 tag（英文 Danbooru tag）。【穿着权威源 = 在场角色表】——先 table_list + table_query 读该角色在「在场角色表」的当前穿搭/上装/下装/内衣列，转成英文 tag 填这里；有档案角色填了也会**覆盖**档案默认服装（否则套档案第一套）。无档案角色则必须填",
+								})),
 								action: Type.Optional(Type.String({ description: "动作/姿态/表情 tag（英文；有档案角色也追加到档案 tag 之后）" })),
 								interact: Type.Optional(Type.String({ description: "互动标签（仅多角色关键互动）：source#动作 / target#动作 / mutual#动作" })),
 								uc: Type.Optional(Type.String({ description: "角色级排除 tag（英文）" })),
@@ -900,9 +924,23 @@ function createStagehandTools(
 									center?: string;
 								}> = params.characters.map((c) => (typeof c === "string" ? { name: c } : { ...c }));
 								const named = entries.filter((e) => e.name && e.name.trim());
+								// 8/17 检修：穿着权威源 = 在场角色表，经对象条目 costume 传入覆盖档案。
+								// 每个具名角色若有 costume，作为该角色的覆盖穿着 tags 传给 resolver（替换档案 outfit），
+								// 供「有档案」角色也能按剧情当前穿着生图（修复此前 arch 命中时 costume 被静默丢弃）。
+								const sceneOutfits: Record<string, string> = {};
+								for (const e of entries) {
+									const nm = (e.name ?? "").trim();
+									if (nm && (e.costume ?? "").toString().trim()) sceneOutfits[nm] = (e.costume as string).toString();
+								}
 								const r =
 									named.length > 0
-										? resolveCharacterTags(cwd, cardPath, named.map((e) => e.name!), bridge.worldState())
+										? resolveCharacterTags(
+												cwd,
+												cardPath,
+												named.map((e) => e.name!),
+												bridge.worldState(),
+												Object.keys(sceneOutfits).length > 0 ? sceneOutfits : undefined,
+											)
 										: { characters: [], unknown: [] };
 								const byName = new Map(r.characters.map((c) => [c.name, c]));
 								for (const e of entries) {
@@ -911,6 +949,7 @@ function createStagehandTools(
 									const ctr = (e.center ?? "").trim();
 									const center = /^[A-Ea-e][1-5]$/.test(ctr) ? gridToCenter(ctr) : { x: 0.5, y: 0.5 };
 								if (arch) {
+									// costume 已并入 arch.tags（resolver sceneOutfits 覆盖记录在案），此处只追加 action/interact
 									const prompt = [arch.tags, e.action ?? "", e.interact ?? ""].filter(Boolean).join(", ").trim();
 									const uc = arch.uc || e.uc || "";
 									if (!prompt && !arch.referenceImage) continue;
@@ -1076,23 +1115,15 @@ function createStagehandTools(
 			name: "table_list",
 			label: "列自定义表",
 			description:
-				"列出当前世界状态里的全部自定义表（表名、列名、行数、auto 标记、说明）。所有表内容都不进上下文，明细需用 table_query 取。",
+				"列出当前世界状态里的全部自定义表（表名、行数、auto 标记）。所有表内容都不进上下文，明细需用 table_query 取。",
 			parameters: Type.Object({}),
 			async execute() {
-				const state = bridge.worldState();
-				const tables = state.tables ?? {};
-				const names = Object.keys(tables);
-				if (names.length === 0) return text("暂无自定义表。");
-				const lines = names.map((n) => {
-					const t = tables[n]!;
-					const parts = [
-						`${n}（${t.columns.map((c) => c.name).join("、")}，${t.rows.length} 行）`,
-						t.auto ? "auto：场记自动维护" : "手动维护",
-						...(t.description ? [`说明：${t.description}`] : []),
-					];
-					return `- ${parts.join("；")}`;
-				});
-				return text(`自定义表（${names.length}）：\n${lines.join("\n")}`);
+				// SQL 化（2026-08-16）：走 bridge.listTables（SQLite 实时）——旧实现读
+				// worldState().tables 快照，行数与 SQLite 不一致（曾误导助手对账）
+				const list = bridge.listTables();
+				if (list.length === 0) return text("暂无自定义表。");
+				const lines = list.map((t) => `- ${t.name}（${t.rowCount} 行，${t.auto ? "auto：场记自动维护" : "手动维护"}）`);
+				return text(`自定义表（${list.length}）：\n${lines.join("\n")}`);
 			},
 		}),
 		defineTool({
@@ -1167,24 +1198,26 @@ function createStagehandTools(
 			name: "table_query",
 			label: "查询自定义表",
 			description:
-				"查询自定义表内容。filter 为 JSON 对象字符串（键值相等过滤，可省略 = 返回全部行）。表内容不会自动进上下文，取明细用本工具。",
+				"查询自定义表内容。filter 为 JSON 对象字符串（键值相等过滤，可省略 = 返回全部行，最新写入的行在前）。表内容不会自动进上下文，取明细用本工具。",
 			parameters: Type.Object({
 				table: Type.String({ description: "表名" }),
 				filter: Type.Optional(Type.String({ description: "JSON 对象字符串（过滤条件，键值相等；省略返回全部行）" })),
 			}),
 			async execute(_id, params) {
-				const state = bridge.worldState();
-				const t = (state.tables ?? {})[params.table];
-				if (!t) return text(`表 ${params.table} 不存在`, true);
+				// SQL 化（2026-08-16）：读走 bridge.applyTableOp query（SQLite 实时）——
+				// 旧实现读 worldState().tables 快照，与写入（SQLite）不同库 → 查不到刚写的行
 				const filter = params.filter ? parseJsonObject(params.filter) : undefined;
 				if (params.filter && !filter) return text("filter 不是合法的 JSON 对象", true);
-				const rows =
-					filter && Object.keys(filter).length > 0
-						? t.rows.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v))
-						: t.rows.slice();
+				const r = await bridge.applyTableOp({
+					kind: "query",
+					table: params.table,
+					...(filter && Object.keys(filter).length > 0 ? { filter } : {}),
+				});
+				if (!r.ok) return text(r.error ?? `表 ${params.table} 查询失败`, true);
+				const rows = r.rows ?? [];
 				return text(
 					rows.length > 0
-						? `表「${params.table}」命中 ${rows.length} 行：\n${JSON.stringify(rows, null, 2)}`
+						? `表「${params.table}」命中 ${rows.length} 行（最新在前）：\n${JSON.stringify(rows, null, 2)}`
 						: `表「${params.table}」命中 0 行。`,
 				);
 			},
@@ -1543,6 +1576,23 @@ function plainPromptExtension(prompt: string, agentName?: string, agentId?: stri
 	};
 }
 
+/**
+ * Agent 侧 router 分档姿态（DESIGN-router §P4，2026-08-16）：当
+ * `router.enabled && router.agentsEnabled` 时，给进程 systemPrompt 前置注入
+ * 当前 agent 模型分档的工作姿态（Pro 审题规划 / Flash 快动作）。否则原样返回
+ * （默认关 = 零行为变化）。
+ */
+function withAgentRouterAttitude(cwd: string, modelId: string | undefined, systemPrompt: string): string {
+	try {
+		const r = resolveRouterConfig(loadConfig(cwd).router, loadRouterFile(cwd));
+		if (!r.enabled || !r.agentsEnabled) return systemPrompt;
+		const band = isFlashModel(modelId) ? "flash" : "pro";
+		return `${agentPersonaFor(band, modelId)}\n\n${systemPrompt}`;
+	} catch {
+		return systemPrompt; // 解析异常：零影响
+	}
+}
+
 function stagehandExtension(
 	cwd: string,
 	bridge: StoryBridge,
@@ -1552,7 +1602,8 @@ function stagehandExtension(
 	return (pi) => {
 		let cache = "";
 		const rebuild = () => {
-			cache = buildStagehandPrompt({ config: loadConfig(cwd), skills: listSkills(cwd) });
+			const base = buildStagehandPrompt({ config: loadConfig(cwd), skills: listSkills(cwd) });
+			cache = withAgentRouterAttitude(cwd, getSelf().model?.id, base);
 		};
 		pi.on("session_start", async () => {
 			rebuild();
@@ -1920,7 +1971,7 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 			noThemes: true,
 			noContextFiles: true,
 			extensionFactories: systemPrompt
-				? [plainPromptExtension(systemPrompt, agentName, agentId)]
+				? [plainPromptExtension(withAgentRouterAttitude(cwd, selfInfo.model?.id, systemPrompt), agentName, agentId)]
 				: [stagehandExtension(cwd, bridge, selfInfo, isDelegating)],
 		});
 		await loader.reload();
@@ -2094,6 +2145,13 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 			const softSettle = () => {
 				if (!pendingReturn || pendingReturn.settled) return;
 				const reply = extractLastAssistantText();
+				// 调试增强：助手回合结束但没产出可摘录的正文回复——统一接口打 WARNING
+				if (!reply) {
+					debug.warning("assistant", `${displayName} 回合结束但无最终回复文本（非预期空响应）`, {
+						agentId,
+						model: modelInfo()?.id ?? "",
+					});
+				}
 				settleReturn({
 					summary: reply
 						? `${reply}\n（注：助手未调用 return_answer，以上为最后回复摘录。）`
@@ -2106,6 +2164,12 @@ export async function createAgentHost(opts: CreateAgentHostOptions): Promise<Ass
 				await session.prompt(t, session.isStreaming ? { streamingBehavior: "followUp" } : undefined);
 			} catch (err) {
 				if (!pendingReturn?.settled) {
+					// 调试增强：助手执行异常——统一接口打 ERROR
+					debug.error("assistant", `${displayName} 执行异常`, {
+						agentId,
+						model: modelInfo()?.id ?? "",
+						error: err instanceof Error ? err.message : String(err),
+					});
 					settleReturn({
 						summary: `助手执行异常：${err instanceof Error ? err.message : String(err)}`,
 						ok: false,

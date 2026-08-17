@@ -63,6 +63,7 @@ export function createStoryBridge(base: StoryBridge, perms: BridgePermissions): 
 		storyMessages: perms.readStory ? base.storyMessages.bind(base) : () => deny("storyMessages"),
 		snapshot: perms.readStory ? base.snapshot.bind(base) : () => deny("snapshot"),
 		worldState: perms.readStory ? base.worldState.bind(base) : () => deny("worldState"),
+		listTables: perms.readStory ? base.listTables.bind(base) : () => deny("listTables"),
 		listModels: perms.readStory ? base.listModels.bind(base) : () => deny("listModels"),
 		cardName: perms.readStory ? base.cardName.bind(base) : () => deny("cardName"),
 		deliverMedia: perms.readStory ? base.deliverMedia.bind(base) : () => deny("deliverMedia"),

@@ -332,11 +332,11 @@ export function parseTavernDB(raw: unknown, fallbackName?: string): TableTemplat
 // ---------- 物化（DESIGN-template-system §2/§4） ----------
 
 /**
- * 表 description 合并串（物化写入 / 覆写共用）：
+ * 表 description 合并串（物化写入 / 覆写共用；SQL 化物化 materializeTemplateToSql 也用它）：
  * [全局填表纪律, description, note, initNode, insertNode, updateNode, deleteNode] 拼接
  * （纪律前置：场记/回填/UI 第一眼看到执行层红线；旧模板 instructions 兜底）。
  */
-function buildTableDescription(t: TableTemplate): string {
+export function buildTableDescription(t: TableTemplate): string {
 	const parts = [
 		TABLE_DISCIPLINE,
 		t.description,

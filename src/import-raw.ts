@@ -12,6 +12,7 @@
 
 import { applyPatch, canonicalizeCharacterKeys } from "./state.ts";
 import { buildScribeTurnPrompt, parseScribeResult } from "./scribe.ts";
+import { debug } from "./debug.ts";
 import type { WorldState } from "./types.ts";
 
 /** 一层待回放的楼层（ST 解析 + 清洗后的 user/assistant 消息） */
@@ -93,6 +94,11 @@ export async function replayFloors(deps: ReplayDeps): Promise<
 		}
 		const result = parseScribeResult(resp);
 		if (!result) {
+			// 调试增强：场记旁路输出无法解析（非预期内容）——统一接口打 WARNING
+			debug.warning("side-text", "导入场记旁路输出无法解析（跳过该块）", {
+				len: resp.length,
+				head: resp.slice(0, 120),
+			});
 			deps.onProgress?.(current, total, "场记输出无法解析（跳过）", scribeCalls);
 			return;
 		}

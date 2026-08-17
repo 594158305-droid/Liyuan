@@ -93,6 +93,14 @@ export interface StageToolDeps
 	formatState: (s: WorldState) => string;
 	/** 写作方法论包（M-C 拆层 D/E 类）：topic → 文本；未注入＝无 writing_guide 工具 */
 	getSkill?: (topic: string) => string | undefined;
+	/**
+	 * SQL 表格服务（DESIGN-tables-sql）：sql_read/sql_write 执行入口。
+	 * 未注入＝台上无这两个工具（依赖缺失的工具不上清单）。
+	 */
+	tables?: {
+		execRead: (sql: string) => Promise<{ ok: true; rows: unknown[] } | { ok: false; error: string }>;
+		execWrite: (sql: string) => Promise<{ ok: true; changes: number; lastInsertRowid?: number | bigint } | { ok: false; error: string }>;
+	};
 }
 
 const STR = { type: "string" } as const;
@@ -111,19 +119,31 @@ export function stageTools(language: string, deps?: StageToolDeps): StageTool[] 
 			parameters: { type: "object", properties: {}, required: [] },
 		},
 		{
-			name: "table_query",
+			name: "sql_read",
 			description:
-				"读取自定义表格内容（只读）：传表名返回该表行数据，filter 可按列名键值等值过滤。" +
+				"执行一条 SELECT 查询自定义表格（只读）：SQL 自由表达——JOIN、聚合、子查询、CTE（WITH）、任意 WHERE/LIMIT/OFFSET。" +
 				"表格内容不随【世界状态】注入——涉及表内事实（角色档案/关系/物品/伏笔/约定等）拿不准时调用，" +
-				"查到的行数据按原样使用，禁止凭想象改动表内已有事实。",
+				"查到的行数据按原样使用，禁止凭想象改动表内已有事实。语法/列名/表名写错会收到 SQLite 原样报错，按报错修正重试。",
 			parameters: {
 				type: "object",
 				properties: {
-					table: { type: "string", description: "要查询的表名" },
-					filter: { type: "object", description: "可选：按列名键值等值过滤，如 {\"姓名\":\"林霜\"}" },
-					limit: { type: "number", description: "可选：最多返回行数（默认 20）" },
+					sql: { type: "string", description: '完整 SELECT 语句，如 SELECT COUNT(*) AS n FROM 纪要表' },
 				},
-				required: ["table"],
+				required: ["sql"],
+			},
+		},
+		{
+			name: "sql_write",
+			description:
+				"执行一条 INSERT/UPDATE/DELETE 修改自定义表格：SQL 自由表达（多行、子查询、任意条件）。" +
+				"UPDATE/DELETE 必须带 WHERE；写错会收到 SQLite 原样报错（列不存在/主键冲突/外键冲突），按报错修正重试。" +
+				"世界状态顶层字段（时间/地点/人物状态等）不在此工具——用 world_state_update。",
+			parameters: {
+				type: "object",
+				properties: {
+					sql: { type: "string", description: '完整写语句，如 UPDATE 角色状态效果表 SET 层数 = 2 WHERE 角色名称 = \'凯尔\'' },
+				},
+				required: ["sql"],
 			},
 		},
 	];
@@ -440,36 +460,26 @@ export async function runStageTool(
 		return { text: `${deps.formatState(s)}\n\nRAW:\n${JSON.stringify(s)}`, activity: "查账本" };
 	}
 
-	if (name === "table_query") {
-		const s = deps.getState();
-		const tname = typeof args.table === "string" ? args.table.trim() : "";
-		const table = tname ? s.tables?.[tname] : undefined;
-		if (!table) {
-			const names = Object.keys(s.tables ?? {});
-			return { text: `表「${tname}」不存在${names.length ? `。现有表：${names.join("、")}` : "（账本中还没有表格）"}。` };
-		}
-		const filter =
-			args.filter && typeof args.filter === "object" && !Array.isArray(args.filter)
-				? (args.filter as Record<string, unknown>)
-				: undefined;
-		const limit =
-			typeof args.limit === "number" && Number.isFinite(args.limit) && args.limit > 0 ? Math.floor(args.limit) : 20;
-		const rows = filter
-			? table.rows.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v))
-			: table.rows;
-		if (rows.length === 0) {
+	if (name === "sql_read" || name === "sql_write") {
+		if (!deps.tables) return { text: "SQL 表格服务未注入（本会话不支持表格）。", isError: true };
+		const sql = typeof args.sql === "string" ? args.sql.trim() : "";
+		if (!sql) return { text: `请提供 sql 参数（${name === "sql_read" ? "SELECT" : "INSERT/UPDATE/DELETE"} 语句）。`, isError: true };
+		const r = name === "sql_read" ? await deps.tables.execRead(sql) : await deps.tables.execWrite(sql);
+		if (!r.ok) return { text: `SQL 报错：${r.error}`, isError: true };
+		if (name === "sql_read") {
+			const rows = r.rows as unknown[];
+			const shown = Array.isArray(rows) ? rows : [];
+			const more = shown.length > 20 ? `\n（共 ${shown.length} 行，仅列前 20 行——用 LIMIT/OFFSET 分页取更多）` : "";
 			return {
-				text: `表「${tname}」${filter ? `（filter ${JSON.stringify(filter)}）` : ""}无匹配行。`,
-				activity: `查表「${tname}」`,
+				text: `${shown.length} 行：\n${JSON.stringify(shown.slice(0, 20), null, 1)}${more}`,
+				activity: "SQL 查询",
 			};
 		}
-		const shown = rows.slice(0, limit);
-		const more = rows.length > shown.length ? `\n（共 ${rows.length} 行，仅列前 ${shown.length} 行）` : "";
 		return {
-			text: `表「${tname}」${filter ? `（filter ${JSON.stringify(filter)}）` : ""}${rows.length} 行：\n${JSON.stringify(shown, null, 1)}${more}`,
-			activity: `查表「${tname}」`,
+			text: `已执行，${r.changes} 行受影响。`,
+			activity: `SQL 写入（${r.changes} 行）`,
 		};
 	}
 
-	return { text: `未知工具 ${name}——本拍可用：lorebook_search / memory_search / world_state_get / table_query。` };
+	return { text: `未知工具 ${name}——本拍可用：lorebook_search / memory_search / world_state_get / sql_read / sql_write。` };
 }
