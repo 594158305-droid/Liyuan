@@ -223,6 +223,10 @@ export declare class SessionManager {
      * @returns Entry id
      */
     appendCustomMessageEntry<T = unknown>(customType: string, content: string | (TextContent | ImageContent)[], display: boolean, details?: T): string;
+    /** 原位改写某条已存在 entry 的 content（不 append/不产生新叶；details.history 留档可回滚） */
+    setEntryContent(entryId: string, content: string | (TextContent | ImageContent)[], details?: {
+        history?: Array<{ at: number; text: string }>;
+    } & Record<string, unknown>): boolean;
     getLeafId(): string | null;
     getLeafEntry(): SessionEntry | undefined;
     getEntry(id: string): SessionEntry | undefined;

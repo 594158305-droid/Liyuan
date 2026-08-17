@@ -1095,6 +1095,26 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/**
+	 * 原位改写某条已存在 entry 的 content（可带 details 覆写）：不 append、不产生新叶、
+	 * parentId 链不变。用于「编辑正文」类操作——就地覆盖，旧值由调用方在 details.history
+	 * 留档（可回滚）。返回 false = entryId 不存在。
+	 */
+	setEntryContent(
+		entryId: string,
+		content: string | (TextContent | ImageContent)[],
+		details?: { history?: Array<{ at: number; text: string }> } & Record<string, unknown>,
+	): boolean {
+		const entry = this.byId.get(entryId);
+		if (!entry) return false;
+		const record = entry as unknown as Record<string, unknown>;
+		record.content = content;
+		if (details) record.details = details;
+		record.timestamp = new Date().toISOString();
+		this._rewriteFile();
+		return true;
+	}
+
 	// =========================================================================
 	// Tree Traversal
 	// =========================================================================
