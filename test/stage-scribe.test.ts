@@ -195,6 +195,7 @@ test("场记：逐表派发——单表调用失败/输出垃圾不影响其他�
 		JSON.stringify({ insert: [{ 姓名: "路人甲" }] }), // 恋爱对象表：正常应用
 	];
 	const deps = makeDeps("", {
+		maxTableRetries: 0, // 关闭退避重试，直接测「失败跳过」
 		sideText: async () => responses.shift() ?? { error: "unexpected" },
 	});
 	const r = await runScribeTurn(deps, {
@@ -261,4 +262,48 @@ test("场记 TODO：时间/地点/纪要链表强制入列（列名特征，正�
 	};
 	// 正文完全无关：全局数据表（列含「时间/地点」）强制入列；恋爱对象表（行实体未提及）不入列
 	assert.deepEqual(buildTableTodo("窗外下起了雨。", tables), ["全局数据表"]);
+});
+
+test("场记：full 顶层失败不短路表格域——表格照常逐表记账", async () => {
+	const base = autoState();
+	let call = 0;
+	const deps = makeDeps("", {
+		sideText: async () => {
+			call++;
+			if (call === 1) return { error: "最终消息无文本" }; // 顶层兜底空输出
+			return JSON.stringify({ insert: [{ 姓名: "沈舟" }] }); // 表格域照常
+		},
+	});
+	const r = await runScribeTurn(deps, { ...baseInput, state: base, baseState: base });
+
+	assert.equal(r.kind, "applied", "顶层失败不阻断表格记账");
+	if (r.kind !== "applied") return;
+	assert.deepEqual(r.state.tables["在场角色表"].rows, [{ 姓名: "云澜" }, { 姓名: "沈舟" }], "表格已更新");
+	assert.equal(call, 2, "顶层一次 + 表格域一次");
+});
+
+test("场记：full 顶层输入裁剪——【当前账本】不含 tables（表格由逐表通道维护）", async () => {
+	const base = autoState();
+	base.tables["恋爱对象表"] = { name: "恋爱对象表", auto: true, columns: [{ name: "姓名" }], rows: [] };
+	const deps = makeDeps(JSON.stringify({ patch: { time: "未时" } }), { maxTableRetries: 0 });
+	await runScribeTurn(deps, { ...baseInput, state: base, baseState: base });
+
+	const user = deps.prompts[0];
+	const ledgerBlock = user.slice(user.indexOf("【当前账本】"), user.indexOf("【本轮对话】"));
+	const parsed = JSON.parse(ledgerBlock.slice(ledgerBlock.indexOf("{"))) as { tables?: unknown };
+	assert.equal(parsed.tables, undefined, "顶层兜底注入不含表格全量（19 表 JSON 是空输出主因）");
+});
+
+test("场记：逐表单表失败按退避重试，重试成功照样应用", async () => {
+	const base = autoState();
+	const responses = [{ error: "空输出" }, JSON.stringify({ insert: [{ 姓名: "沈舟" }] })];
+	const deps = makeDeps("", {
+		retryTableDelayMs: 1, // 测试里退避压缩到 1ms
+		sideText: async () => responses.shift() ?? { error: "unexpected" },
+	});
+	const r = await runScribeTurn(deps, { ...baseInput, state: base, baseState: base, scope: "tables-only" });
+
+	assert.equal(r.kind, "applied", "重试成功");
+	if (r.kind !== "applied") return;
+	assert.deepEqual(r.state.tables["在场角色表"].rows, [{ 姓名: "云澜" }, { 姓名: "沈舟" }]);
 });

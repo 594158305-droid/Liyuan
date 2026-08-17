@@ -186,6 +186,35 @@ test("planCompaction：everyNTurns<=0 = 关闭主动压缩", () => {
 	assert.equal(plan, null);
 });
 
+test("planCompaction：摘要条目挂焦点分支外（regenerate 切分支），传 allEntries 才不重摘（8/16 修复）", () => {
+	const branch = beats(12);
+	// 摘要挂「分支外」（旧叶链），锚点 a-6 在焦点分支上——reroll/swipe 后焦点分支没有摘要条目
+	const allEntries: BranchEntryLike[] = [
+		...branch,
+		{ id: "off-branch", type: "custom", customType: SUMMARY_ENTRY_TYPE, data: { summary: "旧摘要：1-6 拍。", coversThroughId: "a-6" } },
+	];
+	// 旧行为（不带 allEntries）：焦点分支找不到摘要 → live=全 12 拍 → 照压，输入含第 1 拍（全量重摘）
+	const legacy = planCompaction(branch, { everyNTurns: 3, userName: "沈舟", charName: "云澜" });
+	assert.ok(legacy, "不兜底时从会话头重摘（旧 bug）");
+	assert.ok(legacy.conversationText.includes("第 1 拍"), "旧行为把会话头也摘了");
+	assert.ok(!legacy.previousSummary, "旧行为连旧摘要都没带");
+	// 修复后（带 allEntries）：摘要锚点生效 → 活着的只有 7..12 六拍，没攒够周期 → 不压
+	const fixed = planCompaction(branch, { everyNTurns: 3, userName: "沈舟", charName: "云澜", allEntries });
+	assert.equal(fixed, null, "摘要后 6 拍 < 保留 6 + 周期 3，不该压");
+
+	// 再演 4 拍 → 活着的 10 拍，可压 4 拍，且输入只含新正文、带旧摘要合并
+	const extended: BranchEntryLike[] = [
+		...branch,
+		...beats(4).map((e, i) => ({ ...e, id: `${e.id}-x${i}` })),
+	];
+	const plan = planCompaction(extended, { everyNTurns: 3, userName: "沈舟", charName: "云澜", allEntries });
+	assert.ok(plan, "攒够周期应压缩");
+	assert.ok(!plan.conversationText.includes("第 1 拍"), "会话头不再重摘");
+	assert.ok(!plan.conversationText.includes("第 2 拍"));
+	assert.ok(plan.conversationText.includes("第 9 拍"), "只摘摘要后的新正文");
+	assert.equal(plan.previousSummary, "旧摘要：1-6 拍。", "旧摘要合并进本次输入");
+});
+
 test("planCompaction：二次压缩只算「活着的」拍，并带上一份摘要合并", () => {
 	const branch = [...beats(12)];
 	branch.push(summaryE("旧摘要：1-6 拍。", "a-6"));

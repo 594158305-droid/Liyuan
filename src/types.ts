@@ -308,6 +308,20 @@ export interface RpConfig {
 	 */
 	chatTrace?: boolean;
 	/**
+	 * 调试打印（开发者模式子选项，2026-08）：统一调试接口（src/debug.ts）的开关。
+	 * 三条 LLM 通道（主聊天主演 / 旁路 / 右栏助手·自定义 agent）在返回非预期内容时，
+	 * 同时打印到后台控制台并记录 .liyuan-state/debug.log。
+	 * 打开开发者模式后可在此逐通道关闭：
+	 * - undefined：全开（默认调试行为，控制台 + 文件都记）。
+	 * - console=false：只写文件、不往控制台刷屏（保留关打印的接入点）。
+	 * - file=false：只打控制台、不落盘。
+	 * 每回合/每请求现读配置，保存后立即生效。
+	 */
+	debugLog?: {
+		console?: boolean;
+		file?: boolean;
+	};
+	/**
 	 * 轮次卡模板覆盖（2026-08-13，DESIGN-flow-config §2）：assets/flow/round-cards.json
 	 * 之上按 key 同名替换（7 个固定 key：plan/open/fix/curtain/review/extend/seal）。
 	 * 只改不删——配置删掉的 key 用内置模板补回。占位符见 docs/DESIGN-flow-config.md。
@@ -326,6 +340,22 @@ export interface RpConfig {
 	 * 预留接口，未挂进回合流程），仅声明字段与 factory 支持，为将来激活而设。
 	 */
 	intentRegex?: IntentRegexConfig;
+	/**
+	 * 梨园化 router（2026-08-16，DESIGN-router）：任务分类 → 每拍模式卡 + 模型分档弱人格。
+	 * 默认开（enabled=true）；解析见 src/router-config.ts。false 时全部路径零变化。
+	 */
+	router?: RouterConfig;
+	/**
+	 * 表格向量检索注入（2026-08-16，DESIGN-tables-vector）：每拍用本拍上下文检索自定义表行，
+	 * 命中行注入【相关表格】块。默认开（enabled=true）；向量异常时自动降级（只影响注入）。
+	 */
+	tablesVector?: {
+		enabled?: boolean;
+		/** 每拍注入命中行数上限（默认 6） */
+		topK?: number;
+		/** 余弦阈值，低于不注入（默认 0.15） */
+		threshold?: number;
+	};
 	/**
 	 * 语义评审（2026-08-14，DESIGN-semantic-review）：封笔后由旁路模型做一次
 	 * 设定一致性/人物一致性/文风与 AI 味评审，major 问题并入修复门禁
@@ -424,6 +454,34 @@ export interface IntentRegexConfig {
 	pureOps?: string[];
 }
 
+/** 梨园化 router（docs/DESIGN-router.md，2026-08-16）：任务分类 → 模式卡 + 模型分档弱人格 */
+export interface RouterConfig {
+	/**
+	 * 总开关（默认 true，用户拍板）；false = 全部 LLM 路径零变化。
+	 * 解析见 src/router-config.ts（文件 assets/flow/router.json 之上按段覆盖）。
+	 */
+	enabled?: boolean;
+	stage?: {
+		/**
+		 * 形态（默认 "perTurn" = 唯一推荐形态）：system 区稳定弱人格（模型分档）
+		 * + 注入区每拍模式卡。fixed（首条剧情消息定型）仅实验配置保留。
+		 */
+		personaMode?: "perTurn" | "fixed" | "off";
+		/** V4 Pro 双阶段工具暴露（默认 true，保持现状） */
+		toolStaging?: boolean;
+		/** 每拍模式卡（构造/修复/深度，默认 true） */
+		modeCards?: boolean;
+	};
+	/** 旁路：统一收敛尾注（默认 true，DESIGN-router §3 旁路路径） */
+	side?: { convergeTail?: boolean };
+	/** 助手/自定义 agent 的 router（默认 false，DESIGN-router §3 D 类路径） */
+	agents?: { enabled?: boolean };
+	/** 按模型覆盖人格/带宽（缺省用内置分档表：pro→w6c 无锚 / flash→w7 带锚） */
+	models?: Record<string, { band?: "spec" | "react" | "weak"; persona?: string }>;
+	/** 分类词表外置（构造/修复/复杂；缺省用内置 RP 语境词表） */
+	classify?: { build?: string[]; fix?: string[]; complex?: string[] };
+}
+
 export const DEFAULT_CONFIG: RpConfig = {
 	card: "assets/cards/default_Qingwu.json",
 	// 默认不挂书：角色卡与世界书解耦，用户按需多选挂载
@@ -443,6 +501,7 @@ export const DEFAULT_CONFIG: RpConfig = {
 	// 开发者功能默认全关（调试记录涉及完整提示词/思考，按需开启）
 	developerMode: false,
 	chatTrace: false,
+	// debugLog 缺省 undefined = 全开（控制台 + 文件都记非预期输出）；开发者模式可关
 };
 
 /** 宏替换上下文 */

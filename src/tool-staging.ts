@@ -80,7 +80,7 @@ export function minimalStageTools(tools: readonly StageTool[], readDeps?: StageT
 	const keep = new Set<string>([
 		...(readDeps ? [...unifiedStageToolNames(readDeps)] : []),
 		"world_state_get",
-		"table_query",
+		"sql_read",
 		"writing_guide",
 		"beat_plan",
 		"beat_step_done",

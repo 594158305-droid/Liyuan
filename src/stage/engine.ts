@@ -33,9 +33,10 @@ import {
 	splitBlockContent,
 	type AssemblyReportItem,
 } from "../preset-split.ts";
-import { formatRosterIndex, formatState, formatTableIndex, loadState, saveState, stateHasTableData } from "../state.ts";
+import { formatRosterIndex, formatState, loadState, saveState, stateHasTableData } from "../state.ts";
 import { isBackstageText } from "../stance.ts";
 import type { TraceRecorder } from "./trace.ts";
+import { configureDebug, debug } from "../debug.ts";
 import type { LorebookEntry, WorldState } from "../types.ts";
 import {
 	buildStageInjection,
@@ -70,6 +71,18 @@ import {
 	type RpSummaryData,
 } from "./compact.ts";
 import { runScribeTurn, STATE_ENTRY_TYPE } from "./scribe-run.ts";
+import {
+	buildScribeAgentSystemPrompt,
+	buildScribeAgentUserText,
+	makeSqlExec,
+	scribeAgentToolSchemas,
+	tableOfSql,
+	type ExecResult,
+	type StageToolLike,
+} from "./scribe-agent.ts";
+import { TablesService } from "../tables/service.ts";
+import { collectTableLogs, replayFromCheckpoint, type ReplayOutcome } from "../tables/replay.ts";
+import { clearTableVec, removeTableVec, rowText, searchTableRows, syncTableRows, tableVecSize } from "../tables/vector-sync.ts";
 import {
 	MAX_ROUNDS,
 	runSoundFxTool,
@@ -113,6 +126,7 @@ import {
 } from "./workspace.ts";
 import { buildReviewPrompt } from "./review.ts";
 import { isStagedModel, minimalStageTools, TOOL_STAGED_ENTRY_TYPE } from "../tool-staging.ts";
+import { cardFor, classifyTask, CONVERGE_TAIL, isComplexTask, personaFor } from "../router-core.ts";
 
 // ---------------- 依赖面（结构类型，不引 @liyuan/agent-runtime） ----------------
 
@@ -454,6 +468,23 @@ export class StageEngine {
 	#warnedProtocolDrop = "";
 	#warnedFlow = "";
 	#lastAssemblyJson = "";
+	// 梨园化 router（DESIGN-router）：perTurn 形态——每拍 #turn 现算（模型分档弱人格 +
+	// 模式卡），旁路统一收敛尾注（#sideText / #compact 共用，enabled=false 恒关）
+	#routerPersona: string | undefined = undefined;
+	#routerCard: string | undefined = undefined;
+	#convergeTailOn = false;
+	// SQL 表格服务（DESIGN-tables-sql）：每会话一个 db；写操作经 onWrite 落树 rp-table-log
+	#tables: TablesService | null = null;
+	#tablesSessionId: string | null = null;
+	/** 表写日志缓冲：拍末统一落树（代理期间落树会改变叶 id，误触发场记叶守卫） */
+	#tableLogBuffer: import("../tables/service.ts").TableLogEntry[] = [];
+	/** 上次物化重放的日志状态键（避免 resyncAll 频繁触发时重复全量重放） */
+	#lastReplayKey: string | null = null;
+	// 表格向量（DESIGN-tables-vector）：作用域卡路径 / 降级告警一次 / 重同步世代号
+	#cardPath: string | null = null;
+	#warnedTableVec = false;
+	#tableVecGeneration = 0;
+	#tableVecBooting = false;
 
 	constructor(deps: StageEngineDeps) {
 		this.#deps = deps;
@@ -461,6 +492,56 @@ export class StageEngine {
 
 	get isStreaming(): boolean {
 		return this.#busy;
+	}
+
+	/** 释放 SQL 表格服务的 db 句柄（测试清理 / 显式切换会话用；正常服务生命周期无需调用） */
+	closeTables(): void {
+		this.#tables?.close();
+		this.#tables = null;
+		this.#tablesSessionId = null;
+	}
+
+	/**
+	 * REST/UI 用：当前会话的 TablesService（DESIGN-tables-sql P5）。
+	 */
+	tablesService(): TablesService {
+		return this.#tablesFor(this.#deps.getSessionManager().getSessionId());
+	}
+
+	/**
+	 * 树导航/rewind/会话加载后，把 SQLite 物化重建为焦点分支状态
+	 * （DESIGN-tables-sql §7 二版：检查点增量重放——迁移基线不清空、回退分支不动）。
+	 * 相同日志状态时跳过（resyncAll 会频繁触发，重放幂等但没必要）。
+	 */
+	replayTables(): ReplayOutcome {
+		const sm = this.#deps.getSessionManager();
+		const branch = sm.getBranch() as Array<Record<string, unknown>>;
+		const svc = this.#tablesFor(sm.getSessionId());
+		const cp = svc.getCheckpoint();
+		const logs = collectTableLogs(branch);
+		const key = `${logs.length}:${logs[logs.length - 1]?.at ?? 0}:${cp.throughEntryId ?? ""}`;
+		if (key === this.#lastReplayKey) return { kind: "ok", replayed: 0, baseline: false };
+		this.#lastReplayKey = key;
+
+		if (!cp.throughEntryId) {
+			// 基线锁定：物化有表但无检查点（迁移基线/恢复数据）→ 以当前叶为基线锚点，
+			// 不清空不重放（2026-08-16 事故：全量重放把迁移表清空）
+			if (svc.listTables().length > 0 && sm.getLeafId()) {
+				svc.setCheckpoint(sm.getLeafId());
+			}
+			void this.#resyncTableVecAllAsync();
+			return { kind: "ok", replayed: 0, baseline: true, reason: "物化基线已锁定（不清空不重放）" };
+		}
+
+		const r = replayFromCheckpoint(svc, branch, cp.throughEntryId);
+		console.log(`[liyuan-trace] [replay] 表格物化 ${r.kind === "ok" ? (r.baseline ? "不动(baseline)" : `重放 ${r.replayed} 条`) : `失败 ${r.error}`}（当前叶 ${(sm.getLeafId() ?? "").slice(0, 8)}，检查点 ${(cp.throughEntryId ?? "").slice(0, 8)}）`);
+		if (r.kind === "ok" && r.replayed > 0) {
+			const after = collectTableLogs(branch.slice(branch.findIndex((e) => e.id === cp.throughEntryId) + 1));
+			const last = after[after.length - 1];
+			if (last?.entryId) svc.setCheckpoint(last.entryId);
+			void this.#resyncTableVecAllAsync();
+		}
+		return r;
 	}
 
 	/** 用户新输入开一拍：先落 user 消息再开演；忙时排队（流式中送达的输入不打断叙事） */
@@ -519,6 +600,11 @@ export class StageEngine {
 		const trace = this.#deps.trace;
 		// 主聊天跟踪（开发者模式）：每拍现读配置，保存后下一回合生效；未注入/未开启 = 零开销
 		const traceOn = !!trace && materials.config.chatTrace === true;
+		// 统一调试接口：每拍按 config.debugLog 现读同步控制台/file 通道（开发者模式可关打印）
+		configureDebug({
+			console: materials.config.debugLog?.console !== false,
+			file: materials.config.debugLog?.file !== false,
+		});
 		const sessionId = sm.getSessionId();
 		const turnT0 = Date.now();
 		// 本拍收尾统一写 turn_end（闭包晚绑：entryId/finalText/final 在落树后才定）
@@ -595,6 +681,64 @@ export class StageEngine {
 			.map((m) => m.text)
 			.join("\n");
 		const activated = scanEntries(materials.entries, windowText, config.maxLoreInjections);
+
+		// 梨园化 router（DESIGN-router）：perTurn 唯一推荐形态——system 区模型分档弱人格
+		// （会话内字节稳定，不破前缀缓存）+ 注入区每拍模式卡（近场动态，零缓存代价）。
+		// enabled=false 时全部关闭（零变化）；toolStaging 独立于 enabled（现状 staging 保持）。
+		const router = materials.router;
+		if (router.enabled) {
+			this.#convergeTailOn = router.convergeTail;
+			// 模型分档弱人格：config.router.models[modelId] 覆盖优先（band/persona）
+			const ov = router.modelOverrides[model.id];
+			const band = ov?.band ?? "weak";
+			this.#routerPersona = ov?.persona ?? personaFor(band, model.id, router.personas);
+			// 分类来源：perTurn=当拍用户消息；fixed=首条剧情消息（实验配置，derive from durable history）
+			const classifyText =
+				router.personaMode === "fixed" ? (history.find((m) => m.role === "user")?.text ?? lastUserText) : lastUserText;
+			const task = classifyTask(classifyText, router.lexicon);
+			const complex = isComplexTask(classifyText, router.lexicon);
+			const card = router.modeCards ? cardFor(task, { complex, modelId: model.id, cards: router.cards }) : null;
+			this.#routerCard = card ? `${card.title}${card.body}` : undefined;
+		} else {
+			this.#convergeTailOn = false;
+			this.#routerPersona = undefined;
+			this.#routerCard = undefined;
+		}
+
+		// 表格向量检索注入（DESIGN-tables-vector §5）：本拍上下文（用户输入 + 最近 2 拍正文）
+		// → 余弦命中 →【相关表格】块。无表/未启用/嵌入异常一律降级（不影响主链路）。
+		this.#cardPath = config.card ?? null;
+		let tableVecBlock: string | undefined;
+		const tvc = config.tablesVector;
+		if (tvc?.enabled !== false) {
+			try {
+				const svc = this.#tablesFor(sm.getSessionId());
+				if (svc.listTables().length > 0) {
+					const scope = { sessionId: sm.getSessionId(), card: config.card };
+					// 向量库为空（首拍/文件被清）→ 触发一次初始全量嵌入（本拍检索空，下拍起生效）
+					if (tableVecSize(cwd, scope) === 0 && !this.#tableVecBooting) {
+						this.#tableVecBooting = true;
+						void this.#resyncTableVecAllAsync();
+					}
+					const recentBody = history.slice(-6).map((m) => m.text).join("\n").slice(-900);
+					const query = `${lastUserText}\n${recentBody}`.slice(0, 2400);
+					const hits = await searchTableRows(cwd, scope, query, tvc.topK ?? 6, tvc.threshold ?? 0.15);
+					if (hits.length > 0) {
+						const byTable = new Map<string, string[]>();
+						for (const h of hits) {
+							const arr = byTable.get(h.table) ?? [];
+							if (arr.length < 3) arr.push(h.text);
+							byTable.set(h.table, arr);
+						}
+						tableVecBlock = `【相关表格】以下自定义表行与本拍剧情相关（内容按需查阅，写回用 sql_write）：\n${[...byTable.entries()]
+							.map(([t, lines]) => `- ${t}：\n${lines.map((l) => `  - ${l}`).join("\n")}`)
+							.join("\n")}`;
+					}
+				}
+			} catch {
+				// 嵌入异常：检索注入缺位；sql_read/sql_write 主链路不受影响
+			}
+		}
 
 		// 面板快照（M1 读磁盘缓存；写侧与分支化随 M3）
 		let panelIndex: string | undefined;
@@ -681,9 +825,12 @@ export class StageEngine {
 		// V4 Pro 强依赖可见工具目录选轨迹，小目录让它先侦查/规划再放开（首次工具调用后的
 		// 下一轮请求即全量）。晋升标记 = 会话树 rp-tool-staged 协议条目（rp-summary 同款
 		// CustomEntry，不进送模流不进历史）；null = 不启用（非目标模型/已晋升，现状全量）。
-		const stagedTools = isStagedModel(model.id) && !toolStagedOnBranch(branch)
-			? minimalStageTools(tools, readDeps)
-			: null;
+		// router.enabled=false 时维持现状 staging（toolStaging 默认 true——零变化铁律）。
+		const stagingOn = router.enabled === false ? true : router.toolStaging;
+		const stagedTools =
+			stagingOn && isStagedModel(model.id) && !toolStagedOnBranch(branch)
+				? minimalStageTools(tools, readDeps)
+				: null;
 		const ws = createWorkspace();
 		const wsDeps: WorkspaceDeps = {
 			rules: extractDraftRules(
@@ -712,7 +859,7 @@ export class StageEngine {
 								worldState: formatState(state),
 								language: config.language,
 							});
-							return this.#sideText(m, systemPrompt, userText, auth, 4096, "review", traceOn);
+							return this.#sideText(m, systemPrompt, userText, auth, "review", traceOn);
 						},
 					}
 				: {}),
@@ -735,6 +882,8 @@ export class StageEngine {
 			// MCP 外设索引进 system（不进每拍注入）：会话内字节稳定，不破前缀缓存。
 			// 与旧 director.ts 同一位置——工具清单里有 mcp__ 工具，这里说明它们是什么。
 			mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description })),
+			// 梨园化 router：模型分档弱人格（system 区，会话内字节稳定）
+			routerPersona: this.#routerPersona,
 		});
 		// 固定前缀（2026-08-15，开发者调试用）：非空时拼在剧情模型 systemPrompt **最前**
 		// （先于卡作者附加指令等一切内容）。config 每拍现读（loadStageMaterials → 读盘），
@@ -758,7 +907,8 @@ export class StageEngine {
 			...(wsDeps.rules.wordRange ? { wordRange: wsDeps.rules.wordRange } : {}),
 			loreIndex: formatLoreIndex(materials.entries),
 			rosterIndex: formatRosterIndex(state),
-			tableIndex: formatTableIndex(state),
+			// SQL 化：表索引从 TablesService 生成（结构/数据在 db，state.tables 已停用）
+			tableIndex: this.#sqlTableIndex(sessionId),
 			tools: tools.length > 0,
 		});
 
@@ -771,8 +921,11 @@ export class StageEngine {
 		// P1 注入层：首轮（规划轮）卡并入注入块（用户话之前）——用户当拍的话必须保持
 		// 上下文最后一句（8/03 教训：注入块压提问之后，模型会把提问读成历史旧话）。
 		// 轮次卡是工作指令（如 opencode 的 system-reminder），随注入区在用户话前送达。
+		// 梨园化 router 模式卡同通道（近场，每拍一张、不累积）——放轮次卡之后、用户话之前。
 		const firstCard = roundCardFor(materials.roundCards, ws, config.userName, wsDeps.rules.wordRange, wsDeps.rules.statusBarTagGroup);
-		const injWithCard = firstCard ? `${injection}\n\n${firstCard}` : injection;
+		// 【相关表格】向量命中块与模式卡同通道（近场，每拍一张、不累积）——放轮次卡之后
+		const cards = [firstCard, this.#routerCard, tableVecBlock].filter(Boolean).join("\n\n");
+		const injWithCard = cards ? `${injection}\n\n${cards}` : injection;
 		const tailText = endsWithUser ? `${injWithCard}\n\n${history[history.length - 1].text}` : injWithCard;
 
 		const messages: unknown[] = [
@@ -857,6 +1010,12 @@ export class StageEngine {
 			} else if (e.type === "error") {
 				final = e.error ?? null;
 				errored = final?.errorMessage || "provider error";
+				// 调试增强：主演流式 provider error 属明确非预期返回——统一接口打 ERROR
+				debug.error("main-chat", `主演 LLM 返回 provider 错误：${errored}`, {
+					round: 0,
+					model: modelIdOf(model),
+					stopReason: (final as { stopReason?: string })?.stopReason,
+				});
 			} else if (e.type === "text_delta" && e.delta) {
 				text += e.delta;
 				ev.onDelta?.("text", e.delta);
@@ -911,6 +1070,11 @@ export class StageEngine {
 		// 与一次性交稿走同一口径；报告只进日志，不再回喂模型（本拍已谢幕）。
 		if (ws.appends > 0 && !ws.sealed && ws.draft.trim()) {
 			await runWriteTool(ws, wsDeps, "draft_seal", {});
+			// 调试增强：模型分段续写但忘了 draft_seal（催告过一轮）——程序化补封笔，属非预期
+			debug.warning("main-chat", "主演 LLM 续写完未调 draft_seal，引擎程序化补封笔", {
+				model: modelIdOf(model),
+				appends: ws.appends,
+			});
 		}
 
 		// 定稿 = 工作区稿（工件）；工作区空（中断半拍/循环认栽）退回直出正文
@@ -968,6 +1132,11 @@ export class StageEngine {
 
 		if (errored && !aborted) {
 			ev.onNotify?.("error", `生成失败：${errored}`);
+			// 调试增强：整拍以错误收场——统一接口打 ERROR
+			debug.error("main-chat", `主演整拍生成失败：${errored}`, {
+				model: modelIdOf(model),
+				userText: lastUserText,
+			});
 			endTrace(false, errored);
 			return { aborted: false, error: errored, entryId };
 		}
@@ -975,6 +1144,12 @@ export class StageEngine {
 		// 空手认栽（循环逼稿一次仍无产出）：明说，不再静默丢拍（实弹三拍 0 字正文的教训）
 		if (!errored && !aborted && !finalText) {
 			ev.onNotify?.("warning", "本拍模型未交出任何正文（已催稿一次仍空手）——请重试或更换模型。");
+			// 调试增强：模型空手（非预期）——统一接口打 WARNING
+			debug.warning("main-chat", "主演 LLM 未交出任何正文（no-draft）", {
+				model: modelIdOf(model),
+				stopReason: (final as { stopReason?: string })?.stopReason ?? "?",
+				userText: lastUserText,
+			});
 			endTrace(false, "no-draft");
 			return { aborted: false, error: "no-draft" };
 		}
@@ -993,7 +1168,13 @@ export class StageEngine {
 				const r = await runScribeTurn(
 					{
 						// 4096：tables-only 时输出全为表格 JSON（19 表每轮维护），2048 实测可能截断出半截 JSON（8/03）
-						sideText: (sp, ut) => this.#sideText(sideModel, sp, ut, { apiKey, headers }, 4096, "scribe", traceOn),
+						sideText: (sp, ut) => this.#sideText(sideModel, sp, ut, { apiKey, headers }, "scribe", traceOn),
+						// DESIGN-router P2：tables 域走场记工具循环（模型按维护规则自主查/写，不再全表下发）
+						agentTableMaintain: (o) => this.#scribeAgentForTables({ ...o, traceOn }),
+						// 祖先链叶漂移判定（同链追加不算漂移）
+						isLeafDrifted: (before) => this.#leafDriftedFrom(before),
+						// SQL 化：auto 表清单实时（SQLite），旧快照不含新表
+						autoTablesFrom: () => this.#autoTablesFrom(sm.getSessionId()),
 						getLeafId: () => sm.getLeafId(),
 						onActivity: (d) => ev.onActivity?.(d),
 					},
@@ -1008,23 +1189,31 @@ export class StageEngine {
 					},
 				);
 				if (r.kind === "applied") {
-					finalState = r.state;
+					// SQL 化：tables-only 时代理直接写库、不产生 WorldState（r.state 可选）
+					if (r.state) finalState = r.state;
 					note =
 						ws.patches.length > 0
-							? `记账 ${ws.patches.length} 笔（主演）+ tables ${r.applied.length} 项（场记）`
-							: `记账 ${r.applied.length} 项（场记）`;
+							? `记账 ${ws.patches.length} 笔（主演）${r.applied.length > 0 ? ` + 表格 ${r.applied.length} 项（场记）` : ""}`
+							: `表格维护 ${r.applied.length} 项（场记）`;
 				} else if (r.kind === "failed") {
 					console.error(`[stage-scribe] 记账跳过：${r.error}`);
 				}
 				// r.kind === "stale"：场记窗口内切换了分支 → 整拍记账丢弃（含主演 patch）
 			}
 			if (!finalState && ws.patches.length > 0) finalState = projectedState(ws, state);
+			// 表写日志统一落树（场记代理期间的写库已完成，此处落树不影响叶守卫）
+			this.#flushTableLogs();
 			if (finalState) {
-				sm.appendCustomEntry(STATE_ENTRY_TYPE, finalState);
+				// SQL 化（DESIGN-tables-sql）：tables 已迁 SQLite，rp-state 快照不再带全量表数据
+				const leanState = { ...finalState, tables: undefined };
+				const eid = sm.appendCustomEntry(STATE_ENTRY_TYPE, leanState);
+				console.log(
+					`[liyuan-trace] [bookkeep] 落账 rp-state ${eid.slice(0, 8)} time=${String((leanState as { time?: unknown }).time ?? "?").slice(0, 24)} loc=${String((leanState as { location?: unknown }).location ?? "?").slice(0, 24)} applied=${note ?? ""}`,
+				);
 				const stateFile = this.#deps.getStateFile?.(sm.getSessionId());
 				if (stateFile) {
 					try {
-						saveState(stateFile, finalState);
+						saveState(stateFile, leanState);
 					} catch {
 						// 缓存写失败不影响树上快照（账本权威在树，磁盘只是缓存）
 					}
@@ -1075,7 +1264,10 @@ export class StageEngine {
 	): Promise<CompactOutcome> {
 		const ev = this.#deps.events ?? {};
 		const sm = this.#deps.getSessionManager();
-		const { config, card } = loadStageMaterials(this.#deps.cwd);
+		const materials = loadStageMaterials(this.#deps.cwd);
+		const { config, card } = materials;
+		// 手动压缩路径（/compact，流式外）：router 收敛尾注随素材现读刷新
+		this.#convergeTailOn = materials.router.enabled !== false && materials.router.convergeTail;
 		const trace = this.#deps.trace;
 		const traceOn = !!trace && config.chatTrace === true;
 		try {
@@ -1083,9 +1275,10 @@ export class StageEngine {
 			const c = await runCompaction(
 				{
 					// 4096：摘要要装下前情/人物/伏笔/事实账五节，且要合并上一份摘要
-					sideText: (sp, ut) => this.#sideText(model, sp, ut, auth, 4096, "compact", traceOn),
+					sideText: (sp, ut) => this.#sideText(model, sp, ut, auth, "compact", traceOn),
 					appendSummaryEntry: (data: RpSummaryData) => sm.appendCustomEntry(SUMMARY_ENTRY_TYPE, data),
 					getLeafId: () => sm.getLeafId(),
+					isLeafDrifted: (before) => this.#leafDriftedFrom(before),
 					archive: this.#deps.archiveCompacted
 						? (text) => this.#deps.archiveCompacted!(sm.getSessionId(), text)
 						: undefined,
@@ -1099,6 +1292,9 @@ export class StageEngine {
 					charName: card.name,
 					everyNTurns,
 					...(minChars !== undefined ? { minChars } : {}),
+					// 8/16：压缩侧摘要锚点兜底——regenerate/reroll 切分支后 rp-summary 挂旧叶链，
+					// 不带全树会导致每次压缩从会话头全量重摘（实弹：两次压缩输入 742KB 几乎原样重复）
+					allEntries: sm.getEntries(),
 				},
 			);
 			if (c.kind === "failed") console.error(`[stage-compact] 压缩跳过：${c.error}`);
@@ -1166,7 +1362,7 @@ export class StageEngine {
 		const READ_TOOLS = new Set([
 			...unifiedStageToolNames(readDeps),
 			"world_state_get",
-			"table_query",
+			"sql_read",
 			"writing_guide",
 		]);
 		// MCP 外设（8/06 重接）：只认**本会话已连接**的限定名——不能只看 mcp__ 前缀，
@@ -1879,6 +2075,19 @@ export class StageEngine {
 					}
 				: {}),
 			getState: () => this.#effectiveState(sm.getBranch() as BranchEntryLike[]),
+			// SQL 表格服务（DESIGN-tables-sql）：主演 sql_read/sql_write 执行入口
+			tables: {
+				execRead: async (sql) => {
+					const svc = this.#tablesFor(sm.getSessionId());
+					const r = svc.execRead(sql);
+					return r.ok ? { ok: true, rows: r.rows ?? [] } : { ok: false, error: r.error };
+				},
+				execWrite: async (sql) => {
+					const svc = this.#tablesFor(sm.getSessionId());
+					const r = svc.execWrite(sql);
+					return r.ok ? { ok: true, changes: r.changes, lastInsertRowid: r.lastInsertRowid } : { ok: false, error: r.error };
+				},
+			},
 			formatState,
 			getSkill: (topic) => {
 				// 1) 预设 skillPacks（拆层产物）
@@ -1934,32 +2143,39 @@ export class StageEngine {
 	// M-A 起 #revise 精修旁路退役：职责由「draft_check 报告 → 模型自改重交」结构性取代。
 	// revise.ts 的补丁解析函数保留给 M-B 的 draft_edit 工具复用。
 
-	/** 旁路文本调用（精修/场记用）：静默收集，不外发增量；失败返回 {error} */
+	/** 旁路文本调用（评审/场记/压缩）：静默收集，不外发增量；失败返回 {error} */
 	async #sideText(
 		model: StageModelLike,
 		systemPrompt: string,
 		userText: string,
 		auth: { apiKey?: string; headers?: Record<string, string> },
-		maxTokens = 8192,
-		/** 用途（主聊天跟踪 side 事件；场记/压缩） */
+		/** 用途（主聊天跟踪 side 事件；评审/场记/压缩）。maxTokens 由调用方按需覆盖 */
 		purpose = "side",
 		traceOn = false,
 	): Promise<string | { error: string }> {
 		const t0 = Date.now();
+		// 旁路参数统一（2026-08-10 用户裁决，与 backfill/规划同口径）：中等思考 + 大预算。
+		// maxTokens 优先用模型档案配置（连接面板「最大回复 tokens」，用户 8/15 指出档案为 16K）；
+		// 档案未配才落到 81920 兜底（backfill/规划同值）。
+		const modelMax = typeof (model as { maxTokens?: unknown }).maxTokens === "number" ? ((model as { maxTokens: number }).maxTokens) : 0;
 		const options: Record<string, unknown> = {
 			apiKey: auth.apiKey,
 			headers: auth.headers,
-			maxTokens,
+			// 旧口径 reasoning off + 4096 曾导致场记输出截断/空输出（8/15 实弹，trace 见
+			// .liyuan-state/trace/019fec6e…：side 事件 ok=false 无 text）。思考计入 token，
+			// 预算给足（档案 16K 或 81920 兜底）；超限由 API 拒绝（逐表派发/回填的重试兜底）。
+			maxTokens: modelMax > 0 ? modelMax : 81920,
+			reasoning: "medium",
 			signal: this.#abort?.signal,
-			// 精修是 harness 的机械窄题，强制关思考：zen go 对 low/high 无可靠节流（8/02 实测），
-			// 放开推理会把 maxTokens 整个烧在隐形思考里、正文零输出。思考档的用户自由只属于主演调用。
-			reasoning: "off",
 		};
 		try {
+			// 梨园化 router（DESIGN-router §3 A 类旁路）：统一收敛尾注（信息完备即产出，
+			// 防旁路飘；enabled=false 时 #convergeTailOn 恒 false = 零变化）。reasoning 档位不动。
+			const sys = this.#convergeTailOn ? `${systemPrompt}${CONVERGE_TAIL}` : systemPrompt;
 			const s = this.#deps.streamFn(
 				model,
 				{
-					systemPrompt,
+					systemPrompt: sys,
 					messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
 				},
 				options,
@@ -1969,22 +2185,469 @@ export class StageEngine {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
 					const msg = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
-					this.#sideTrace(purpose, model, systemPrompt, userText, false, msg, t0, traceOn);
+					this.#sideTrace(purpose, model, sys, userText, false, msg, t0, traceOn);
+					// 调试增强：旁路返回 provider error——统一接口打 ERROR
+					debug.error("side-text", `旁路(${purpose}) LLM 返回 provider 错误：${msg}`, {
+						model: modelIdOf(model),
+						elapsedMs: Date.now() - t0,
+					});
 					return { error: msg };
 				}
 			}
 			if (!final) {
-				this.#sideTrace(purpose, model, systemPrompt, userText, false, "流未产出最终消息", t0, traceOn);
+				this.#sideTrace(purpose, model, sys, userText, false, "流未产出最终消息", t0, traceOn);
+				// 调试增强：旁路流未产出最终消息（非预期）——统一接口打 ERROR
+				debug.error("side-text", `旁路(${purpose}) LLM 流未产出最终消息`, {
+					model: modelIdOf(model),
+					elapsedMs: Date.now() - t0,
+				});
 				return { error: "流未产出最终消息" };
 			}
 			const text = textOfAssistant(final);
-			this.#sideTrace(purpose, model, systemPrompt, userText, !!text, text || undefined, t0, traceOn);
+			this.#sideTrace(purpose, model, sys, userText, !!text, text || undefined, t0, traceOn);
+			if (!text) {
+				// 调试增强：旁路最终消息无文本（非预期，如场记截断/空输出）——统一接口打 WARNING
+				debug.warning("side-text", `旁路(${purpose}) LLM 最终消息无文本`, {
+					model: modelIdOf(model),
+					stopReason: (final as { stopReason?: string })?.stopReason ?? "?",
+					elapsedMs: Date.now() - t0,
+				});
+			}
 			return text || { error: "最终消息无文本" };
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			this.#sideTrace(purpose, model, systemPrompt, userText, false, msg, t0, traceOn);
+			// 调试增强：旁路调用异常（throw）——统一接口打 ERROR
+			debug.error("side-text", `旁路(${purpose}) LLM 调用异常：${msg}`, {
+				model: modelIdOf(model),
+				elapsedMs: Date.now() - t0,
+			});
 			return { error: msg };
 		}
+	}
+
+	/**
+	 * 旁路工具循环（DESIGN-router 接口化 P2）：模型可发工具调用 → 执行 → 回喂 → 再调，
+	 * 直到停止调用或达到轮数上限。用于场记表格维护代理（#scribeAgentForTables）。
+	 * reasoning 用 medium（与 backfillSideText 同款：填表需按表规则推理，关思考质量差）。
+	 * 叶守卫由调用方在执行器里检查（每次写后）。
+	 */
+	async #sideAgent(opts: {
+		model: StageModelLike;
+		auth: { apiKey?: string; headers?: Record<string, string> };
+		systemPrompt: string;
+		messages: unknown[];
+		tools: StageToolLike[];
+		execTool: (name: string, args: Record<string, unknown>) => Promise<ExecResult>;
+		maxRounds?: number;
+		maxTokens?: number;
+		purpose?: string;
+		traceOn: boolean;
+	}): Promise<{ text: string; rounds: number; toolUsed: number; reads: number; writes: number } | { error: string }> {
+		const t0 = Date.now();
+		const maxRounds = opts.maxRounds ?? 12;
+		const maxTokens = opts.maxTokens ?? 8192;
+		const convo = [...opts.messages];
+		let text = "";
+		let toolUsed = 0;
+		let reads = 0;
+		let writes = 0;
+		for (let round = 0; round < maxRounds; round++) {
+			const options: Record<string, unknown> = {
+				apiKey: opts.auth.apiKey,
+				headers: opts.auth.headers,
+				maxTokens,
+				signal: this.#abort?.signal,
+				reasoning: "medium",
+			};
+			let final: AssistantMsgLike | null = null;
+			let errored: string | undefined;
+			try {
+				const s = this.#deps.streamFn(
+					opts.model,
+					{ systemPrompt: opts.systemPrompt, messages: convo, tools: opts.tools },
+					options,
+				);
+				for await (const e of s) {
+					if (e.type === "done") final = e.message ?? null;
+					else if (e.type === "error") {
+						final = e.error ?? null;
+						errored = final?.errorMessage || `stopReason=${final?.stopReason ?? "?"}`;
+					}
+				}
+			} catch (err) {
+				errored = err instanceof Error ? err.message : String(err);
+			}
+			if (errored) {
+				this.#sideTrace(opts.purpose ?? "side-agent", opts.model, opts.systemPrompt, "", false, errored, t0, opts.traceOn);
+				// 调试增强：旁路代理返回 provider 错误——统一接口打 ERROR
+				debug.error("side-agent", `旁路代理(${opts.purpose ?? "side-agent"}) LLM 返回错误：${errored}`, {
+					model: modelIdOf(opts.model),
+					round,
+					elapsedMs: Date.now() - t0,
+				});
+				return { error: errored };
+			}
+			if (!final) {
+				this.#sideTrace(opts.purpose ?? "side-agent", opts.model, opts.systemPrompt, "", false, "流未产出最终消息", t0, opts.traceOn);
+				// 调试增强：旁路代理流未产出最终消息——统一接口打 ERROR
+				debug.error("side-agent", `旁路代理(${opts.purpose ?? "side-agent"})流未产出最终消息`, {
+					model: modelIdOf(opts.model),
+					round,
+					elapsedMs: Date.now() - t0,
+				});
+				return { error: "流未产出最终消息" };
+			}
+			text += textOfAssistant(final);
+			const calls = (final.content ?? []).filter(
+				(c): c is { type: string; name?: string; arguments?: Record<string, unknown> } =>
+					c.type === "toolCall",
+			);
+			if (calls.length === 0) {
+				this.#sideTrace(opts.purpose ?? "side-agent", opts.model, opts.systemPrompt, "", true, text || undefined, t0, opts.traceOn, { toolUsed, rounds: round + 1, reads, writes });
+				return { text, rounds: round + 1, toolUsed, reads, writes };
+			}
+			convo.push(final);
+			for (const call of calls) {
+				const name = call.name ?? "";
+				const args = (call.arguments ?? {}) as Record<string, unknown>;
+				let r: ExecResult;
+				try {
+					r = await opts.execTool(name, args);
+				} catch (err) {
+					r = { text: `工具执行异常：${err instanceof Error ? err.message : String(err)}`, isError: true };
+				}
+				toolUsed++;
+				if (name === "sql_write") writes++;
+				else reads++; // sql_read 及任何其它只读工具都算 read
+				convo.push({
+					role: "toolResult",
+					toolCallId: call.id ?? String(toolUsed),
+					toolName: name,
+					content: [{ type: "text", text: r.text }],
+					isError: r.isError === true,
+					timestamp: Date.now(),
+				});
+				if (r.isError) {
+					// 叶已变（会话切换分支）：本代理停止——调用方处理丢弃
+					if (/叶已变化/.test(r.text)) {
+						this.#sideTrace(opts.purpose ?? "side-agent", opts.model, opts.systemPrompt, "", false, r.text, t0, opts.traceOn, { toolUsed, rounds: round + 1, reads, writes });
+						return { text, rounds: round + 1, toolUsed, reads, writes };
+					}
+				}
+			}
+		}
+		// 调试增强：旁路代理打满轮数上限（未自然终止）——统一接口打 WARNING
+		this.#sideTrace(opts.purpose ?? "side-agent", opts.model, opts.systemPrompt, "", true, `${text}\n（已达 ${maxRounds} 轮上限）`, t0, opts.traceOn, { toolUsed, rounds: maxRounds, reads, writes });
+		debug.warning("side-agent", `旁路代理(${opts.purpose ?? "side-agent"})打满 ${maxRounds} 轮上限`, {
+			model: modelIdOf(opts.model),
+			toolUsed,
+			reads,
+			writes,
+			textLen: text.length,
+			elapsedMs: Date.now() - t0,
+		});
+		return { text: `${text}\n（已达轮数上限）`, rounds: maxRounds, toolUsed, reads, writes };
+	}
+
+	/**
+	 * 当前会话的 TablesService（DESIGN-tables-sql §4）：按 sessionId 懒建并缓存；
+	 * 写操作经 onWrite 落树 rp-table-log（分支回溯权威）。
+	 */
+	#tablesFor(sessionId: string): TablesService {
+		if (this.#tables && this.#tablesSessionId === sessionId) return this.#tables;
+		this.#tables?.close();
+		const svc = new TablesService(join(this.#deps.cwd, ".liyuan-state", "tables", `${sessionId}.db`));
+		// 日志先缓冲：拍末 #flushTableLogs 统一落树（写库期间落树会改变叶 id，
+		// 与场记叶守卫冲突——代理写库不改树，日志落树才算分支痕迹）
+		svc.onWrite = (entry) => {
+			this.#tableLogBuffer.push(entry);
+		};
+		this.#tables = svc;
+		this.#tablesSessionId = sessionId;
+		return svc;
+	}
+
+	/** 把本拍缓冲的表写日志落树（rp-table-log，分支回溯权威）；拍末调用一次 */
+	#flushTableLogs(): void {
+		const n = this.#tableLogBuffer.length;
+		if (n === 0) return;
+		const sm = this.#deps.getSessionManager();
+		const written = new Set<string>();
+		for (const entry of this.#tableLogBuffer) {
+			try {
+				const id = sm.appendCustomEntry("rp-table-log", entry);
+				if (typeof id === "string") entry.entryId = id;
+			} catch {
+				// 树不可写：日志丢失仅影响该分支的回溯粒度
+			}
+			const t = tableOfSql(entry.sql);
+			if (t !== "?") written.add(t);
+		}
+		this.#tableLogBuffer = [];
+		console.log(`[liyuan-trace] [tableLog] 写表日志落树 ${n} 条（表：${[...written].join("、") || "无"}）`);
+		// 向量同步（DESIGN-tables-vector §4）：本拍写过的表异步重同步（不阻塞主链路）
+		if (written.size > 0) void this.#syncTablesVecAsync([...written]);
+	}
+
+	/**
+	 * 表格向量同步（DESIGN-tables-vector §4）：对给定表做全量行重嵌入。
+	 * 异步 + 降级：嵌入异常告警一次，表数据/检索注入照常降级。
+	 */
+	async #syncTablesVecAsync(tables: string[]): Promise<void> {
+		try {
+			const sm = this.#deps.getSessionManager();
+			const svc = this.#tablesFor(sm.getSessionId());
+			const scope = { sessionId: sm.getSessionId(), card: this.#cardPath ?? undefined };
+			for (const name of [...new Set(tables)]) {
+				if (!name) continue;
+				const read = svc.execRead(`SELECT rowid AS __rowid, * FROM "${name}" LIMIT 5000`);
+				if (!read.ok) {
+					// 表已不存在（drop）→ 清 chunks
+					removeTableVec(this.#deps.cwd, scope, name);
+					continue;
+				}
+				const rows = (read.rows ?? []).map((r) => ({
+					rowid: Number((r as Record<string, unknown>)["__rowid"] ?? 0),
+					text: rowText(name, r as Record<string, unknown>),
+				}));
+				await syncTableRows(this.#deps.cwd, scope, name, rows);
+			}
+		} catch (err) {
+			if (!this.#warnedTableVec) {
+				this.#warnedTableVec = true;
+				console.warn(`[tables-vec] 表格向量同步跳过（嵌入异常，检索注入降级）：${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+
+	/**
+	 * rewind/重放后全量重同步（DESIGN-tables-vector §6）：异步；世代号防竞态
+	 * （重同步期间又切分支 → 旧任务作废，以最后一次为准）。
+	 */
+	async #resyncTableVecAllAsync(): Promise<void> {
+		const gen = ++this.#tableVecGeneration;
+		try {
+			const sm = this.#deps.getSessionManager();
+			const svc = this.#tablesFor(sm.getSessionId());
+			const scope = { sessionId: sm.getSessionId(), card: this.#cardPath ?? undefined };
+			clearTableVec(this.#deps.cwd, scope);
+			const tables = svc.listTables().map((t) => t.name);
+			for (const name of tables) {
+				if (gen !== this.#tableVecGeneration) return; // 世代已变：作废
+				const read = svc.execRead(`SELECT rowid AS __rowid, * FROM "${name}" LIMIT 5000`);
+				if (!read.ok) continue;
+				const rows = (read.rows ?? []).map((r) => ({
+					rowid: Number((r as Record<string, unknown>)["__rowid"] ?? 0),
+					text: rowText(name, r as Record<string, unknown>),
+				}));
+				await syncTableRows(this.#deps.cwd, scope, name, rows);
+			}
+		} catch (err) {
+			if (!this.#warnedTableVec) {
+				this.#warnedTableVec = true;
+				console.warn(`[tables-vec] 全量重同步跳过：${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+
+	/**
+	 * 自定义表索引单行（SQL 化）：从 TablesService 的 __meta 生成
+	 * （`[auto] 表名` 列表；结构与数据都在 db，state.tables 已停用）。
+	 */
+	#sqlTableIndex(sessionId: string): string | undefined {
+		try {
+			const list = this.#tablesFor(sessionId).listTables();
+			if (list.length === 0) return undefined;
+			return list.map((t) => `${t.auto ? "[auto] " : ""}${t.name}`).join("、");
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * 叶漂移判定（2026-08-16）：leafBefore 不在当前叶的**祖先链**上才是真漂移（swipe/rewind
+	 * 分叉）；同链追加（model_change/日志/快照等新条目改叶 id）不算——曾误判：用户在场记
+	 * 代理运行中切换模型 → 两条 model_change 落树 → 严格相等判定「叶已变化」→ 整拍记账丢弃。
+	 */
+	#leafDriftedFrom(leafBefore: string | null): boolean {
+		const sm = this.#deps.getSessionManager();
+		const leaf = sm.getLeafId();
+		if (leaf === leafBefore) return false;
+		if (leafBefore === null) return true;
+		try {
+			const entries = sm.getEntries() as Array<{ id?: string; parentId?: string | null }>;
+			const byId = new Map<string, { parentId?: string | null }>();
+			for (const e of entries) {
+				if (e.id) byId.set(e.id, e);
+			}
+			let cur: string | null = leaf;
+			let guard = 0;
+			while (cur && guard++ < 600) {
+				if (cur === leafBefore) return false;
+				const e = byId.get(cur);
+				if (!e) return true;
+				cur = e.parentId ?? null;
+			}
+			console.log(`[liyuan-trace] [leafDrift] 叶漂移→记账丢弃 leafBefore=${(leafBefore ?? "").slice(0, 8)} leaf=${(leaf ?? "").slice(0, 8)}`);
+			return true;
+		} catch {
+			// catch 分支的「leaf !== leafBefore」true 也是一次漂移；这里不额外打，外层调用方有产出时已看得到
+			return leaf !== leafBefore;
+		}
+	}
+
+	/**
+	 * 旁路重记账（story_edit 润色后自动刷场记，SQL 化旁路版，2026-08-16）：
+	 * 走 runScribeTurn 全链路（顶层兜底 + 表格维护代理写 SQLite），结果落树
+	 * （rp-state lean + rp-table-log）并写磁盘 state 缓存；叶守卫 = 祖先链判定。
+	 * 插画类占位符改动不应走这里（调用方 skipScribe）。
+	 */
+	async rescribeTurn(userText: string, assistantText: string): Promise<{ ok: boolean; applied?: string[]; error?: string }> {
+		try {
+			const sm = this.#deps.getSessionManager();
+			const materials = loadStageMaterials(this.#deps.cwd);
+			const config = materials.config;
+			const branch = sm.getBranch() as BranchEntryLike[];
+			const state = this.#effectiveState(branch);
+			const sideModel = this.#deps.getSideModel?.() ?? this.#deps.getModel();
+			if (!sideModel) return { ok: false, error: "尚无可用旁挂/剧情模型" };
+			const auth = await this.#deps.getAuth(sideModel);
+			const traceOn = this.#deps.getTraceOn?.() === true;
+			const r = await runScribeTurn(
+				{
+					sideText: (sp, ut) => this.#sideText(sideModel, sp, ut, auth, "scribe", traceOn),
+					agentTableMaintain: (o) => this.#scribeAgentForTables({ ...o, traceOn }),
+					isLeafDrifted: (before) => this.#leafDriftedFrom(before),
+					autoTablesFrom: () => this.#autoTablesFrom(sm.getSessionId()),
+					getLeafId: () => sm.getLeafId(),
+					onActivity: () => undefined,
+				},
+				{
+					state,
+					baseState: state,
+					scope: "full", // 旁路无主演 patch：顶层 + 表格全域兜底
+					userText,
+					assistantText,
+					charName: materials.card.name,
+					userName: config.userName,
+				},
+			);
+			if (r.kind === "stale") return { ok: false, error: "叶已变化，重记账丢弃" };
+			if (r.kind === "failed") return { ok: false, error: r.error };
+			if (r.kind === "applied") {
+				console.log(`[liyuan-trace] [bookkeep] 旁路重记账(编辑后) applied=${r.applied.join("、") || "无"}`);
+				if (r.state) {
+					const leanState = { ...r.state, tables: undefined };
+					const eid = sm.appendCustomEntry(STATE_ENTRY_TYPE, leanState);
+					console.log(
+						`[liyuan-trace] [bookkeep] 旁路落账 rp-state ${eid.slice(0, 8)} time=${String((leanState as { time?: unknown }).time ?? "?").slice(0, 24)} loc=${String((leanState as { location?: unknown }).location ?? "?").slice(0, 24)}`,
+					);
+					const stateFile = this.#deps.getStateFile?.(sm.getSessionId());
+					if (stateFile) {
+						try {
+							saveState(stateFile, leanState);
+						} catch {
+							// 缓存写失败不影响树上快照
+						}
+					}
+				}
+				this.#flushTableLogs();
+				sm.flush();
+				return { ok: true, applied: r.applied };
+			}
+			return { ok: true, applied: [] };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	/**
+	 * SQL 化 auto 表清单（场记 todo 来源）：表名 + 列名 + 首列实体（≥2 字字符串）。
+	 * 旧 state.tables 快照不含 SQLite 新建的表——todo 判定必须实时。
+	 */
+	#autoTablesFrom(sessionId: string): Array<{ name: string; columns: string[]; keyValues: string[] }> {
+		try {
+			const svc = this.#tablesFor(sessionId);
+			const out: Array<{ name: string; columns: string[]; keyValues: string[] }> = [];
+			for (const t of svc.listTables()) {
+				if (!t.auto) continue;
+				const meta = svc.getMeta(t.name);
+				const cols = meta?.columns.map((c) => c.name) ?? [];
+				const keyVals: string[] = [];
+				if (cols.length > 0) {
+					const read = svc.execRead(`SELECT "${cols[0]}" FROM "${t.name}" LIMIT 200`);
+					if (read.ok) {
+						for (const r of read.rows ?? []) {
+							const v = (r as Record<string, unknown>)[cols[0]];
+							if (typeof v === "string" && v.length >= 2) keyVals.push(v);
+						}
+					}
+				}
+				out.push({ name: t.name, columns: cols, keyValues: keyVals });
+			}
+			return out;
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * 场记表格维护代理（DESIGN-tables-sql §5）：一次工具循环维护全部 todo 表。
+	 * 模型按各表【维护规则】用 sql_read/sql_write 自主查写，写库即持久（TablesService
+	 * 落日志）；返回 applied 摘要。叶守卫在每次写后检查。
+	 */
+	async #scribeAgentForTables(opts: {
+		todo: string[];
+		dialogue: string;
+		leafBefore: string | null;
+		traceOn: boolean;
+	}): Promise<{ applied: string[]; error?: string }> {
+		const { todo, dialogue, leafBefore, traceOn } = opts;
+		const sessionId = this.#deps.getSessionManager().getSessionId();
+		const svc = this.#tablesFor(sessionId);
+		const applied: string[] = [];
+		const exec = makeSqlExec(
+			{
+				execRead: async (sql) => {
+					const r = svc.execRead(sql);
+					return r.ok ? { ok: true, rows: r.rows ?? [] } : { ok: false, error: r.error };
+				},
+				execWrite: async (sql) => {
+					const r = svc.execWrite(sql);
+					return r.ok ? { ok: true, changes: r.changes, lastInsertRowid: r.lastInsertRowid } : { ok: false, error: r.error };
+				},
+			},
+			(sql, changes) => applied.push(`表 ${tableOfSql(sql)} 写入 ${changes} 行`),
+		);
+		const execTool = async (name: string, args: Record<string, unknown>): Promise<ExecResult> => {
+			const r = await exec(name, args);
+			// 每次写后叶守卫（祖先链判定：同链追加不算漂移；真分叉 swipe/rewind 才丢弃）
+			if (this.#leafDriftedFrom(leafBefore)) {
+				return { text: "叶已变化（会话切换分支），本代理停止。", isError: true };
+			}
+			return r;
+		};
+		const sideModel = this.#deps.getSideModel?.() ?? this.#deps.getModel();
+		if (!sideModel) return { applied, error: "尚无可用旁挂/剧情模型" };
+		const auth = await this.#deps.getAuth(sideModel);
+		const sys = buildScribeAgentSystemPrompt(todo, (name) => svc.getMeta(name));
+		const res = await this.#sideAgent({
+			model: sideModel,
+			auth,
+			systemPrompt: sys,
+			messages: [{ role: "user", content: [{ type: "text", text: buildScribeAgentUserText(dialogue) }], timestamp: Date.now() }],
+			tools: scribeAgentToolSchemas(),
+			execTool,
+			maxRounds: 16,
+			maxTokens: 8192,
+			purpose: "scribe-agent",
+			traceOn,
+		});
+		if (typeof res === "object" && "error" in res) return { applied, error: res.error };
+		if (applied.length > 0) console.log(`[liyuan-trace] [scribeTable] 场记表格维护 applied=${applied.join("、") || "无"}（LLM ${res.rounds} 轮 / SQL ${res.toolUsed} 次：读 ${res.reads} 写 ${res.writes}）`);
+		else console.log(`[liyuan-trace] [scribeTable] 场记表格维护：本轮无写表（LLM ${res.rounds} 轮 / SQL ${res.toolUsed} 次：读 ${res.reads} 写 ${res.writes}）`);
+		return { applied };
 	}
 
 	/** 旁路调用落 trace（side 事件：用途/提示词/结果/耗时）；开关关闭或未注入时零开销 */
@@ -1997,6 +2660,7 @@ export class StageEngine {
 		text: string | undefined,
 		t0: number,
 		traceOn: boolean,
+		meta?: { toolUsed?: number; rounds?: number; reads?: number; writes?: number },
 	): void {
 		if (!traceOn) return;
 		this.#deps.trace?.record(this.#deps.getSessionManager().getSessionId(), {
@@ -2007,6 +2671,10 @@ export class StageEngine {
 			model: modelIdOf(model),
 			ok,
 			...(text ? { text } : {}),
+			...(meta && typeof meta.toolUsed === "number" ? { toolUsed: meta.toolUsed } : {}),
+			...(meta && typeof meta.rounds === "number" ? { rounds: meta.rounds } : {}),
+			...(meta && typeof meta.reads === "number" ? { reads: meta.reads } : {}),
+			...(meta && typeof meta.writes === "number" ? { writes: meta.writes } : {}),
 			elapsedMs: Date.now() - t0,
 		});
 	}

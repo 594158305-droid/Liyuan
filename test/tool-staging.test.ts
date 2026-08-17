@@ -28,7 +28,8 @@ const STAGE_FULL = [
 	"lorebook_read",
 	"memory_search",
 	"world_state_get",
-	"table_query",
+	"sql_read",
+	"sql_write",
 	"writing_guide",
 	"beat_plan",
 	"beat_step_done",
@@ -140,7 +141,7 @@ test("minimalStageTools：只留读侧+规划，写侧/媒体/音效/助手委�
 		"lorebook_search",
 		"memory_search",
 		"world_state_get",
-		"table_query",
+		"sql_read",
 		"writing_guide",
 		"beat_plan",
 		"beat_step_done",
@@ -153,7 +154,7 @@ test("minimalStageTools：只留读侧+规划，写侧/媒体/音效/助手委�
 	assert.ok(minimal.includes("beat_step_done"));
 	// 至少恒有两件读侧工具，Minimal 永不空
 	assert.ok(minimal.includes("world_state_get"));
-	assert.ok(minimal.includes("table_query"));
+	assert.ok(minimal.includes("sql_read"));
 });
 
 test("minimalStageTools：readDeps 未注入（undefined）时统一层工具不进 Minimal", () => {

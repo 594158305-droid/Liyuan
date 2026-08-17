@@ -279,6 +279,11 @@ export interface StageSystemOptions {
 	 * 进 system 而非每拍注入——会话内字节稳定，不破前缀缓存（与旧 director.ts 同位置）。
 	 */
 	mcpTools?: Array<{ name: string; description: string }>;
+	/**
+	 * 梨园化 router（DESIGN-router §2.2）：模型分档弱人格，插在 # 舞台 之后。
+	 * 会话内字节稳定（模型固定则文本固定），不破前缀缓存；省略 = 不注入（零变化）。
+	 */
+	routerPersona?: string;
 }
 
 /** 状态栏格式条目是否占位符型（自闭合 <Tag/>——界面由卡渲染，模型只留占位） */
@@ -316,6 +321,7 @@ export function buildStageSystemPrompt({
 	statusBarFormats,
 	tools,
 	mcpTools,
+	routerPersona,
 }: StageSystemOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const m = (s: string) => applyMacros(s, macro);
@@ -325,6 +331,12 @@ export function buildStageSystemPrompt({
 		`# 舞台
 你在进行一场长篇沉浸式角色扮演：扮演 ${card.name}，以及剧情需要的一切配角、路人与世界本身。用户扮演 ${config.userName}。`,
 	);
+
+	// 梨园化 router（DESIGN-router §2.2）：模型分档弱人格——会话内字节稳定（模型固定则文本
+	// 固定），只换 persona 段、不动 # 怎么演这一拍 / 轮次卡 / 文风基准（router amnesia 教训）。
+	if (routerPersona) {
+		sections.push(`# 演出姿态\n${routerPersona}`);
+	}
 
 	const charParts: string[] = [`# 你扮演的角色：${card.name}`];
 	if (card.description) charParts.push(m(card.description));
@@ -376,6 +388,8 @@ export function buildStageSystemPrompt({
 写完后：你需要重新评估——剧情到岔路就用 \`ask\` 问用户，路标不成立就重拟 \`beat_plan\`，戏到停点就 \`draft_seal\` 收笔。
 
 每拍演完：你需要停在 ${config.userName} 可以接话、可以行动的位置。
+
+计划/路标/进度/验收是工具动作（\`beat_plan\`/\`beat_step_done\`/\`draft_seal\`/\`ask\`），绝不写进正文——正文只含叙事，收笔前要问用 \`ask\`，不要把「停点/拍板」写进正文。
 
 具体的每一步由每轮注入的轮次卡（【第 1 步·规划】【开工】【演段回看】等）指示，以注入为准。`,
 		);
@@ -511,13 +525,13 @@ export function buildStageInjection({
 		`【世界状态】当前事实基准，正文不得与之矛盾——物品在谁手里、现在是第几天几点、人在哪里，以下面为准；剧情记忆与之冲突时在叙事内自然圆回：\n${formatState(state)}`,
 	);
 
-	// 自定义表索引紧随世界状态：所有表内容都不注入，只给清单入口，需要时 table_query 现查
+	// 自定义表索引紧随世界状态：所有表内容都不注入，只给清单入口，需要时 sql_read 现查（SQL 化）
 	if (tableIndex) {
 		blocks.push(
 			`【自定义表索引】以下为自定义表（内容不随【世界状态】注入，[auto] 标记的表由场记每轮自动维护、只读不要手动写；无标记的表需要时可自行维护）：${tableIndex}。要写其中事实、拿不准内容时，${
 				tools === false
 					? "谨慎带过、禁止臆造细节。"
-					: "**先用 `table_query` 查出内容再写**——禁止凭想象编造表内已有的事实。"
+					: "**先用 `sql_read` 查出内容再写**——禁止凭想象编造表内已有的事实。"
 			}`,
 		);
 	}

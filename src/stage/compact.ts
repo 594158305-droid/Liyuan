@@ -67,6 +67,13 @@ export interface PlanCompactionOptions {
 	keepRecentBeats?: number;
 	/** 可裁正文字数地板（缺省 MIN_COMPACT_CHARS） */
 	minChars?: number;
+	/**
+	 * 全树条目（8/16 修复）：摘要条目可能不在焦点分支上（regenerate/reroll 切分支后
+	 * rp-summary 挂在旧叶链）——不兜底时 activeSummary 落空，live=全分支，
+	 * 每次压缩都从会话头全量重摘（实弹：两次压缩输入 742KB 几乎原样重复）。
+	 * 与装配侧 rebuildHistory(branch, allEntries) 同款兜底。
+	 */
+	allEntries?: BranchEntryLike[];
 }
 
 /**
@@ -106,8 +113,9 @@ export function planCompaction(branch: BranchEntryLike[], opts: PlanCompactionOp
 	const minChars = opts.minChars ?? MIN_COMPACT_CHARS;
 	if (!Number.isFinite(opts.everyNTurns) || opts.everyNTurns <= 0) return null;
 
-	// 已被上一份摘要覆盖的前缀不再参与
-	const active = activeSummary(branch);
+	// 已被上一份摘要覆盖的前缀不再参与（8/16：allEntries 兜底——摘要条目挂旧叶链时
+	// 从全树找覆盖锚点，否则每次压缩都从会话头全量重摘，见 PlanCompactionOptions 注释）
+	const active = activeSummary(branch, opts.allEntries);
 	const live = active ? branch.slice(active.cut) : branch;
 
 	// 拍的边界 = 用户消息；最近 keep 拍原样保留
@@ -143,6 +151,8 @@ export interface CompactRunDeps {
 	appendSummaryEntry: (data: RpSummaryData) => void;
 	/** 叶守卫读数：调用前后各取一次，不等则丢弃 */
 	getLeafId: () => string | null;
+	/** 叶漂移判定（2026-08-16）：祖先链判定——同链追加（model_change 等）不算漂移 */
+	isLeafDrifted?: (leafBefore: string | null) => boolean;
 	/** 被裁正文归档进剧情库（供 memory_search 召回细节）；失败只丢召回能力 */
 	archive?: (text: string) => Promise<void>;
 	onActivity?: (detail: string) => void;
@@ -157,6 +167,8 @@ export interface CompactRunInput {
 	everyNTurns: number;
 	keepRecentBeats?: number;
 	minChars?: number;
+	/** 全树条目（8/16）：摘要锚点兜底，见 PlanCompactionOptions.allEntries */
+	allEntries?: BranchEntryLike[];
 }
 
 export type CompactOutcome =
@@ -176,6 +188,7 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 		charName: input.charName,
 		keepRecentBeats: input.keepRecentBeats,
 		minChars: input.minChars,
+		allEntries: input.allEntries,
 	});
 	if (!plan) return { kind: "skipped", reason: "not-due" };
 
@@ -194,8 +207,8 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 	const summary = resp.trim();
 	if (!summary) return { kind: "failed", error: "摘要为空" };
 
-	// R9 叶守卫：调用期间树动过（swipe/rewind/切线）→ 整体丢弃
-	if (deps.getLeafId() !== leafBefore) {
+	// R9 叶守卫：调用期间树动过（swipe/rewind/切线）→ 整体丢弃（祖先链判定：同链追加不算）
+	if ((deps.isLeafDrifted ? deps.isLeafDrifted(leafBefore) : deps.getLeafId() !== leafBefore)) {
 		deps.onActivity?.("压缩已丢弃（本拍期间切换了分支）");
 		return { kind: "stale" };
 	}

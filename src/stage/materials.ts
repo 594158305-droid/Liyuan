@@ -44,6 +44,7 @@ import {
 } from "../preset-split.ts";
 import { enabledBlocks, normalizeRpPreset, type PresetBlock, type RpPreset } from "../preset.ts";
 import { resolveConfigPath } from "../paths.ts";
+import { loadRouterFile, resolveRouterConfig, type ResolvedRouter } from "../router-config.ts";
 import {
 	loadStyleBaselineFile,
 	resolveStyleBaseline,
@@ -69,6 +70,8 @@ export interface StageMaterials {
 	styleBaseline: StyleBaselineCard;
 	/** 轮次卡模板（assets/flow/round-cards.json + 配置 flowTemplates 覆盖，DESIGN-flow-config §2） */
 	roundCards: RoundCardTemplate[];
+	/** 梨园化 router（DESIGN-router §4）：任务分类 → 每拍模式卡 + 模型分档弱人格；每拍现读 */
+	router: ResolvedRouter;
 	/** 流程配置加载警告（非法正则跳过等；engine 按内容去重播报一次） */
 	flowWarnings: string[];
 	/**
@@ -120,11 +123,12 @@ export function loadStageConfig(cwd: string): RpConfig {
 export function loadStageMaterials(cwd: string): StageMaterials {
 	const config = loadStageConfig(cwd);
 
-	// 流程配置（DESIGN-flow-config）：轮次卡模板 + 拆层表，每拍现读，改文件/改配置下一拍生效。
-	// 缺省回退内嵌默认（round-cards.json / split-tables.json 缺失或损坏时）；非法正则跳过并进警告。
+	// 流程配置（DESIGN-flow-config）：轮次卡模板 + 拆层表 + router，每拍现读，改文件/改配置下一拍生效。
+	// 缺省回退内嵌默认（round-cards.json / split-tables.json / router.json 缺失或损坏时）；非法正则跳过并进警告。
 	const flowWarnings: string[] = [];
 	const roundCards = resolveRoundCardTemplates(loadRoundCardsFile(cwd) ?? DEFAULT_ROUND_CARDS, config.flowTemplates);
 	const splitTables = resolveSplitTables(loadBuiltinSplitTables(cwd, flowWarnings), config.splitTables, flowWarnings);
+	const router = resolveRouterConfig(config.router, loadRouterFile(cwd));
 
 	const cardAbs = resolvePath(cwd, config.card);
 	const card = loadCardFile(cardAbs);
@@ -295,6 +299,7 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 		splitTable,
 		styleBaseline,
 		roundCards,
+		router,
 		flowWarnings,
 		presetResidentA,
 		presetResidentB,

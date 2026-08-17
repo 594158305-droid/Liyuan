@@ -9,10 +9,13 @@ import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@liy
 import { registerFauxProvider, streamSimple } from "@liyuan/ai/compat";
 
 import { StageEngine, type StageStreamFn } from "../src/stage/engine.ts";
+import { TablesService } from "../src/tables/service.ts";
 
 /** 临时舞台：配置+卡+独立会话目录 */
+const tmpDirs: string[] = [];
 const makeStage = () => {
 	const cwd = mkdtempSync(join(tmpdir(), "liyuan-eng-"));
+	tmpDirs.push(cwd);
 	writeFileSync(
 		join(cwd, "card.json"),
 		JSON.stringify({ data: { name: "云澜", description: "{{user}}的师姐", first_mes: "你来了。" } }),
@@ -23,13 +26,14 @@ const makeStage = () => {
 	return { cwd, sm };
 };
 
+const openEngines: StageEngine[] = [];
 const makeEngine = (
 	cwd: string,
 	sm: InstanceType<typeof SessionManager>,
 	model: unknown,
 	events: ConstructorParameters<typeof StageEngine>[0]["events"] = {},
-) =>
-	new StageEngine({
+): StageEngine => {
+	const e = new StageEngine({
 		cwd,
 		getSessionManager: () => sm as never,
 		getModel: () => model as never,
@@ -37,6 +41,29 @@ const makeEngine = (
 		streamFn: streamSimple as unknown as StageStreamFn,
 		events,
 	});
+	openEngines.push(e);
+	return e;
+};
+
+// 每个测试后统一释放 db 句柄并清临时目录（Windows 上 SQLite 句柄未关会 EPERM）
+test.afterEach(() => {
+	for (const e of openEngines) {
+		try {
+			e.closeTables();
+		} catch {
+			// 忽略
+		}
+	}
+	openEngines.length = 0;
+	for (const d of tmpDirs) {
+		try {
+			rmSync(d, { recursive: true, force: true });
+		} catch {
+			// 句柄延迟：忽略
+		}
+	}
+	tmpDirs.length = 0;
+});
 
 /**
  * 场记那一发（M3 起每个干净收笔的拍都会发起）。
@@ -67,7 +94,6 @@ test("引擎：一拍全链路（user 落树 → 流式 → assistant 落树 →
 		assert.equal(engine.isStreaming, false);
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -95,7 +121,6 @@ test("引擎：忙时排队（R9 回合互斥）——两拍依序完成", async
 		assert.ok(idx1 < idx2, "第二拍必须排在第一拍之后");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -125,7 +150,6 @@ test("引擎：regenerate 在钉回的 user 下挂 sibling（swipe 语义）", a
 		assert.ok(!branchText.includes("第一版回复"), "旧变体不在当前分支");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -158,7 +182,6 @@ test("引擎：abort 半拍——已流出的正文落树、标记 aborted", asy
 		assert.equal(asst?.message?.stopReason, "aborted");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -179,7 +202,6 @@ test("引擎：无模型/无用户输入的失败路径走通知，不落错误�
 		(e) => e.type === "message" && e.message?.role === "assistant",
 	);
 	assert.equal(asst.length, 0, "不落任何 assistant 消息");
-	rmSync(cwd, { recursive: true, force: true });
 });
 
 // ---------------- M-A：宽进严出 + 验收报告喂回（取代 M2 幕后精修） ----------------
@@ -243,7 +265,6 @@ test("引擎循环：违禁直出→代收+报告喂回→模型 draft_write 重
 		assert.ok(!String(contexts[0].systemPrompt).includes("词汇黑名单"), "初稿阶段不见禁词表");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -266,7 +287,6 @@ test("引擎循环：报告喂回后模型不改（只闲聊收笔）→ 保留�
 		assert.ok(!finalText.includes("就这样吧"), "收笔闲聊不进正文");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -284,7 +304,6 @@ test("引擎循环：干净直出=代收即全绿，零额外调用（快路径�
 		assert.deepEqual(activities, ["直出正文已代收为 draft_write"], "快路径只有一条代收过程条");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -319,7 +338,6 @@ test("引擎记账：定稿后场记落 rp-state 快照；账本 = f(分支)", a
 		assert.ok(JSON.stringify(scribeCtx[0].messages).includes("指尖顿了顿"));
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -350,7 +368,6 @@ test("引擎记账：swipe 重演后账本自动回滚（8/02 泄漏事故复测
 		assert.equal(after.flags["赠礼"], "被拒绝");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -379,7 +396,6 @@ test("引擎记账：中断的半拍不记账（半截正文不进账本）", as
 		assert.equal(reg.getPendingResponseCount(), 1, "场记那一发根本没发出");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -467,7 +483,8 @@ test("引擎工具：查设定 → 结果回喂 → 续演正文；工具装配�
 			"lorebook_write",
 			"memory_search",
 			"play_sound",
-			"table_query",
+			"sql_read",
+			"sql_write",
 			"world_state_get",
 			"world_state_update",
 		]);
@@ -496,7 +513,6 @@ test("引擎工具：查设定 → 结果回喂 → 续演正文；工具装配�
 		assert.ok(activities.some((a) => a.includes("查设定「骨誓」")), "过程条报告检索");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -541,7 +557,6 @@ test("引擎循环：draft_write 工具交稿 → 收稿即验回喂 → 收笔�
 		assert.ok(activities.some((a) => a.includes("交稿")), "过程条报告交稿");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -608,7 +623,6 @@ test("引擎循环：draft_append 分段续写 → 中途查证 → draft_seal �
 		assert.ok(branch.includes("rpTimeline"), "时间线随 details 持久化");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -639,7 +653,6 @@ test("引擎循环：draft_append 后忘了封笔 → 催告一轮 → 仍不封
 		assert.equal(history[history.length - 1].text, "她把伞收在门外，抖了抖雪。", "兜底封笔，正文照常落树");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -707,7 +720,6 @@ test("引擎循环：格式尾巴（状态栏占位+catsay）走 text 通道 →
 		assert.ok(activities.some((a) => a.includes("交稿")), "过程条照常");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -737,7 +749,6 @@ test("引擎循环：world_state_update 记账——模型提交 patch，账本�
 		assert.ok(activities.some((a) => a.includes("记账")), "记账过程条");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -773,9 +784,12 @@ test("引擎记账（8/13 域分工）：主演顶层 patch + 场记 tables 补�
 				{ stopReason: "toolUse" },
 			),
 			fauxAssistantMessage(""), // 收笔
-			// 主演已提交顶层 → 场记逐表派发（8/15）：正文提及「云澜」→ 在场角色表命中，
-			// 输出该表单表 ops（提取器格式），不再是全量场记 patch 格式
-			fauxAssistantMessage(JSON.stringify({ insert: [{ 姓名: "沈舟" }] })),
+			// DESIGN-tables-sql：场记走表格维护代理（工具循环）——模型用 sql_write 直接写库
+			fauxAssistantMessage(
+				[fauxToolCall("sql_write", { sql: "INSERT INTO 在场角色表 (姓名) VALUES ('沈舟')" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("已在场角色表登记沈舟。"), // 代理收尾（无工具调用）
 		]);
 		const engine = new StageEngine({
 			cwd,
@@ -785,24 +799,33 @@ test("引擎记账（8/13 域分工）：主演顶层 patch + 场记 tables 补�
 			streamFn: streamSimple as unknown as StageStreamFn,
 			getStateFile: (sid) => (sid === sm.getSessionId() ? stateFile : undefined),
 		});
+		// SQL 化：表结构与数据在 SQLite（迁移后语义）；测试里先建表
+		const dbPath = join(cwd, ".liyuan-state", "tables", `${sm.getSessionId()}.db`);
+		const svc = new TablesService(dbPath);
+		svc.createTable({ name: "在场角色表", auto: true, columns: [{ name: "姓名", type: "text" }] });
+		svc.execWrite("INSERT INTO 在场角色表 (姓名) VALUES ('云澜')");
+		svc.close();
 		await engine.performTurn("往溪桥去。");
 
 		const state = stateFromBranch(sm.getBranch() as BranchEntryLike[]);
 		assert.equal(state.time, "戌时", "主演顶层 patch 落账");
 		assert.equal(state.location, "溪桥");
-		assert.deepEqual(
-			state.tables["在场角色表"].rows,
-			[{ 姓名: "云澜" }, { 姓名: "沈舟" }],
-			"场记 tables 补丁叠加在主演投影后账本上",
-		);
+		// 表格数据在 SQLite（不再落 rp-state 快照）
+		const svc2 = new TablesService(dbPath);
+		const read = svc2.execRead("SELECT 姓名 FROM 在场角色表 ORDER BY 姓名");
+		svc2.close();
+		assert.equal(read.ok, true);
+		if (read.ok) {
+			// SQLite 返回的行对象原型与普通对象不同（deepEqual 严格），JSON 归一比较
+			assert.deepEqual(JSON.parse(JSON.stringify(read.rows)), [{ 姓名: "云澜" }, { 姓名: "沈舟" }], "场记 sql_write 落库");
+		}
 		const rpStates = (sm.getBranch() as BranchEntryLike[]).filter(
 			(e) => e.type === "custom" && e.customType === "rp-state",
 		);
 		assert.equal(rpStates.length, 1, "主演 + 场记合并为一次 rp-state 落账（每拍一个快照）");
-		assert.equal(reg.getPendingResponseCount(), 0, "三发用尽：工具轮、收笔、场记 tables-only");
+		assert.equal(reg.getPendingResponseCount(), 0, "四发用尽：工具轮、收笔、场记代理写库、代理收尾");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -831,7 +854,6 @@ test("引擎循环：空手停笔（0 字病灶）→ 催稿一轮 → 补交定
 		assert.equal(history[history.length - 1].text, "补上的正文。", "补交的正文成为定稿——空拍被结构性消灭");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -856,7 +878,6 @@ test("引擎循环：催稿后仍空手 → 认栽收拍并通知（不再静默
 		assert.equal(asst.length, 0, "空拍不落树");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -874,7 +895,6 @@ test("引擎工具：不查资料的一拍零额外调用（工具是可选的�
 		assert.ok(!activities.some((a) => a.startsWith("查")), "没查就不出检索过程条");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -924,7 +944,6 @@ test("引擎压缩：攒够拍数后自管落 rp-summary，被覆盖的正文不
 		assert.equal(reg.getPendingResponseCount(), 0, "八拍 + 八次记账 + 一次压缩");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -965,7 +984,6 @@ test("引擎压缩：下一拍装配读回【前情提要】，被覆盖的往�
 		assert.ok(lastMsg.content[0].text.trimEnd().endsWith("第 9 拍我说的话。"), "用户当拍的话必须是上下文最后一句");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -995,7 +1013,6 @@ test("引擎压缩：中断的半拍不触发压缩（脏拍不压）", async ()
 		assert.equal(reg.getPendingResponseCount(), 0);
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1029,7 +1046,6 @@ test("引擎压缩：compactNow() 手动压缩不等周期；流式中拒绝", a
 		);
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1082,7 +1098,6 @@ test("演段轮连发门禁：同一轮两个 draft_append → 第二个被拒�
 		assert.ok(!flat.includes("同轮连演被拦下"), "拒收提示不落树（过程不进历史）");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1151,7 +1166,6 @@ test("演段轮未修违规门禁：上一段带禁词不修就续演 → 被拒
 		assert.ok(flat.includes("眼中亮起一道冷光") && flat.includes("她抬头看我。"), "两段定稿在树上");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1197,7 +1211,6 @@ test("每轮修复可见性：draft_edit 修改后分段重同步（8/09 输出�
 		assert.ok(last.every((p) => !p.includes("闪过")), "禁词已消失");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1255,7 +1268,6 @@ test("程序化谢幕：卡定义状态栏、模型 seal 后停手不输出 → 
 		assert.ok((tail.text ?? "").includes("StatusBlock") && tail.draft !== true, "状态栏收成独立尾巴末段");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1289,7 +1301,6 @@ test("谢幕卡：封笔后的下一轮注入【谢幕】而非回看卡——se
 		assert.ok(!postSealCtx.includes("【演段回看】"), "封笔后不再注入回看卡催演");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1336,7 +1347,6 @@ test("规划旁白不入正文：稿落地前工具轮的 text 产出被清理�
 		assert.ok(clears >= 1, "旁白轮触发 stream 清理（前端收进过程条）");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1378,7 +1388,6 @@ test("轮次耗尽收场：安全阀撤工具时注入【收场】指令，最�
 		assert.ok(branchText.includes("收场点评"), "最后一轮的产出拼进定稿");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1405,7 +1414,6 @@ test("直出代收不静默放行：有计划=有戏，代收全绿也喂一轮�
 		assert.ok(branchText.includes("一气呵成"), "直出正文仍代收落树（不推倒）");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1429,7 +1437,6 @@ test("ask：注入 askUser 才上清单；未注入则剔除（依赖缺失不�
 		assert.ok(!names.includes("ask"), "未注入 askUser 时 ask 不上清单");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1458,7 +1465,6 @@ test("ask：注入 askUser 时 ask 上清单", async () => {
 		assert.ok(names.includes("ask"), "注入 askUser 后 ask 在清单");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1511,7 +1517,6 @@ test("ask：作答回喂模型，计划据此重拟（P7 决策闭环 + 8/09 时
 		assert.equal(history[history.length - 1].text, "我按住剑柄，退后半步。", "作答后按计划演出的正文定稿");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1547,7 +1552,6 @@ test("ask：用户停止 → 本拍收束，已写正文不丢（引擎兜底封
 		assert.ok(flat.includes("第一段已经写好了"), "停止后已写的正文仍保留");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -1615,6 +1619,5 @@ test("语义评审（8/14）：封笔后旁路评审，major 问题并入修复�
 		assert.ok(!treeText.includes("炉火将熄"), "被评审点名的原文已改掉");
 	} finally {
 		reg.unregister();
-		rmSync(cwd, { recursive: true, force: true });
 	}
 });
