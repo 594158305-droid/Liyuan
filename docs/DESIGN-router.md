@@ -313,3 +313,49 @@ export const parseMode(token: string): RouterBand | "auto" | null     // 供自�
    自愈。**用户拍板：`perTurn` 为唯一推荐形态**，`fixed` 仅作实验配置保留，不参与默认路径。
 5. **legacy 扩展旁路**（roleplay.ts）：与 StageEngine 双轨并存，router 不触碰；后续若
    roleplay.ts 退役，其 sideComplete 调用点并入收敛尾注范围。
+
+## 9. 落地记录（2026-08-16，用户下令 P1→P2 一路做完）
+
+| 阶段 | 状态 | 落点 |
+|---|---|---|
+| P1 纯函数 + 配置 | ✅ | `src/router-core.ts`（分类/复杂度/模型分档/人格/卡 + RP 语义词表初稿）、`src/router-config.ts`（文件+配置段覆盖解析）、`assets/flow/router.json`、`src/types.ts` `RouterConfig` 段、`test/router-core.test.ts`（25 例）`test/router-config.test.ts` |
+| P2 主演路径 | ✅ | `materials.ts` 装载 `router`；`assemble.ts` `buildStageSystemPrompt` 加 `routerPersona`（# 舞台 后）；`engine.ts` #turn 计算弱人格+模式卡（perTurn 分类源=当拍消息；fixed 取首条剧情消息）、注入区拼卡（轮次卡后、用户话前）、staging 开关（enabled=false 维持现状）、`#sideText` 收敛尾注、`#compact` 刷新收敛字段；`test/stage-router.test.ts`（9 例，含真实 router.json 链路） |
+| P3 旁路收敛 | ✅ | `server/main.ts`：`resolveSideModel` 收敛三处模型解析（registerPlannerCaller/backfillSideText/getSideModel）、`routerConvergeTailOf` 尾注（默认开，enabled=false 零变化）、`ext_generate` 注明不碰 |
+| P4 助手/自定义 agent | ✅ | `RouterConfig.agents.enabled`（默认 false，开启后零差量注入）：`src/router-core.ts` `agentPersonaFor`（Pro 审题规划 / Flash 快动作分档姿态）+ `assistant.ts` `withAgentRouterAttitude`——内置助手（stagehandExtension rebuild）与自定义 agent（plainPromptExtension 调用处）的 systemPrompt 前置注入模型分档工作姿态，覆盖 agent 侧全部 LLM 路径；默认关零行为变化 |
+| P5 实弹矩阵 | ⏳ 待用户实弹 | §6 矩阵需真实 LLM 会话验证（分类/卡效果、缓存稳定性、flash 防太浅） |
+
+实现偏差（比方案 §5 更优）：
+- **模式卡注入位置**：方案原写「`buildStageInjection` 加 routerCard 选项」，实现改为**引擎拼接**
+  （`engine.ts` `#turn` 与轮次卡同通道、首轮注入一次、不累积）——与轮次卡同一机制、单测直接
+  钉死 `cardFor` 纯函数，`buildStageInjection` 签名不动。
+- **模式卡只首轮注入**：`#agentLoop` 不重复注入（避免每轮两张卡噪音）；修复行为由「修复卡 +
+  轮次卡 fix + 同轮连发/未修违规门禁」兜底——router 的 GUIDE 语义是「每真实用户消息一条」，
+  梨园一拍 = 一次 #turn，语义对齐。
+- **词表修正**：场景规模词（战役/群像/多线/大场面）从 build 词表移出（是复杂度信号不是方向
+  信号，避免「群像戏太浅了重写」被 build 词带偏）；fix 补「太浅/太水」。
+- **staging 与 enabled 解耦**：`enabled=false` 时 staging 维持现状（toolStaging 默认 true），
+  满足「零变化」铁律；`toolStaging:false` 才显式关 staging。
+- **分类兜底规则（8/16 实弹校准）**：初版「无命中回 weak」导致长剧情推进（几乎总是构造，
+  无关键词）拿不到构造卡。修正：无命中且文本 ≥40 字 → react（构造兜底，兑现 §8.1「宁多写
+  几段，不白回看」）；寒暄短句（<40 字）→ weak（不硬推）；平局（build==fix>0）→ weak。
+- **旁路 trace 口径**：`#sideTrace` 记录**实际发送**的 systemPrompt（含收敛尾注 `sys`），
+  旁路尾注在 `.liyuan-state/trace` 的 side 事件中可观测。
+
+验证：router 相关单测 25+13+9 例全绿；回归 stage-engine/stage-scribe/stage-compact/workspace/
+review/stage-tools/flow-*/turn-intent/tools-registry/preset-split/table-backfill 130 例全绿；
+服务冒烟 `PORT=7621` 起服 /healthz OK（日志无异常）；真实配置链路脚本验证：缺省 router 配置
+→ enabled=true/perTurn/全开，pro 弱人格 + 构造/修复/深度卡分类正确，system prompt 含 `# 演出姿态`。
+
+### 实弹 trace 确认（2026-08-16，会话 019fec6e-…）
+
+- ✅ **system 弱人格已进真实会话**：8/15 13:19/13:24/13:25 UTC 三个 `kind:"prompt"` 事件的
+  `systemPrompt` 均含 `# 演出姿态`（模型 `deepseek-v4-pro` → weak-pro 人格）。
+- ⚠️ **当时模式卡未注入**：那几拍用户输入为长剧情推进（如「凯尔绕回了自己的店长房间…」178 字），
+  初版分类器无命中回 weak → 无卡。分类兜底规则修正后该输入判 react → 【构造拍】（
+  `node scripts/check-router.mjs pro "凯尔绕回了…"` 已验证）。**服务重启后下一拍即可见**。
+- ⚠️ **旁路尾注 trace 口径**：旧 side 事件记录原始 systemPrompt，看不到尾注；已改为记录
+  实际发送的 `sys`，下次旁路调用（场记/评审/压缩）的 side 事件末尾可见「信息完备即产出」。
+- ✅ **实弹再确认（2026-08-16 22:11+ UTC / 06:11+ 北京；最新会话拍次）**：trace 后段
+  `kind:"prompt"` 事件 `#1842`【构造拍】、`#1910`【深度拍】、`#1947`【深度拍】均含
+  `# 演出姿态` 弱人格 + 模式卡——长剧情推进判 react（§8.1 兜底生效），复杂度命中给深度拍。
+  至此「弱人格 + 每拍模式卡 + 分类兜底」在真实会话全程可观测，P5 实弹矩阵核心链路通过。
