@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { after, before, test } from "node:test";
 
 import {
 	appendLorebookFileEntry,
@@ -18,7 +17,66 @@ import {
 	searchEntries,
 } from "../src/lorebook.ts";
 
-const bookPath = fileURLToPath(new URL("../assets/lorebooks/Mistvale.json", import.meta.url));
+/**
+ * 测试世界书 fixture（ST 对象 entries 格式）。
+ * 内联自包含：不再依赖 `assets/lorebooks/Mistvale.json`（该目录被 .gitignore 整段忽略，
+ * 干净检出必然缺失 → 10 例 ENOENT 挂测，CI 门禁恒红）。条目与断言按原 fixture 语义设计：
+ * 4 条全 enabled、无 constant；gloomhound 可检索排名第一；mistvale 以 key "wood" 被 "woods" 触发。
+ */
+const MISTVALE_JSON = {
+	name: "Mistvale",
+	entries: {
+		"0": {
+			uid: 0,
+			key: ["gloomhound"],
+			keysecondary: [],
+			comment: "gloomhound",
+			content: "The Gloomhound is a shadow beast that hunts by night, its curse spreads darkness over the forest.",
+			disable: false,
+			order: 10,
+		},
+		"1": {
+			uid: 1,
+			key: ["wood", "mistvale"],
+			keysecondary: [],
+			comment: "mistvale",
+			content: "The vale of Mistvale lies beyond the woods, where the trees grow thick and the mist never lifts.",
+			disable: false,
+			order: 20,
+		},
+		"2": {
+			uid: 2,
+			key: ["elden"],
+			keysecondary: [],
+			comment: "elden",
+			content: "Elden folk keep to the high passes and trade in rare stones.",
+			disable: false,
+			order: 30,
+		},
+		"3": {
+			uid: 3,
+			key: ["runes"],
+			keysecondary: [],
+			comment: "runes",
+			content: "Runes carved by the ancients hum with old magic.",
+			disable: false,
+			order: 40,
+		},
+	},
+};
+
+let fixtureDir = "";
+let bookPath = "";
+
+before(() => {
+	fixtureDir = mkdtempSync(join(tmpdir(), "liyuan-lore-fixture-"));
+	bookPath = join(fixtureDir, "Mistvale.json");
+	writeFileSync(bookPath, JSON.stringify(MISTVALE_JSON, null, "\t"), "utf8");
+});
+
+after(() => {
+	rmSync(fixtureDir, { recursive: true, force: true });
+});
 
 test("ST 世界书格式加载（key/disable/order）", () => {
 	const entries = loadLorebookFile(bookPath);

@@ -29,7 +29,7 @@ npm run pack:release  # 出发布包（scripts/pack-release.ps1，输出到仓�
 npm run pack:release:windows|linux|macos   # 单平台发布包
 ```
 
-- 测试：`npm test`（`node --test test/*.test.ts`）**现在会跑真实测试**——`test/` 下约 90 个文件。本地实测 755 过 / 11 挂：`test/lorebook.test.ts` 的 10 个用例依赖 gitignore 的 fixture `assets/lorebooks/Mistvale.json`（本机缺失 → ENOENT）；`test/assistant-gateway.test.ts` 的「globalThis 槽」1 个用例与实现不符。**别把 npm test 当绿灯**，改完仍用手动起服务验证。
+- 测试：`npm test`（`node --test test/*.test.ts`）**现在会跑真实测试**——`test/` 下 90+ 个文件。本地实测 **929 过 / 0 挂**（2026-08-16 修复后）：此前 11 挂 = `test/lorebook.test.ts` 10 例依赖 gitignore 的 fixture `assets/lorebooks/Mistvale.json`（干净检出必然 ENOENT），已改为测试内联自包含 fixture；`test/assistant-gateway.test.ts` 的「globalThis 槽」1 例槽形状与 P3 注册表不符，已对齐。`npm test` 现可作为绿灯；改动后仍建议手动起服务验证（`PORT=7621`）。
 - Web 冒烟：`node scripts/smoke-web.mjs`（无 LLM，CI 用）；`scripts/drive-*.mjs` 是各功能的手动驱动/冒烟脚本。
 - CI：`.github/workflows/ci.yml`——`npm test` 跑 ubuntu/windows/macos（node 22）；`smoke-web` 跑 ubuntu/macos；`start.sh`/`start.command` 在 macos 校验可执行与 LF。`web/` 是独立 package（有自己的 `web/package-lock.json`），CI 里 `npm --prefix web ci` 单独装前端依赖。
 - `TESTING.md` 是内测说明（反馈模板、已知边界）。

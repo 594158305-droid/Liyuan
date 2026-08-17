@@ -162,6 +162,38 @@ export class ScriptRuntimes {
 	}
 
 	/**
+	 * G3：按名调用某脚本内 registerScriptAction 注册的动作函数（带参）。
+	 * 未运行 / 未 ready / 桥未就绪的脚本静默忽略（无动作表也无回调，安全）。
+	 * 面板按钮（ScriptMeta.buttons 带 action）与程序化触发共用此入口。
+	 */
+	invokeAction(scriptId: string, name: string, args: unknown[]): void {
+		const entry = this.runtimes.get(scriptId);
+		if (!entry || !entry.ready) return;
+		const msg: HostMessage = { kind: "action", name, args };
+		entry.iframe.contentWindow?.postMessage(msg, "*");
+	}
+
+	/**
+	 * G3：匹配名称触发动作。名字匹配规则：完全匹配脚本 id/name，或 `<id>:<action>`；
+	 * 命中的脚本按 action（缺省 name 的按钮用按钮名）调用。返回命中数（未命中返回 0）。
+	 * 供面板/未来命令入口遍历调用（脚本名可重复，故遍历而非单点）。
+	 */
+	invokeActionByScriptMatch(scriptRef: string, action: string, args: unknown[]): number {
+		const ref = String(scriptRef ?? "");
+		let hits = 0;
+		for (const [id, entry] of this.runtimes) {
+			if (!entry.ready) continue;
+			const meta = entry.meta;
+			const idMatch = id === ref;
+			const nameMatch = meta && (meta.name === ref || `${meta.name}:${action}` === ref);
+			if (!idMatch && !nameMatch) continue;
+			this.invokeAction(id, action, args);
+			hits++;
+		}
+		return hits;
+	}
+
+	/**
 	 * 向全部就绪 iframe 推送最新上下文快照（{kind:"context"}）。
 	 * attachContextProvider 未注册（F1 未接）时返回 null 跳过推送——不炸。
 	 * M3b 在 hello/message 帧、ext_event 帧（先推 context）与脚本 ready 时调用。

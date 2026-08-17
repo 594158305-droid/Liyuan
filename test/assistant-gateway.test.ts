@@ -33,11 +33,17 @@ test("delegate 深度与 runner 调用", async () => {
 });
 
 test("globalThis 槽：模拟 jiti/ESM 双实例仍共享 runner", async () => {
-	// 直接写 global 槽再经 API 读，验证不依赖 module-level let
+	// 直接写 global 槽再经 API 读，验证不依赖 module-level let。
+	// 槽形状 = P3 多 agent 注册表：{ runners: Record<name, runner|null>, delegateDepth }，
+	// 内置助手别名注册在 "assistant" 键（registerAssistantRunner → registerAgentRunner("assistant")）。
 	const KEY = "__liyuanAssistantGateway__";
-	const g = globalThis as typeof globalThis & { [KEY]?: { runner: unknown; delegateDepth: number } };
+	const g = globalThis as typeof globalThis & {
+		[KEY]?: { runners: Record<string, unknown>; delegateDepth: number };
+	};
 	g[KEY] = {
-		runner: async () => ({ ok: true, summary: "from-global", media: [], panelsWritten: [] }),
+		runners: {
+			assistant: async () => ({ ok: true, summary: "from-global", media: [], panelsWritten: [] }),
+		},
 		delegateDepth: 0,
 	};
 	assert.equal(hasAssistantRunner(), true);

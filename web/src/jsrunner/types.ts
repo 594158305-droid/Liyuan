@@ -29,8 +29,8 @@ export interface ScriptMeta {
 	content?: string;
 	/** 可选的说明文字 */
 	info?: string;
-	/** 脚本自定义按钮（name 显示名 + visible 是否可见） */
-	buttons?: Array<{ name: string; visible: boolean }>;
+	/** 脚本自定义按钮（name 显示名 + visible 是否可见 + 可选 action：点击调用的脚本动作名，缺省 = name） */
+	buttons?: Array<{ name: string; visible: boolean; action?: string }>;
 }
 
 /**
@@ -147,7 +147,12 @@ export type HostMessage =
 	| { kind: "reload" }
 	| { kind: "context"; snapshot: ContextSnapshot }
 	| { kind: "theme"; tokens: Record<string, string> }
-	| { kind: "storage-snapshot"; data: Record<string, string> };
+	| { kind: "storage-snapshot"; data: Record<string, string> }
+	/**
+	 * 脚本动作触发（G3）：宿主按名调用脚本内 `registerScriptAction` 注册的函数（带参）。
+	 * 与 event 事件（广播语义）不同，action 是按名定向调用唯一函数，args 直接作为函数实参。
+	 */
+	| { kind: "action"; name: string; args: unknown[] };
 
 /**
  * 宿主侧 invoke / log / event 分发器（M3b 注册到 runtime）。

@@ -180,6 +180,8 @@ function normalizeScriptMeta(raw: unknown): ScriptMeta | null {
 			.map((b) => ({
 				name: typeof b.name === "string" ? b.name : "",
 				visible: b.visible !== false,
+				// G3：可选 action（点击触发的脚本动作名，缺省用 name）；非字符串忽略
+				...(typeof b.action === "string" && b.action.trim() ? { action: b.action } : {}),
 			}))
 			.filter((b) => b.name);
 		if (list.length) buttons = list;

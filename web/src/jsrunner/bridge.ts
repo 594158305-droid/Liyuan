@@ -224,6 +224,29 @@ export const BRIDGE_JS = `(function () {
 		for (const cb of cbs) safeCall(cb, args || []);
 	}
 
+	// ---------- G3：脚本动作触发（按名调函数，带参；与 event 广播语义不同） ----------
+	// 命令式脚本（如 shujuku_index 的 args[N] 带参调用）在 ST 里由按钮/斜杠命令触发函数。
+	// 本移植：脚本经 registerScriptAction(name, fn) 注册动作表；宿主经 {kind:"action"} 帧
+	// 按名调用 fn(...args)。未注册的动作静默忽略（记日志不炸）。
+	const actions = new Map();
+	function registerScriptAction(name, fn) {
+		if (typeof name !== "string" || !name.trim() || typeof fn !== "function") {
+			post({ kind: "log", level: "warn", args: ["registerScriptAction 参数非法（需要 name + function）"] });
+			return;
+		}
+		actions.set(name.trim(), fn);
+	}
+	function dispatchAction(name, args) {
+		if (typeof name !== "string") return;
+		const fn = actions.get(name);
+		if (!fn) {
+			post({ kind: "log", level: "warn", args: ["脚本动作未注册: " + name] });
+			return;
+		}
+		safeCall(fn, args || []);
+	}
+	window.registerScriptAction = registerScriptAction;
+
 	// ---------- 顶层全局事件 API（jsrunner-port.md §4.2 声明；ST 生态脚本顶层调用） ----------
 	window.eventOn = eventOn;
 	window.eventOnce = eventOnce;
@@ -268,6 +291,11 @@ export const BRIDGE_JS = `(function () {
 		WORLD_INFO_ACTIVATED_KEYS: "WORLD_INFO_ACTIVATED_KEYS",
 		WORLD_STATE_CHANGED: "WORLD_STATE_CHANGED",
 	};
+
+	// G6：ST 脚本用全局 tavern_events 常量表（事件名 → 名），守卫 typeof tavern_events !== 'undefined'。
+	// 挂全局对象，事件名与 server/script-events.ts 映射表对齐（CHAT_CHANGED/GENERATION_*/MESSAGE_* 等）。
+	// TavernHelper.events 别名在 Proxy 定义后统一挂（此处 window.TavernHelper 尚为 undefined）。
+	window.tavern_events = EVENT_TYPES;
 
 	// 活事件总线：复用本地 listeners 注册表（与 TavernHelper.eventOn 同一套注册表——同一 iframe
 	// 内两种 API 订阅互见，避免 ST 脚本与 JS-Runner 脚本各挂一份回调）。
@@ -344,17 +372,25 @@ export const BRIDGE_JS = `(function () {
 	// ---------- TavernHelper Proxy ----------
 	// 已知方法返回真实本地实现；其余方法名一律走 invoke（宿主 onInvoke，返回 Promise）；
 	// 数据型属性（events/settings/state）与 Symbol / then 读取返回 undefined，不炸。
+	// G7：Proxy 加 set trap——ST 脚本常覆写 TavernHelper.generate（monkey-patch 钩子，如
+	// shujuku_index 的剧情规划/去重锁）。无 set trap 时覆写值存进 target 但 get 恒返回 invoke
+	// 包装 → 覆写静默失效。这里用 overrides 表：set 存覆写，get 优先返回覆写值。
 	const DATA_PROPS = { events: true, settings: true, state: true };
+	const overrides = {};
 	const TavernHelper = new Proxy(
 		{},
 		{
 			get(target, method) {
 				if (typeof method !== "string") return undefined;
+				// G7：优先返回脚本覆写的值（monkey-patch 生效）
+				if (Object.prototype.hasOwnProperty.call(overrides, method)) return overrides[method];
 				if (method === "getContext") return getContext;
 				if (method === "eventOn") return eventOn;
 				if (method === "eventOnce") return eventOnce;
 				if (method === "eventEmit") return eventEmit;
 				if (method === "eventOff") return eventOff;
+				// G3：脚本动作注册（按名调函数，带参）
+				if (method === "registerScriptAction") return registerScriptAction;
 				if (method === "SillyTavern") return window.SillyTavern; // G1：状态栏 gn() 等读 TavernHelper?.SillyTavern 兜底
 				if (method === "then") return undefined; // 防被当 thenable
 				if (DATA_PROPS[method]) return undefined;
@@ -362,10 +398,20 @@ export const BRIDGE_JS = `(function () {
 					return invoke(method, Array.prototype.slice.call(arguments));
 				};
 			},
+			set(target, method, value) {
+				if (typeof method !== "string") return true;
+				// G7：显式记录覆写（monkey-patch）。无名方法/函数覆写一律记录；readonly 数据属性
+				// （events/settings/state）与 then 忽略，避免破坏桥自身语义。
+				if (DATA_PROPS[method] || method === "then") return true;
+				overrides[method] = value;
+				return true;
+			},
 		},
 	);
 	window.TavernHelper = TavernHelper;
 	window.TavernHelper.getContext = getContext;
+	window.TavernHelper.registerScriptAction = registerScriptAction; // G3 别名（与 Proxy get 一致）
+	window.TavernHelper.events = EVENT_TYPES; // G6 别名：TavernHelper.events 常量表
 
 	// ---------- toastr 桩（R2-④：ST 写法落宿主 toast；success 归入 info） ----------
 	const toastrNotify = (level, msg) => invoke("notify", [level, String(msg)]);
@@ -412,6 +458,10 @@ export const BRIDGE_JS = `(function () {
 			}
 			case "reload":
 				// 宿主重建 iframe 即完成重载，本帧忽略
+				break;
+			case "action":
+				// G3：宿主按名调用脚本动作（带参）
+				dispatchAction(data.name, data.args || []);
 				break;
 			case "theme": {
 				// 宿主主题 token → 自身 CSS 变量（脚本 var(--ly-surface) 等引用）

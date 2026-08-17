@@ -138,27 +138,28 @@
 
 ### D. 已知缺口 / 断链（来自 jsrunner 与生图设计）
 
-**jsrunner-port.md §5 G1–G12 缺口全表**（审计对象：ST 6 个顶层脚本）：
-- G1（高）：`window.SillyTavern` 全局未注入——shujuku_index 196 处、状态栏V2.67 45 处走 fallback，extensionSettings/saveSettings/getRequestHeaders/powerUserSettings 全读空。补法：bridge 注入白名单桩
-- G2（高）：`generateRaw` 参数子集——`ordered_prompts`（system 指令）与 `custom_api`（指定模型通道）被丢弃，天赋树/立绘/大采访指令上下文丢失。补法：pickSamplingParams 扩展
-- G3（高）：脚本带参触发通道（args）未实现——命令式脚本无法被调用（shujuku_index 的 `args[N]` 22 处）。补法：运行时「触发脚本函数(args)」invoke 通道 + 面板命令入口
-- G4（高）：ST 专属 DOM（parent.document）——输入栏折叠直接 return 全失效；状态栏渲染到隐藏 iframe 无意义。**无通用补法**：需脚本改造走宿主面板/卡片通道
-- G5（中–高）：getContext() 字段白名单不全（chatId/groupId/extensionSettings/powerUserSettings/chat_metadata 恒 {}）
-- G6（中）：tavern_events 常量表未注入——守卫使监听静默跳过（注：已部分修复，§4）
-- G7（中）：TavernHelper.generate monkey-patch 覆写失效——Proxy 无 set trap，「剧情规划/去重锁」钩子静默不生效
-- G8（中）：getCharData('current') 参数语义 + 返回字段过窄（无 avatar/tags/creator）
-- G9（低–中）：window.power_user / characters / this_chid 未注入
+**jsrunner-port.md §5 G1–G12 缺口全表**（审计对象：ST 6 个顶层脚本；2026-08-16 复核现状标注）：
+- G1（高）：`window.SillyTavern` 全局未注入——shujuku_index 196 处、状态栏V2.67 45 处走 fallback。**已补**：bridge 惰性扁平快照桩（getContext/eventSource/eventTypes/saveSettingsDebounced/updateChatMetadata 等），extensionSettings 面落 context.ts
+- G2（高）：`generateRaw` 参数子集——`ordered_prompts`（system 指令）与 `custom_api`（指定模型通道）被丢弃。**已补**：implGenerateRaw + prompts.ts 解析（ordered_prompts 全槽位、custom_api 前端直连）
+- G3（高）：脚本带参触发通道（args）未实现——命令式脚本无法被调用。**已补**（2026-08-16）：registerScriptAction + `{kind:"action"}` 帧 + scriptRuntimes.invokeAction + 面板按钮 action 字段
+- G4（高）：ST 专属 DOM（parent.document）——输入栏折叠直接 return 全失效；状态栏渲染到隐藏 iframe 无意义。**无通用补法**：需脚本改造走宿主面板/卡片通道（唯一剩余高影响缺口）
+- G5（中–高）：getContext() 字段白名单不全——**部分已补**：currentChatId/chatId、characterId、personaDescription、extensionSettings（可变+回传落盘）、chat_metadata（可变+落盘）、characters；**仍缺** groupId/powerUserSettings/getRequestHeaders
+- G6（中）：tavern_events 常量表未注入——**已补**（2026-08-16）：window.tavern_events + TavernHelper.events 常量表，守卫放行
+- G7（中）：TavernHelper.generate monkey-patch 覆写失效——**已补**（2026-08-16）：Proxy 加 set trap（overrides 表，get 优先返回覆写）
+- G8（中）：getCharData('current') 参数语义 + 返回字段过窄——Liyuan 单卡语义下 'current'=当前卡（忽略参数），无 avatar/tags/creator 对等物，保持现状
+- G9（低–中）：window.power_user / characters / this_chid 未注入（脚本可退到 getContext 面）
 - G10（低）：toastr 桩仅 console 日志（注：已改发宿主 toast，§4）
 - G11（无）：setMessage/deleteMessage 两脚本均未实际调用（已实现但无真实使用点）
 - G12（无）：YAML./z. 零使用
+
 
 **DESIGN-jsrunner-ledger.md §11 前置依赖与已知断链**（6 项全标「断」）：
 1. `JsRunnerPanel` 未挂载 → P0 挂载到 PowersPanel（注：已挂载，见 DESIGN-jsrunner-ledger-ui.md 与 `web/src/jsrunner/ui/`）
 2. extdata 1MB 双重上限 → P0 拆文件存储 §3.3
 3. `setScriptMeta` 未接线 → getScriptName 恒空，P2 接线
 4. `generate/generateRaw` 无 handler → 面板内 LLM 生成挂起（独立项 §5.10）
-5. `mapPiEventsToSt` 未接线 → ST 风格服务端事件（本设计不依赖：前端投影；另行处理——注：至今未接线，实际一直是前端投影 `web/src/jsrunner/events.ts:28-46`）
-6. `POST /api/script/message` 无路由 → setMessage 404（不影响账本面板，标注已知限制——**至今未补**：`web/src/jsrunner/helper.ts:311,320` 仍在调用）
+5. `mapPiEventsToSt` 未接线 → ST 风格服务端事件（本设计不依赖：前端投影；另行处理——注：至今未接线，实际一直是前端投影 `web/src/jsrunner/events.ts:28-46`）——**2026-08-16 已接线**：StageEngine 事件桥发射 GENERATION_STARTED/MESSAGE_SENT，前端投影承接其余（见 §4 对应行）
+6. `POST /api/script/message` 无路由 → setMessage 404（不影响账本面板，标注已知限制——**至今未补**：`web/src/jsrunner/helper.ts:311,320` 仍在调用）——**2026-08-16 已补路由**（rest.ts，调 host.scriptEditMessage），不再 404（见 §4 对应行）
 
 **DESIGN-jsrunner-ledger-ui.md**：§5 错误矩阵「删除文件清理失败 → 记日志不阻塞删除，孤儿文件可手动清理（V2 提供清理入口？TODO）」
 
@@ -213,8 +214,8 @@
 
 | 位置 | 问题 | 代码现状 |
 |---|---|---|
-| docs/jsrunner-port.md 全文 | 声称服务端事件桥已接线：`server/main.ts` 每事件调 mapPiEventsToSt → 广播 `ext_event` 帧 | **未接线**：`server/` 下 `mapPiEventsToSt` 零调用、`ext_event` 仅 `wire.ts:308` 类型与 `script-events.ts:5` 注释；实际改前端投影 `web/src/jsrunner/events.ts:28-46`（state→WORLD_STATE_CHANGED、message 非 user→MESSAGE_RECEIVED、agent end→GENERATION_ENDED） |
-| docs/jsrunner-port.md §3.2/§4.1 | 声称 `setMessage/deleteMessage` 走 `POST /api/script/message` | **路由不存在**：`server/rest.ts` 无此 case；`web/src/jsrunner/helper.ts:311,320` 仍调用（会 404）。DESIGN-jsrunner-ledger.md §11 断链表如实标注此断链 |
+| docs/jsrunner-port.md 全文 | 声称服务端事件桥已接线：`server/main.ts` 每事件调 mapPiEventsToSt → 广播 `ext_event` 帧 | **2026-08-16 已部分接线**：`mapPiEventsToSt` 从 StageEngine 事件桥发射 `ext_event`（GENERATION_STARTED/MESSAGE_SENT，main.ts 两处广播点）；WORLD_STATE_CHANGED/GENERATION_ENDED/MESSAGE_RECEIVED 仍由前端投影 `web/src/jsrunner/events.ts:28-46` 承接（state/message/agent 帧），两源无重叠 |
+| docs/jsrunner-port.md §3.2/§4.1 | 声称 `setMessage/deleteMessage` 走 `POST /api/script/message` | **2026-08-16 已补路由**：`server/rest.ts` 新增 `POST /api/script/message`（调 `host.scriptEditMessage`，流式中 409）；`web/src/jsrunner/helper.ts:311,320` 调用不再 404；DESIGN-jsrunner-ledger.md §11 断链表第 6 项已同步销案 |
 | docs/jsrunner-port.md §5 | G 清单部分项已修复但未更新 | G2（custom_api 前端直连 `helper.ts:171`）、G6（tavern_events 常量表）、G10（toastr→notify）已修复 |
 | docs/DRAFT-prompt-rp-agent.md 头注 | 「状态：待用户逐句过目，未落进 `src/stage/assemble.ts`」 | **已落地**：`src/stage/assemble.ts:349` 起即「# 怎么演这一拍」改写版（落地时经改写，非逐字）；配套① `src/stage/tools.ts:158-164` draft_write 描述已改（「只用于这一拍没有戏的时候」）；配套② harness 门禁已实现（rehearsalGuard 默认开） |
 | README.md:129 | 「搜索后端可插拔（…预留 tavily）」「tavily 填 key 即可，预留中」 | **tavily 已实现**：`server/mcp/websearch-server.mjs:7-31`（LIYUAN_WEBSEARCH_TAVILY_API_KEY 等） |

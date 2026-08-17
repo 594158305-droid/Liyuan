@@ -4,9 +4,9 @@
 > 目标：SillyTavern JS-Slash-Runner（TavernHelper）→ Liyuan 的能力等价移植，**旧脚本零改动**运行。
 >
 > ⚠ **部分内容与当前代码不符（2026-08-10 核对，详见 docs/README.md §4）**：
-> ① §3.2/§6 声称的服务端事件桥未接线——`server/script-events.ts` 的 `mapPiEventsToSt` 在 `server/main.ts` 零调用、`ext_event` 帧零广播，实际改前端投影（`web/src/jsrunner/events.ts:28-46`）；
-> ② `POST /api/script/message` 路由不存在（`web/src/jsrunner/helper.ts:311,320` 仍调用会 404，DESIGN-jsrunner-ledger.md §11 断链表第 6 项同此）；
-> ③ §5 缺口表中 G2/G6/G10 已修复但未更新。本文档保留为 M5 审计基线，缺口全表仍有效（G1–G12 逐条见 §5）。
+> ① §3.2/§6 声称的服务端事件桥——**2026-08-16 已部分接线**：`server/main.ts` 经 `mapPiEventsToSt` 从 StageEngine 事件桥发射 `ext_event` 帧（GENERATION_STARTED / MESSAGE_SENT）；WORLD_STATE_CHANGED / GENERATION_ENDED / MESSAGE_RECEIVED 仍由前端投影（`web/src/jsrunner/events.ts:28-46`）承接，两源无重叠不双发；
+> ② `POST /api/script/message` 路由——**2026-08-16 已补**（`server/rest.ts`，调 `host.scriptEditMessage`），setMessage/deleteMessage 不再 404（DESIGN-jsrunner-ledger.md §11 断链表第 6 项同此销案）；
+> ③ §5 缺口表大部分已由代码演进补齐（2026-08-16 复核）：G1（SillyTavern 桩）/G2（generateRaw ordered_prompts+custom_api）早已实现未标注；G6（tavern_events 常量表）/G7（Proxy set trap）/G3（带参动作触发通道）**本次落地**。仍未补的非阻塞项：G4（ST 专属 DOM，无通用补法）、G8 参数语义（Liyuan 单卡语义下 'current'=当前卡）、getRequestHeaders 空桩（无 ST 对等物）。各缺口逐条现状见 §5。本文档保留为 M5 审计基线，缺口全表仍有效。
 
 ---
 
@@ -162,14 +162,14 @@ setVar(key, value, scope)
 
 | # | 缺口 | 影响脚本（API 使用点） | 严重度 | 影响说明 | 可行补法（一句话） |
 |---|---|---|---|---|---|
-| G1 | `window.SillyTavern` 全局未注入 | shujuku_index（`SillyTavern` 196 处，其中 `window.SillyTavern.getContext()` 25 处）、状态栏V2.67（`SillyTavern` 45 处） | **高** | 两个大脚本的 getContext 适配层走 fallback 链，`extensionSettings/saveSettings/saveSettingsDebounced/getRequestHeaders/powerUserSettings` 全部读空 | bridge 注入 `window.SillyTavern = { getContext: () => getContext() }` 白名单桩 |
-| G2 | `generateRaw` 参数子集 | 状态栏V2.67（5 处 `{should_silence, user_input, ordered_prompts:[{role:'system',content},'world_info_before','persona_description',...], custom_api}`） | **高** | `ordered_prompts`（system 指令）与 `custom_api`（指定模型通道）被丢弃 → 天赋树/立绘/大采访等生成的指令上下文丢失、语义偏差 | `pickSamplingParams` 扩展：`ordered_prompts` → 拼 `messages` + `systemPrompt`；`custom_api` 映射模型选择 |
-| G3 | 脚本带参触发通道（`args`）未实现 | shujuku_index（`args[N]` 22 处，`extractTag(args)` 解析 `[模块]` 前缀） | **高** | ST 里脚本由斜杠命令/按钮带 `(args, text)` 触发；本移植脚本仅在 iframe 载入时跑一次，**无带参触发入口** → 命令式脚本无法被调用 | 运行时增加「触发脚本函数(args)」invoke 通道 + 面板命令入口 |
+| G1 | `window.SillyTavern` 全局未注入 | shujuku_index（`SillyTavern` 196 处，其中 `window.SillyTavern.getContext()` 25 处）、状态栏V2.67（`SillyTavern` 45 处） | **高** | **✅ 已补**（2026-08-16 前已实现惰性扁平快照桩：`bridge.ts` Object.defineProperty getter 每次访问重建 `{...getContext(), StExtras, getContext}`，`SillyTavern.getContext()` 可用；含 eventSource/eventTypes/saveSettingsDebounced/updateChatMetadata/stopGeneration 等）；extensionSettings 持久化面在 context.ts（scope=global key=ext_settings）——getRequestHeaders 仍 `{}` 空桩（Liyuan 无 ST 鉴权头对等物，留降级） |
+| G2 | `generateRaw` 参数子集 | 状态栏V2.67（5 处 `{should_silence, user_input, ordered_prompts:[{role:'system',content},'world_info_before','persona_description',...], custom_api}`） | **高** | **✅ 已补**（2026-08-16 前已实现）：`helper.ts` `implGenerateRaw` 支持 `ordered_prompts`（经 `prompts.ts` parseOrderedPrompts 解析：system role → systemPrompt、'user_input' 哨兵注入、'chat_history' 从快照取、'world_info_before/persona_description' 等无投影占位符跳过）+ `custom_api`（有 apiurl 则前端 fetch 直连外部端点，header 带 Bearer；否则回落 ws ext_generate）；pickSamplingParams 透传 temperature/maxTokens/reasoning/systemPrompt |
+| G3 | 脚本带参触发通道（`args`）未实现 | shujuku_index（`args[N]` 22 处，`extractTag(args)` 解析 `[模块]` 前缀） | **高** | **✅ 已补**（2026-08-16）：新增动作触发通道——桥内 `window.registerScriptAction(name, fn)` + `TavernHelper.registerScriptAction` 注册带参函数；宿主 `scriptRuntimes.invokeAction(scriptId, name, args)`（含 `invokeActionByScriptMatch` 按脚本名/`<id>:<action>` 匹配）经 `{kind:"action"}` 帧按名调用 fn(...args)；面板按钮 `ScriptMeta.buttons` 支持 `action` 字段（缺省用按钮名），点击走动作通道 + 保留 LEDGER_BUTTON_CLICKED 事件兼容。命令式脚本需显式注册动作函数（脚本本体仍载入即执行一次，函数注册后由宿主按名触发） |
 | G4 | ST 专属 DOM（`parent.document`） | 输入栏折叠（`#send_textarea/#sheld/send_form` 等）、状态栏V2.67（`document.getElementById` 377 处） | **高** | 输入栏折叠：找不到 DOM 直接 return，功能全失效；状态栏：渲染到隐藏 iframe 无意义（UI 类脚本主功能失效） | 无通用补法：Liyuan 无 ST DOM 等价物，需脚本改造（UI 改走宿主面板/卡片通道） |
-| G5 | `getContext()` 字段白名单不全 | 状态栏V2.67（`chatId`、`chat_metadata?.file_name`）、shujuku_index（`extensionSettings/saveSettings/getRequestHeaders`） | 中–高 | 快照缺 `chatId/groupId/extensionSettings/powerUserSettings`，`chat_metadata` 恒 `{}` → 聊天识别、插件设置、带鉴权 HTTP 请求能力缺失（脚本有 fallback，部分降级） | 快照补 `chatId/groupId` 轻量字段；`extensionSettings` 给内存桩 |
-| G6 | `tavern_events` 常量表未注入 | 状态栏V2.67（`tavern_events` 6 处，其中 `eventOn(tavern_events.CHAT_CHANGED, ...)` 带 `typeof tavern_events !== 'undefined'` 守卫） | 中 | 守卫使监听**静默跳过**，CHAT_CHANGED 重建逻辑失效（事件桥实际能发 `"CHAT_CHANGED"`，只是脚本拿不到常量） | bridge 注入 `window.tavern_events = { CHAT_CHANGED:'CHAT_CHANGED', GENERATION_STARTED:'...', ... }`（名与 §6 映射一致） |
-| G7 | `TavernHelper.generate` 覆写（monkey-patch）失效 | shujuku_index（`window.TavernHelper.generate = async fn(...)` 钩子 + `original_TavernHelper_generate_ACU`） | 中 | Proxy 无 `set` trap：覆写值存进 target 但 `get` 恒返回 invoke 包装 → 「剧情规划/去重锁」钩子静默不生效（generate 本身仍可用） | Proxy 增加 `set` trap 记录覆写，`get` 优先返回覆写值 |
-| G8 | `getCharData('current')` 参数语义 + 返回字段过窄 | shujuku_index（`TavernHelper.getCharData('current')` 4 处 + fallback 链） | 中 | ST `getCharData('current'/'recent')` 按参数取角色；现实现忽略参数且只回 `{name, description}`（无 avatar/tags/creator 等） | impl 识别 `'current'/'recent'` 参数；字段从快照 characters + /api/card 扩展 |
+| G5 | `getContext()` 字段白名单不全 | 状态栏V2.67（`chatId`、`chat_metadata?.file_name`）、shujuku_index（`extensionSettings/saveSettings/getRequestHeaders`） | 中–高 | **部分已补**：快照已含 `currentChatId`/`chatId`（sessionId）、`characterId`（卡路径）、`personaDescription`、`extensionSettings`（可变深拷贝 + saveSettingsDebounced 回传落盘）、`chat_metadata`（可变副本 + updateChatMetadata 落盘）、`characters`（当前卡）；**仍缺** `groupId`（Liyuan 无组）、`powerUserSettings`、`getRequestHeaders` 实数据（返回 `{}` 降级）——Liyuan 无 ST 鉴权头对等物 |
+| G6 | `tavern_events` 常量表未注入 | 状态栏V2.67（`tavern_events` 6 处，其中 `eventOn(tavern_events.CHAT_CHANGED, ...)` 带 `typeof tavern_events !== 'undefined'` 守卫） | 中 | **✅ 已补**（2026-08-16）：桥内 `window.tavern_events = EVENT_TYPES`（事件名↔名常量表，含 CHAT_CHANGED/GENERATION_STARTED/GENERATION_ENDED/MESSAGE_SENT/MESSAGE_RECEIVED 等，与 server/script-events.ts 映射对齐）；`TavernHelper.events` 别名同挂。`typeof tavern_events !== 'undefined'` 守卫放行，CHAT_CHANGED 等重建逻辑可生效 |
+| G7 | `TavernHelper.generate` 覆写（monkey-patch）失效 | shujuku_index（`window.TavernHelper.generate = async fn(...)` 钩子 + `original_TavernHelper_generate_ACU`） | 中 | **✅ 已补**（2026-08-16）：Proxy 增加 `set` trap——覆写值存入 `overrides` 表，`get` 优先返回覆写值（monkey-patch 生效）；readonly 数据属性（events/settings/state）与 then 覆写忽略以保护桥自身语义 |
+| G8 | `getCharData('current')` 参数语义 + 返回字段过窄 | shujuku_index（`TavernHelper.getCharData('current')` 4 处 + fallback 链） | 中 | **部分已补**：`implGetCharData` 现忽略 'current'/'recent' 参数（落在缺省行为：GET /api/card 当前卡 → `{name, description}`），Liyuan 单会话单卡语义下 'current' 即当前卡；仍无 avatar/tags/creator 字段（/api/card 无 ST extensions 对等物，脚本 fallback 链可退到 getContext 面）。保持现状（当前卡即 'current'） |
 | G9 | `window.power_user` / `window.characters` / `window.this_chid` 未注入 | shujuku_index（`window.power_user.persona_description`、`window.characters[this_chid]` fallback） | 低–中 | 人设描述、角色索引 fallback 落空（脚本有优先级链，可退到 getContext 面） | bridge 注入只读桩：`power_user.persona_description` 从快照 name1/characters 出 |
 | G10 | toastr 桩仅 console 日志 | 状态栏V2.67（`toastr.success/error/warning/info` 24 处）、shujuku_index（3 处） | 低 | 不阻断执行，但用户看不到通知；降级可用 | toastr 桩改为发宿主 toast（复用面板通知通道） |
 | G11 | `setMessage/deleteMessage` | 两脚本均**未实际调用**（shujuku 的 16 处 `setMessage(` 是脚本**本地函数** `function setMessage(store, kind, text)`，非 ST API） | 无 | 已实现但当前无真实使用点；ST 语义为 `setMessage(index, text)` 触发改稿 | —（保持实现；验证脚本用 §9） |
@@ -179,9 +179,7 @@ setVar(key, value, scope)
 > 全局 `getContext/setMessage/eventOn/...(`、`window.TavernHelper`、`YAML.`、`z.`、`$(` 等 40+ 模式），
 > 并对命中位置抽取上下文人工核对（区分脚本本地同名函数与 ST API）。
 
-**高影响缺口汇总（G1–G4）**：G1（SillyTavern 全局缺）与 G4（ST DOM 缺）影响状态栏V2.67 与
-shujuku_index 的**主功能**；G2（generateRaw 参数）影响状态栏V2.67 的 LLM 生成质量；G3（args 触发）
-影响 shujuku_index 的命令式调用模型；G4 另使输入栏折叠整个失效（纯 UI 脚本，非核心功能）。
+**高影响缺口现状（G1–G4）**：G1（SillyTavern 全局）**已补**（惰性扁平快照桩）；G2（generateRaw 参数）**已补**（ordered_prompts/custom_api）；G3（args 触发）**已补**（registerScriptAction + action 通道 + 面板按钮）；G4（ST 专属 DOM）仍缺——影响状态栏V2.67 与 shujuku_index 的 **UI 类主功能**（渲染到隐藏 iframe 无意义、输栏折叠找 DOM 失效），无通用补法，需脚本改造走宿主面板/卡片通道。故剩余高影响缺口仅 G4。
 
 ---
 

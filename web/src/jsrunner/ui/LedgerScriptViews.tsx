@@ -80,7 +80,7 @@ interface LedgerViewProps {
 	draggable?: boolean;
 }
 
-/** 面板头宿主按钮（P4）：读 ScriptMeta.buttons（visible 过滤）渲染，点击 emitToScript LEDGER_BUTTON_CLICKED */
+/** 面板头宿主按钮（P4）：读 ScriptMeta.buttons（visible 过滤）渲染，点击触发脚本动作或广播事件 */
 function LedgerViewButtons({ scriptId }: { scriptId: string }) {
 	const buttons = (scriptRuntimes.getMeta(scriptId)?.buttons ?? []).filter((b) => b.visible);
 	if (buttons.length === 0) return null;
@@ -93,7 +93,14 @@ function LedgerViewButtons({ scriptId }: { scriptId: string }) {
 					onClick={(e) => {
 						// 不冒泡到面板头：头整行可点，否则点按钮会误触收起/展开
 						e.stopPropagation();
+						// G3：脚本若用 registerScriptAction 注册了动作（按钮 action 或按钮名），
+						// 走带参定向调用；若按钮 action 显式声明不明文存在脚本也不炸（静默忽略）。
+						const action =
+							typeof b.action === "string" && b.action.trim() ? b.action : b.name;
+						// 仍广播 LEDGER_BUTTON_CLICKED 事件兼容既有脚本（eventOn 路径），
+						// 动作通道与之不冲突（不同脚本可按自己习惯响应）。
 						scriptRuntimes.emitToScript(scriptId, "LEDGER_BUTTON_CLICKED", [b.name]);
+						scriptRuntimes.invokeAction(scriptId, action, [b.name]);
 					}}
 				>
 					{b.name}

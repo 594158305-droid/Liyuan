@@ -615,8 +615,8 @@ P2 与 P3 可并行；P1 无依赖先做；P0 是全部前置；P4 依赖 P2。
 | extdata 1MB 双重上限 | 断 | 大脚本/数据包无法存储 | P0 拆文件存储（§3.3） |
 | `setScriptMeta` 未接线 | 断 | getScriptName 恒空 | P2 接线 |
 | `generate/generateRaw` 无 handler | 断 | 面板内 LLM 生成挂起 | 独立项（§5.10） |
-| `mapPiEventsToSt` 未接线 | 断 | ST 风格服务端事件 | 本设计不依赖（前端投影）；另行处理 |
-| `POST /api/script/message` 无路由 | 断 | setMessage 404 | 不影响账本面板；标注已知限制 |
+| `mapPiEventsToSt` 未接线 | ✅ 已接（2026-08-16） | ST 风格服务端事件 | StageEngine 事件桥发射 GENERATION_STARTED/MESSAGE_SENT；前端投影承接其余（无重叠） |
+| `POST /api/script/message` 无路由 | ✅ 已补（2026-08-16） | setMessage 404 | rest.ts 新增路由调 host.scriptEditMessage（流式中 409）；helper.ts 调用不再 404 |
 
 ---
 

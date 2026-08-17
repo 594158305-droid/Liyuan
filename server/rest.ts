@@ -965,6 +965,19 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 	// 开发者开关：只认布尔（false 是合法值，不会被空值删除逻辑清掉）
 	next.developerMode = next.developerMode === true;
 	next.chatTrace = next.chatTrace === true;
+	// 统一调试打印（8 起）：只认 { console?: bool, file?: bool }，非法/空值删除（缺省=全开）
+	if (next.debugLog !== undefined) {
+		const dl = next.debugLog as Record<string, unknown> | null;
+		if (!dl || typeof dl !== "object" || Array.isArray(dl)) {
+			delete next.debugLog;
+		} else {
+			const clean: Record<string, unknown> = {};
+			if (dl.console === true || dl.console === false) clean.console = dl.console;
+			if (dl.file === true || dl.file === false) clean.file = dl.file;
+			if (Object.keys(clean).length === 0) delete next.debugLog;
+			else next.debugLog = clean;
+		}
+	}
 	// 语义评审（8/14）：只认 { enabled: bool, gate: major|all }；非法/空值删除（缺省=默认开启）
 	if (next.semanticReview !== undefined) {
 		const sr = next.semanticReview as Record<string, unknown> | null;
@@ -4514,6 +4527,35 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				sendJson(res, 200, { ok: true });
 				return true;
 			}
+			// ---- JS Runner 脚本改稿（setMessage/deleteMessage；断链修复 2026-08-16） ----
+			// 前端 helper.ts 的 setMessage/deleteMessage 此前调用此路由一直 404（路由缺失）。
+			// 语义与 story_edit 一致：op=edit 按 lastRoleIndex 注入 rp-edited-reply（原文保留旧分支），
+			// op=delete 只钉叶到前驱。流式中拒绝（改稿会动分支，与 /reroll 同门槛）。
+			case "POST /api/script/message": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					op?: unknown;
+					lastRoleIndex?: unknown;
+					text?: unknown;
+				};
+				const op = body.op === "edit" || body.op === "delete" ? body.op : null;
+				if (!op) throw new Error("需要 op=edit|delete");
+				const lastRoleIndex =
+					typeof body.lastRoleIndex === "number" && Number.isFinite(body.lastRoleIndex)
+						? Math.floor(body.lastRoleIndex)
+						: Number.NaN;
+				if (!Number.isFinite(lastRoleIndex) || lastRoleIndex < 0) {
+					throw new Error("需要非负整数 lastRoleIndex（从分支末尾倒数第 N 条角色消息，0=最后一条）");
+				}
+				if (op === "edit" && typeof body.text !== "string") throw new Error("op=edit 需要 text");
+				await host.scriptEditMessage({
+					op,
+					lastRoleIndex,
+					...(op === "edit" ? { text: body.text as string } : {}),
+				});
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
 			case "GET /api/draw/providers": {
 				const cfg = loadDrawConfig(host.cwd);
 				// 返回结构与前端 DrawProvidersResponse 契约一致：{ ok, config, providers }
@@ -4989,7 +5031,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			// ---- 插件 A draw-role：D 标签搜索 / 在场检出 / 角色特征解析（常驻只读路由） ----
 			// 常驻注册说明：只读查询无副作用（D 标签库是插件自带数据文件，与插件开关解耦）；
 			// resolve 的 worldState 侧：RestHost 无 worldState getter（仅 applyStatePatch 可写），
-			// 此处传 undefined——currentOutfit 缺省回退 defaultOutfit → 第一套（resolveCharacterTags 语义）。
+			// 此处传 undefined——穿着回退第一套（defaultOutfit 已废弃，2026-08-16 检修）。
 			case "GET /api/draw/tags/search": {
 				const q = (query.get("q") ?? "").trim();
 				if (!q) throw new Error("缺少 q");
@@ -5039,7 +5081,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const names = (query.get("names") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 				if (names.length === 0) throw new Error("缺少 names（逗号分隔）");
 				// worldState：RestHost.worldState()（只读 getter，与 applyStatePatch 同源）；
-				// 旧 host 未实现时可选链兜底 → null（currentOutfit 回退 defaultOutfit）
+				// 旧 host 未实现时可选链兜底 → null（穿着回退第一套，defaultOutfit 已废弃）
 				const ws = host.worldState?.() ?? null;
 				const r = resolveCharacterTags(host.cwd, card, names, ws ? { characters: ws.characters } : undefined);
 				sendJson(res, 200, { characters: r.characters, unknown: r.unknown });
