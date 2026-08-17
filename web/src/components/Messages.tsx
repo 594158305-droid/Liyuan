@@ -817,6 +817,7 @@ export function Bubble({
 	return (
 		<div
 			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${msg.edited ? "msg-edited" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""} ${collapsedUser ? "msg-collapsed" : ""}`}
+			{...(floor !== undefined ? { "data-floor": floor } : {})}
 		>
 			{!stage && (
 				<div className="msg-head">

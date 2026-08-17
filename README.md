@@ -116,7 +116,7 @@ powershell -File scripts/pack-for-linux.ps1
 
 ## 进阶
 
-- **斜杠命令**（Web 输入框直接敲，带补全）：`/state` 账本 · `/lore` 设定检索 · `/import` 导入旧档 · `/store` `/back` `/line` 存档与世界线 · `/rewind` `/branch` 回退与分支 · `/compact` 手动压缩 等；
+- **斜杠命令**（Web 输入框直接敲，带补全）：`/state` 账本 · `/lore` 设定检索 · `/import` 导入旧档 · `/store` `/back` `/line` 存档与世界线 · `/rewind` `/branch` 回退与分支 · `/floor <楼层号>` 跳转指定楼层 · `/compact` 手动压缩 等；
 - **MCP**：分**内置 / 外部**两栏。内置随梨园发布包走（见下条视觉识图）；外部启动时自动扫描 `~/.claude.json`、Cursor 配置、`~/.liyuan/mcp.json`、项目 `.mcp.json` / `.liyuan-mcp.json`。**默认全关**，在「扩展能力 → MCP」按对话开启；开关记为新对话默认；
 - **视觉识图（内置 MCP）**：给无视觉能力的主模型补眼睛——把图片交给任意 OpenAI 兼容的视觉模型分析。在「扩展能力 → MCP → 内置 → 视觉识图 → 编辑」的 `env` 里填 `LIYUAN_VISION_BASE_URL` / `LIYUAN_VISION_API_KEY` / `LIYUAN_VISION_MODEL`（须支持图片输入）即可；
 - **网络搜索（内置 MCP）**：给 agent 补上网——原生 web 搜索（查资料、核实信息），台上 / 助手 / 剧情三面可用。后端默认 **SearXNG**（自托管：无 Key、无限次、中文好、查询不出本机）。「扩展能力 → MCP → 内置 → 网络搜索」开开关即可用；未部署时工具会返回含启动指引的报错。SearXNG 快速部署（Docker，挂载目录里放 `settings.yml`）：

@@ -482,6 +482,7 @@ export default function App() {
 	const anchorElRef = useRef<HTMLDivElement | null>(null);
 	const anchorOffsetRef = useRef(0);
 	const pendingAnchorRef = useRef(false);
+	const pendingFloorRef = useRef<number | null>(null);
 	/** 滚动事件里读最新有效窗口首回合 */
 	const effectiveWindowTopRef = useRef(0);
 	/** 锚定修正抑制：修正 scrollTop 会触发 scroll 事件 → 标记跳过由修正引起的本轮 onScroll，防「修正→平移→修正」振荡 */
@@ -795,8 +796,10 @@ export default function App() {
 							return { ...m, segments: m.timeline as unknown as TurnSegment[] };
 						}),
 					);
-					// 回合窗口：hello 全量帧重置贴底（最新回合在区间内）；消息 append/流式 delta 不重置
-					setWindowTop(0);
+					// 回合窗口：hello 全量帧重置贴底（最新回合在区间内）；消息 append/流式 delta 不重置。
+					// 用底部哨兵代替 0：首次渲染即经 effectiveWindowTop 的 clamp 落在最新段（maxWindowTop），
+					// 随后贴底跟随 effect 收敛 windowTop，避免「先画 #0 再跳到 #30」的两步闪跳。
+					setWindowTop(Number.MAX_SAFE_INTEGER);
 					atBottomRef.current = true;
 					setAtBottom(true);
 					setMsgEdit(null); // 会话对齐后关闭内联编辑
@@ -1240,12 +1243,12 @@ export default function App() {
 	const roundWindowSize = windowN + 2 * windowM;
 	const totalRounds = rounds.length;
 	const maxWindowTop = Math.max(0, totalRounds - roundWindowSize);
-	/** 有效窗口首回合：贴底时强制对齐最新回合（最新回合必在区间内）；否则跟随 windowTop 并 clamp */
+	/** 有效窗口首回合：始终跟随 windowTop 并 clamp，绝不因贴底状态强拽窗口到 maxWindowTop——
+	 *  避免打开/贴底/上翻时窗口被整段跳到最新段（长会话即落在 #30 一带）。贴底跟随由下方 effect 用 windowTop 实现。 */
 	const effectiveWindowTop = useMemo(() => {
 		if (!windowingEnabled) return 0;
-		if (atBottom) return maxWindowTop;
 		return Math.min(windowTop, maxWindowTop);
-	}, [windowingEnabled, atBottom, maxWindowTop, windowTop]);
+	}, [windowingEnabled, maxWindowTop, windowTop]);
 
 	/** 渲染切片：仅渲染窗口区间内的回合（消息总数 ≤ N+2M 或 M=0 时全量退化，行为与现状一致） */
 	const visibleRounds = useMemo(() => {
@@ -1350,10 +1353,12 @@ export default function App() {
 	const onScroll = () => {
 		const el = listRef.current;
 		if (!el) return;
-		// 锚定修正抑制：scrollTop 程序化修正会触发 scroll 事件 → 跳过由修正引起的本轮计算（防「修正→平移→修正」振荡）
+		// 锚定修正抑制：scrollTop 程序化修正会触发 scroll 事件 → 跳过由修正引起的本轮计算（防「修正→平移→修正」振荡）。
+		// 修正未实际改变 scrollTop（被钳位/无位移）时不会触发 scroll 事件，此标志不会自然复位；
+		// 故下一事件若 scrollTop 与修正目标不一致，判为真实用户滚动，照常处理并复位标志（防「跳窗/吃滚动」）。
 		if (scrollAdjustingRef.current) {
 			scrollAdjustingRef.current = false;
-			return;
+			if (Math.abs(el.scrollTop - scrollAdjustTargetRef.current) <= 1) return;
 		}
 		// 滚动只维护贴底状态（窗口化：视口在渲染底部 且 窗口已到全局底部才贴底，翻历史时不误判）；
 		// 窗口切换不在滚动时发生——由 onChatWheel 的「边界 + 持续滚轮 3s」触发。
@@ -1368,7 +1373,10 @@ export default function App() {
 		setAtBottom(near);
 	};
 
-	// 边界滚轮累计计时：滚到已加载内容边界后继续转滚轮（事件间隔 <1.5s 视为连续），累计 3s 触发窗口切换一段
+	// 边界滚轮累计计时：滚到已加载内容边界后继续转滚轮（事件间隔 <1.5s 视为连续），
+	// 累计一小段时间即触发窗口切换一段。阈值从 3s 降到 800ms：之前在底部窗口顶部（=maxWindowTop，如 #28）
+	// 上滚要按住 3s 才分页，观感像「墙/跳格」；缩短后普通回滚快速、平稳地翻进更早内容，锚定修正保证视口不跳。
+	const EDGE_WHEEL_PAGE_MS = 800;
 	const edgeWheelRef = useRef({ lastAt: 0, accum: 0 });
 	const onChatWheel = (e: React.WheelEvent) => {
 		if (!windowingEnabled || totalRounds <= roundWindowSize) return;
@@ -1393,12 +1401,17 @@ export default function App() {
 		if (t.lastAt && now - t.lastAt < 1500) t.accum += now - t.lastAt;
 		else t.accum = 0;
 		t.lastAt = now;
-		if (t.accum < 3000) return;
-		// 累计 3s → 切换一段（主窗口 N 回合）：锚定旧边界容器，渲染后按 offsetTop 差修正 scrollTop，视口内容不跳
+		if (t.accum < EDGE_WHEEL_PAGE_MS) return;
+		// 累计达标 → 切换一段（主窗口 N 回合）：锚定旧边界容器，渲染后按 offsetTop 差修正 scrollTop，视口内容不跳
 		t.lastAt = 0;
 		t.accum = 0;
 		const target = up ? Math.max(0, curTop - windowN) : Math.min(maxTop, curTop + windowN);
 		if (target === curTop) return;
+		if (up) {
+			// 向上分页 = 用户进入更早历史：明确离开贴底，杜绝贴底跟随 effect 在新增回合时把已翻回的窗口再拽到最新段
+			atBottomRef.current = false;
+			setAtBottom(false);
+		}
 		const firstEl = roundElRefs.current.get(curTop);
 		const lastEl = roundElRefs.current.get(curTop + W - 1);
 		anchorElRef.current = target < curTop ? (firstEl ?? lastEl ?? null) : (lastEl ?? firstEl ?? null);
@@ -1415,14 +1428,50 @@ export default function App() {
 		el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 	};
 
-	// 有效窗口首回合同步进 ref（滚动事件里读最新值）
-	useEffect(() => {
-		effectiveWindowTopRef.current = effectiveWindowTop;
-	}, [effectiveWindowTop]);
+	/** /floor N：跳转到指定楼层（纯界面滚动定位，不发剧情消息） */
+	const jumpToFloor = useCallback(
+		(n: number): boolean => {
+			// 楼层目标块（与 numbered 同口径：user/narrative/greeting 计数）
+			const targetBlock = blocks.find((b) => b.kind === "one" && b.floor === n);
+			if (!targetBlock) return false;
+			const roundIdx = rounds.findIndex((r) => r.blocks.some((b) => b.kind === "one" && b.floor === n));
+			if (roundIdx < 0) return false;
+			// 跳到历史楼层 = 明确离开贴底，防「贴底跟随」把窗口又拽回最新段
+			atBottomRef.current = false;
+			setAtBottom(false);
+			if (windowingEnabled && totalRounds > roundWindowSize) {
+				const clamped = Math.max(0, Math.min(roundIdx, maxWindowTop));
+				if (effectiveWindowTop > clamped || effectiveWindowTop + roundWindowSize <= roundIdx) {
+					// 目标楼层不在渲染窗口内：先移窗口，渲染完成后由下方 layout effect 滚动定位
+					pendingFloorRef.current = n;
+					setWindowTop(clamped);
+					return true;
+				}
+			}
+			// 已在渲染区间内（或未启用窗口化）：直接滚动到目标楼层元素
+			const el = listRef.current;
+			const hit = el?.querySelector<HTMLElement>(`[data-floor="${n}"]`);
+			if (hit) hit.scrollIntoView({ behavior: "smooth", block: "center" });
+			return true;
+		},
+		[blocks, rounds, windowingEnabled, totalRounds, roundWindowSize, effectiveWindowTop, maxWindowTop],
+	);
+
+	// /floor 窗口移动后的滚动（layout 阶段执行，避免渲染后闪烁/跳动）
+	useLayoutEffect(() => {
+		const n = pendingFloorRef.current;
+		if (n == null) return;
+		pendingFloorRef.current = null;
+		const el = listRef.current;
+		const hit = el?.querySelector<HTMLElement>(`[data-floor="${n}"]`);
+		if (hit) hit.scrollIntoView({ behavior: "smooth", block: "center" });
+	}, [visibleRounds, effectiveWindowTop]);
 
 	// 平移锚定：窗口滑动后按锚块 offsetTop 差值修正 scrollTop，视口内容不跳动；
 	// 贴底时窗口因新增回合移动 → 保持停在最新底部。既有 atBottomRef 跟随逻辑不动。
 	useLayoutEffect(() => {
+		// 有效窗口首回合同步进 ref（滚动/滚轮事件在布局阶段就读到本轮最新值，杜绝陈旧导致的竞态跳窗）
+		effectiveWindowTopRef.current = effectiveWindowTop;
 		const el = listRef.current;
 		if (!el) return;
 		if (pendingAnchorRef.current) {
@@ -1442,10 +1491,15 @@ export default function App() {
 		if (atBottomRef.current) el.scrollTop = el.scrollHeight;
 	}, [effectiveWindowTop]);
 
-	// 有效窗口与 windowTop 状态追平：贴底派生后同步，避免退出贴底时窗口跳变
+	// 贴底跟随：仅当用户位于底部时，让 windowTop 顺势前移到 maxWindowTop（新增回合保持最新在视口内）；
+	// 离开底部（上翻历史）后不再改动 windowTop → 退底不再被强拽回最新段（根治「跳回 #30」）。
+	// 注意：不再用 effectiveWindowTop(=windowTop) 回写 windowTop，避免贴底态把用户浏览位置一并吞掉。
 	useEffect(() => {
-		setWindowTop((t) => (t === effectiveWindowTop ? t : effectiveWindowTop));
-	}, [effectiveWindowTop]);
+		if (!atBottom) return;
+		if (windowingEnabled && totalRounds > roundWindowSize) {
+			setWindowTop((t) => (t === maxWindowTop ? t : maxWindowTop));
+		}
+	}, [atBottom, windowingEnabled, totalRounds, roundWindowSize, maxWindowTop]);
 
 	// 设置面板变更即时生效：监听自定义事件，重读 localStorage 更新 N/M
 	useEffect(() => {
@@ -1500,6 +1554,21 @@ export default function App() {
 		} else if (/^\/line\s*$/i.test(typed) && pending.length === 0) {
 			setCenterMenu(null);
 			openLeft("worldline");
+		} else if (/^\/floor\b/i.test(typed)) {
+			// /floor N：纯界面跳转（仅滚动定位，不发送剧情消息）
+			const fm = /^\/floor\s+(\d+)\s*$/i.exec(typed);
+			if (!fm) {
+				pushToast("warning", "用法：/floor <楼层号>（如 /floor 12）");
+			} else {
+				const n = Number(fm[1]);
+				if (!Number.isInteger(n) || n < 1) {
+					pushToast("warning", "楼层号应为正整数，如 /floor 12");
+				} else if (!jumpToFloor(n)) {
+					pushToast("warning", `找不到楼层 #${n}`);
+				} else {
+					pushToast("info", `已跳转到 #${n} 楼`);
+				}
+			}
 		} else {
 			ws.send({ type: "prompt", text });
 			// 场外标记 → server 会改道助手会话：这边顺手展开右栏，让回复有地方落
@@ -1510,10 +1579,12 @@ export default function App() {
 		}
 		setInput("");
 		setPending([]);
-		atBottomRef.current = true;
-		setAtBottom(true);
+		if (!/^\/floor\b/i.test(typed)) {
+			atBottomRef.current = true;
+			setAtBottom(true);
+		}
 		if (inputRef.current) inputRef.current.style.height = "auto";
-	}, [input, pending, conn, ws, openStoreModal, openRight]);
+	}, [input, pending, conn, ws, openStoreModal, openRight, jumpToFloor, pushToast]);
 
 	// 卡 HTML（如 Living With Slaves 开场表单）调用 triggerSlash(`/send …|/trigger`)
 	// 须接到输入框 / WS，否则界面显示「档案已发送」但聊天栏空白

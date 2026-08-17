@@ -106,6 +106,12 @@ export const RP_COMMANDS: CommandMeta[] = [
 		description: "切换角色扮演模式（关闭后恢复 coding 工具）",
 		takesArgs: false,
 	},
+	{
+		name: "floor",
+		usage: "/floor <楼层号>",
+		description: "跳转到指定楼层（仅滚动定位，不发剧情消息）",
+		takesArgs: true,
+	},
 ];
 
 export const findCommand = (name: string): CommandMeta | undefined => RP_COMMANDS.find((c) => c.name === name);

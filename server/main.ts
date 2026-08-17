@@ -4186,6 +4186,12 @@ const handlePrompt = async (text: string) => {
 		return;
 	}
 
+	// /floor：纯界面跳转命令（Web 端本地拦截；卡片桥等误发时兜底提示，不进模型）
+	if (/^\/floor(?:\s+\d+)?\s*$/i.test(trimmed)) {
+		broadcast({ type: "notify", level: "info", text: "/floor 是界面跳转命令，请在 Web 输入框使用：/floor <楼层号>" });
+		return;
+	}
+
 	// 2026-07-18 合流：主框一律进剧情侧；// 与整段括号不再硬改道。
 	// 2026-08-02 起叙事回合走台上引擎（PLAN-RP-HARNESS R1）；斜杠命令仍经 pi 会话执行。
 
